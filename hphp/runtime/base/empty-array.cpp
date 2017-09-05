@@ -123,7 +123,12 @@ member_lval EmptyArray::MakePackedInl(TypedValue tv) {
     MM().mallocSmallIndex(PackedArray::SmallSizeIndex)
   );
   ad->initHeader_16(
-    HeaderKind::Packed, InitialValue, PackedArray::SmallSizeIndex
+    HeaderKind::Packed,
+    InitialValue,
+    PackedArray::packSizeIndexAndDV(
+      PackedArray::SmallSizeIndex,
+      ArrayData::kNotDVArray
+    )
   );
   ad->m_sizeAndPos = 1; // size=1, pos=0
 
@@ -227,7 +232,7 @@ ArrayData* EmptyArray::SetWithRefInt(ArrayData* ad, int64_t k,
     raiseHackArrCompatRefBind(k);
   }
   auto const lval = LvalInt(ad, k, copy);
-  tvSetWithRef(v, *lval.tv());
+  tvSetWithRef(v, *lval.tv_ptr());
   return lval.arr_base();
 }
 
@@ -237,7 +242,7 @@ ArrayData* EmptyArray::SetWithRefStr(ArrayData* ad, StringData* k,
     raiseHackArrCompatRefBind(k);
   }
   auto const lval = LvalStr(ad, k, copy);
-  tvSetWithRef(v, *lval.tv());
+  tvSetWithRef(v, *lval.tv_ptr());
   return lval.arr_base();
 }
 

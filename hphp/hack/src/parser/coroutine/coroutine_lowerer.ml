@@ -11,15 +11,14 @@ module CoroutineMethodLowerer = Coroutine_method_lowerer
 module CoroutineStateMachineGenerator = Coroutine_state_machine_generator
 module CoroutineSyntax = Coroutine_syntax
 module CoroutineTypeLowerer = Coroutine_type_lowerer
-module EditableSyntax = Full_fidelity_editable_syntax
-module EditableToken = Full_fidelity_editable_token
+module Syntax = Full_fidelity_editable_positioned_syntax
 module List = Core_list
-module Rewriter = Full_fidelity_rewriter.WithSyntax(EditableSyntax)
+module Rewriter = Full_fidelity_rewriter.WithSyntax(Syntax)
 module SourceText = Full_fidelity_source_text
 module SyntaxTree = Full_fidelity_syntax_tree
 
 open CoroutineSyntax
-open EditableSyntax
+open Syntax
 open Coroutine_type_lowerer
 
 (**
@@ -159,7 +158,7 @@ let lower_coroutine_functions_and_types
         current_node parents None in
       let (closure_syntax, new_function_syntax) = lower_coroutine_function
         context header_node function_body function_node in
-      ((closure_syntax :: closures, lambda_count),
+      (((Option.to_list closure_syntax) @ closures, lambda_count),
         Rewriter.Result.Replace new_function_syntax)
   | LambdaExpression ({
     lambda_coroutine;
@@ -172,7 +171,7 @@ let lower_coroutine_functions_and_types
     let lambda_body = fix_up_lambda_body lambda_body in
     let (lambda, closure_syntax) =
       lower_coroutine_lambda context lambda_signature lambda_body lambda in
-    ((closure_syntax :: closures, (lambda_count + 1)),
+    (((Option.to_list closure_syntax) @ closures, (lambda_count + 1)),
       Rewriter.Result.Replace lambda)
   | AnonymousFunction ({
     anonymous_coroutine_keyword;
@@ -181,7 +180,7 @@ let lower_coroutine_functions_and_types
       let context = Coroutine_context.make_from_context
         current_node parents (Some lambda_count) in
       let (anon, closure_syntax) = lower_coroutine_anon context anon in
-      ((closure_syntax :: closures, (lambda_count + 1)),
+      (((Option.to_list closure_syntax) @ closures, (lambda_count + 1)),
         Rewriter.Result.Replace anon)
   | MethodishDeclaration ({
       methodish_function_decl_header = {
@@ -204,7 +203,7 @@ let lower_coroutine_functions_and_types
         method_node
         new_header_node
         new_body in
-    ((closure_syntax :: closures, lambda_count),
+    (((Option.to_list closure_syntax) @ closures, lambda_count),
       Rewriter.Result.Replace new_method_syntax)
   | ClosureTypeSpecifier ({ closure_coroutine; _; } as type_node)
     when not @@ is_missing closure_coroutine ->
@@ -253,12 +252,8 @@ let rewrite_script closures root =
     | _ -> failwith "How did we get a root that is not a script?"
     end
 
-let lower_coroutines syntax_tree =
-  let root = from_tree syntax_tree in
+let lower_coroutines root =
   let ((closures, _), root) = Rewriter.parented_aggregating_rewrite_post
     lower_coroutine_functions_and_types root ([], 0) in
   root
     |> rewrite_script (List.rev closures)
-    |> text
-    |> SourceText.make
-    |> SyntaxTree.make

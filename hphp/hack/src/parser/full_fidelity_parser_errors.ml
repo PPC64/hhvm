@@ -17,8 +17,11 @@ module TokenKind = Full_fidelity_token_kind
 
 open PositionedSyntax
 
+type namespace_type = Unspecified | Bracketed | Unbracketed
+
 type accumulator = {
   errors : SyntaxError.t list;
+  namespace_type : namespace_type;
 }
 
 (* Turns a syntax node into a list of nodes; if it is a separated syntax
@@ -349,6 +352,9 @@ let xhp_errors node _parents =
     (is_bad_xhp_attribute_name
     (PositionedSyntax.text attr.xhp_attribute_name)) ->
       [ make_error_from_node attr.xhp_attribute_name SyntaxError.error2002 ]
+  |  XHPEnumType enumType when
+    (is_missing enumType.xhp_enum_values) ->
+      [ make_error_from_node enumType.xhp_enum_values SyntaxError.error2055 ]
   | _ -> [ ]
 
 let classish_duplicate_modifiers node =
@@ -609,7 +615,7 @@ let abstract_with_initializer cd_node parents =
   is_abstract && has_initializer
 
 
-let methodish_errors node parents =
+let methodish_errors node parents is_hack =
   match syntax node with
   (* TODO how to narrow the range of error *)
   | FunctionDeclarationHeader { function_parameter_list; function_type; _} ->
@@ -632,6 +638,10 @@ let methodish_errors node parents =
     let errors =
       produce_error_for_header errors class_constructor_has_static header_node
       [node] SyntaxError.error2009 modifiers in
+    let errors =
+      let missing_modifier is_hack modifiers = is_hack && is_missing modifiers in
+      produce_error errors (missing_modifier is_hack) modifiers
+      SyntaxError.error2054 header_node in
     let errors =
       produce_error_for_header errors
       class_destructor_has_non_visibility_modifier header_node [node]
@@ -743,10 +753,19 @@ let statement_errors node parents =
   | Some (error_node, error_message) ->
     [ make_error_from_node error_node error_message ]
 
-let property_errors node is_strict =
+let missing_property_check is_strict p = is_strict && is_missing (p.property_type)
+
+let invalid_var_check is_hack p = is_hack && (is_var p.property_modifiers)
+
+let property_errors node is_strict is_hack =
   match syntax node with
-  | PropertyDeclaration p when is_strict && is_missing (p.property_type) ->
-      [ make_error_from_node node SyntaxError.error2001 ]
+  | PropertyDeclaration p ->
+      let errors = [] in
+      let errors = produce_error errors (missing_property_check is_strict) p
+                   SyntaxError.error2001 node in
+      let errors = produce_error errors (invalid_var_check is_hack) p
+                   SyntaxError.error2053 p.property_modifiers in
+      errors
   | _ -> [ ]
 
 let expression_errors node parents is_hack =
@@ -887,14 +906,36 @@ let const_decl_errors node parents =
     errors
   | _ -> [ ]
 
+let mixed_namespace_errors node namespace_type =
+  match syntax node with
+  | NamespaceBody { namespace_left_brace; namespace_right_brace; _ } ->
+    let errors = if namespace_type = Unbracketed then
+        let s = start_offset namespace_left_brace in
+        let e = end_offset namespace_right_brace in
+        [ SyntaxError.make s e SyntaxError.error2052 ]
+      else [ ] in
+    let namespace_type =
+      if namespace_type = Unspecified then Bracketed else namespace_type in
+    { errors; namespace_type }
+  | NamespaceEmptyBody { namespace_semicolon; _ } ->
+    let errors = if namespace_type = Bracketed then
+        let s = start_offset namespace_semicolon in
+        let e = end_offset namespace_semicolon in
+        [ SyntaxError.make s e SyntaxError.error2052 ]
+      else [ ] in
+    let namespace_type =
+      if namespace_type = Unspecified then Unbracketed else namespace_type in
+    { errors; namespace_type }
+  | _ -> { errors = [ ]; namespace_type }
+
 let find_syntax_errors node is_strict is_hack =
   let folder acc node parents =
     let param_errs = parameter_errors node parents is_strict in
     let func_errs = function_errors node parents is_strict in
     let xhp_errs = xhp_errors node parents in
     let statement_errs = statement_errors node parents in
-    let methodish_errs = methodish_errors node parents in
-    let property_errs = property_errors node is_strict in
+    let methodish_errs = methodish_errors node parents is_hack in
+    let property_errs = property_errors node is_strict is_hack in
     let expr_errs = expression_errors node parents is_hack in
     let require_errs = require_errors node parents in
     let classish_errors = classish_errors node parents in
@@ -902,10 +943,13 @@ let find_syntax_errors node is_strict is_hack =
     let alias_errors = alias_errors node in
     let group_use_errors = group_use_errors node in
     let const_decl_errors = const_decl_errors node parents in
+    let mixed_namespace_acc =
+      mixed_namespace_errors node acc.namespace_type in
     let errors = acc.errors @ param_errs @ func_errs @
       xhp_errs @ statement_errs @ methodish_errs @ property_errs @
       expr_errs @ require_errs @ classish_errors @ type_errors @ alias_errors @
-      group_use_errors @ const_decl_errors in
-    { errors } in
-  let acc = SyntaxUtilities.parented_fold_pre folder { errors = [] } node in
+      group_use_errors @ const_decl_errors @ mixed_namespace_acc.errors in
+    { errors; namespace_type = mixed_namespace_acc.namespace_type } in
+  let acc = SyntaxUtilities.parented_fold_pre folder
+    { errors = []; namespace_type = Unspecified } node in
   List.sort SyntaxError.compare acc.errors

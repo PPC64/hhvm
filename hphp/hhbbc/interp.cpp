@@ -352,7 +352,8 @@ void in(ISS& env, const bc::AddElemC& /*op*/) {
   auto const v = popC(env);
   auto const k = popC(env);
 
-  auto const outTy = [&] (Type ty) -> folly::Optional<std::pair<Type,bool>> {
+  auto const outTy = [&] (Type ty) ->
+    folly::Optional<std::pair<Type,ThrowMode>> {
     if (ty.subtypeOf(TArr)) {
       return array_set(std::move(ty), k, v);
     }
@@ -368,7 +369,7 @@ void in(ISS& env, const bc::AddElemC& /*op*/) {
 
   if (outTy->first.subtypeOf(TBottom)) {
     unreachable(env);
-  } else if (outTy->second) {
+  } else if (outTy->second == ThrowMode::None) {
     nothrow(env);
     if (env.collect.trackConstantArrays) constprop(env);
   }
@@ -390,7 +391,7 @@ void in(ISS& env, const bc::AddNewElemC&) {
 
   auto const outTy = [&] (Type ty) -> folly::Optional<Type> {
     if (ty.subtypeOf(TArr)) {
-      return array_newelem(std::move(ty), std::move(v));
+      return array_newelem(std::move(ty), std::move(v)).first;
     }
     return folly::none;
   }(popC(env));
@@ -671,38 +672,30 @@ void in(ISS& env, const bc::Xor&) {
   });
 }
 
-void castBoolImpl(ISS& env, bool negate) {
+void castBoolImpl(ISS& env, const Type& t, bool negate) {
   nothrow(env);
   constprop(env);
 
-  auto const t = popC(env);
-  auto const v = tv(t);
-  if (v) {
-    auto cell = eval_cell([&] {
-      return make_tv<KindOfBoolean>(cellToBool(*v) != negate);
-    });
-    always_assert_flog(!!cell, "cellToBool should never throw");
-    return push(env, std::move(*cell));
-  }
-
-  if (t.subtypeOfAny(TArrE, TVecE, TDictE, TKeysetE)) {
-    return push(env, negate ? TTrue : TFalse);
-  }
-  if (t.subtypeOfAny(TArrN, TVecN, TDictN, TKeysetN)) {
-    return push(env, negate ? TFalse : TTrue);
+  auto const e = emptiness(t);
+  switch (e) {
+    case Emptiness::Empty:
+    case Emptiness::NonEmpty:
+      return push(env, (e == Emptiness::Empty) == negate ? TTrue : TFalse);
+    case Emptiness::Maybe:
+      break;
   }
 
   push(env, TBool);
 }
 
 void in(ISS& env, const bc::Not&) {
-  castBoolImpl(env, true);
+  castBoolImpl(env, popC(env), true);
 }
 
 void in(ISS& env, const bc::CastBool&) {
   auto const t = topC(env);
   if (t.subtypeOf(TBool)) return reduce(env, bc::Nop {});
-  castBoolImpl(env, false);
+  castBoolImpl(env, popC(env), false);
 }
 
 void in(ISS& env, const bc::CastInt&) {
@@ -810,18 +803,18 @@ void in(ISS& /*env*/, const bc::Jmp&) {
 template<bool Negate, class JmpOp>
 void jmpImpl(ISS& env, const JmpOp& op) {
   nothrow(env);
-  auto const t1 = popC(env);
-  auto const v1 = tv(t1);
-  if (v1) {
-    auto const taken = !cellToBool(*v1) != Negate;
-    if (taken) {
-      jmp_nofallthrough(env);
-      env.propagate(op.target, env.state);
-    } else {
-      jmp_nevertaken(env);
-    }
+  auto const e = emptiness(popC(env));
+  if (e == (Negate ? Emptiness::NonEmpty : Emptiness::Empty)) {
+    jmp_nofallthrough(env);
+    env.propagate(op.target, env.state);
     return;
   }
+
+  if (e == (Negate ? Emptiness::Empty : Emptiness::NonEmpty)) {
+    jmp_nevertaken(env);
+    return;
+  }
+
   if (next_real_block(*env.ctx.func, env.blk.fallthrough) ==
       next_real_block(*env.ctx.func, op.target)) {
     jmp_nevertaken(env);
@@ -1062,7 +1055,8 @@ void group(ISS& env, const bc::MemoGet& get, const bc::IsUninit& /*isuninit*/,
 template<class JmpOp>
 void group(ISS& env, const bc::CGetL& cgetl, const JmpOp& jmp) {
   auto const loc = derefLoc(env, cgetl.loc1);
-  if (tv(loc)) return impl(env, cgetl, jmp);
+  auto const flag = emptiness(loc);
+  if (flag != Emptiness::Maybe) return impl(env, cgetl, jmp);
 
   if (!locCouldBeUninit(env, cgetl.loc1)) nothrow(env);
 
@@ -1400,7 +1394,7 @@ void in(ISS& env, const bc::GetMemoKeyL& op) {
   // stay in sync with the interpreter and JIT.
   using MK = MemoKeyConstraint;
   auto const mkc = [&] {
-    if (!options.HardTypeHints) return MK::None;
+    if (!RuntimeOption::EvalHardTypeHints) return MK::None;
     if (op.loc1 >= env.ctx.func->params.size()) return MK::None;
     auto tc = env.ctx.func->params[op.loc1].typeConstraint;
     if (tc.type() == AnnotType::Object) {
@@ -1495,11 +1489,7 @@ void in(ISS& env, const bc::IssetL& op) {
 void in(ISS& env, const bc::EmptyL& op) {
   nothrow(env);
   constprop(env);
-  if (!locCouldBeUninit(env, op.loc1)) {
-    return impl(env, bc::CGetL { op.loc1 }, bc::Not {});
-  }
-  locAsCell(env, op.loc1); // read the local
-  push(env, TBool);
+  castBoolImpl(env, locAsCell(env, op.loc1), true);
 }
 
 void in(ISS& env, const bc::EmptyS& op) {
@@ -2830,13 +2820,13 @@ void in(ISS& env, const bc::OODeclExists& op) {
 void in(ISS& env, const bc::VerifyParamType& op) {
   if (env.ctx.func->isMemoizeImpl &&
       !locCouldBeRef(env, op.loc1) &&
-      options.HardTypeHints) {
+      RuntimeOption::EvalHardTypeHints) {
     // a MemoizeImpl's params have already been checked by the wrapper
     return reduce(env, bc::Nop {});
   }
 
   locAsCell(env, op.loc1);
-  if (!options.HardTypeHints) return;
+  if (!RuntimeOption::EvalHardTypeHints) return;
 
   /*
    * In HardTypeHints mode, we assume that if this opcode doesn't
@@ -2851,7 +2841,7 @@ void in(ISS& env, const bc::VerifyParamType& op) {
    * on.
    */
   auto const constraint = env.ctx.func->params[op.loc1].typeConstraint;
-  if (!options.CheckThisTypeHints && constraint.isThis()) {
+  if (!RuntimeOption::EvalCheckThisTypeHints && constraint.isThis()) {
     return;
   }
   if (constraint.hasConstraint() && !constraint.isTypeVar() &&
@@ -2877,15 +2867,15 @@ void in(ISS& env, const bc::VerifyRetTypeC& /*op*/) {
     return;
   }
 
-  // If HardReturnTypeHints is false OR if the constraint is soft,
+  // If CheckReturnTypeHints < 3 OR if the constraint is soft,
   // then there are no optimizations we can safely do here, so
   // just leave the top of stack as is.
-  if (!options.HardReturnTypeHints || constraint.isSoft()
-      || (!options.CheckThisTypeHints && constraint.isThis())) {
+  if (RuntimeOption::EvalCheckReturnTypeHints < 3 || constraint.isSoft()
+      || (!RuntimeOption::EvalCheckThisTypeHints && constraint.isThis())) {
     return;
   }
 
-  // If we reach here, then HardReturnTypeHints is true AND the constraint
+  // If we reach here, then CheckReturnTypeHints >= 3 AND the constraint
   // is not soft.  We can safely assume that either VerifyRetTypeC will
   // throw or it will produce a value whose type is compatible with the
   // return type constraint.
@@ -3254,20 +3244,31 @@ StepFlags interpOps(Interp& interp,
   auto const numPushed   = iter->numPush();
   interpStep(env, iter, stop);
 
-  auto outputs_constant = [&] {
+  auto fix_const_outputs = [&] {
     auto elems = &interp.state.stack.back();
-    for (auto i = size_t{0}; i < numPushed; ++i, --elems) {
-      if (!tv(elems->type)) return false;
+    constexpr auto numCells = 4;
+    Cell cells[numCells];
+
+    auto i = size_t{0};
+    while (i < numPushed) {
+      if (i < numCells) {
+        auto const v = tv(elems->type);
+        if (!v) return false;
+        cells[i] = *v;
+      } else if (!is_scalar(elems->type)) {
+        return false;
+      }
+      ++i;
+      --elems;
+    }
+    while (++elems, i--) {
+      elems->type = from_cell(i < numCells ?
+                              cells[i] : *tv(elems->type));
     }
     return true;
   };
 
-  if (options.ConstantProp && flags.canConstProp && outputs_constant()) {
-    auto elems = &interp.state.stack.back();
-    for (auto i = size_t{0}; i < numPushed; ++i, --elems) {
-      auto& ty = elems->type;
-      ty = from_cell(*tv(ty));
-    }
+  if (options.ConstantProp && flags.canConstProp && fix_const_outputs()) {
     if (flags.wasPEI) {
       FTRACE(2, "   nothrow (due to constprop)\n");
       flags.wasPEI = false;

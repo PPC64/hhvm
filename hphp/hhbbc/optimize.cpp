@@ -377,11 +377,20 @@ bool propagate_constants(const Bytecode& op, const State& state, Gen gen) {
   auto const numPop  = op.numPop();
   auto const numPush = op.numPush();
   auto const stkSize = state.stack.size();
+  constexpr auto numCells = 4;
+  Cell constVals[numCells];
 
   // All outputs of the instruction must have constant types for this
   // to be allowed.
   for (auto i = size_t{0}; i < numPush; ++i) {
-    if (!tv(state.stack[stkSize - i - 1].type)) return false;
+    auto const& ty = state.stack[stkSize - i - 1].type;
+    if (i < numCells) {
+      auto const v = tv(ty);
+      if (!v) return false;
+      constVals[i] = *v;
+    } else if (!is_scalar(ty)) {
+      return false;
+    }
   }
 
   auto const slot = visit(op, ReadClsRefSlotVisitor{});
@@ -413,8 +422,9 @@ bool propagate_constants(const Bytecode& op, const State& state, Gen gen) {
   }
 
   for (auto i = size_t{0}; i < numPush; ++i) {
-    auto const v = tv(state.stack[stkSize - i - 1].type);
-    gen(gen_constant(*v));
+    auto const v = i < numCells ?
+      constVals[i] : *tv(state.stack[stkSize - i - 1].type);
+    gen(gen_constant(v));
 
     // Special case for FPass* instructions.  We just put a C on the
     // stack, so we need to get it to be an F.
@@ -489,17 +499,17 @@ void first_pass(const Index& index,
   if (options.ConstantProp) collect.propagate_constants = propagate_constants;
 
   auto peephole = make_peephole(newBCs, index, ctx);
-  std::vector<Op> srcStack(state.stack.size(), Op::Nop);
+  std::vector<std::pair<Op,bool>> srcStack(state.stack.size(),
+                                           {Op::Nop, false});
 
   for (auto& op : blk->hhbcs) {
     FTRACE(2, "  == {}\n", show(ctx.func, op));
 
-    auto const stateIn = state; // Peephole expects input eval state.
-    auto gen = [&,srcStack] (const Bytecode& newBC) {
+    auto gen = [&] (const Bytecode& newBC) {
       const_cast<Bytecode&>(newBC).srcLoc = op.srcLoc;
       FTRACE(2, "   + {}\n", show(ctx.func, newBC));
       if (options.Peephole) {
-        peephole.append(newBC, stateIn, srcStack);
+        peephole.append(newBC, srcStack);
       } else {
         newBCs.push_back(newBC);
       }
@@ -507,17 +517,23 @@ void first_pass(const Index& index,
 
     auto const flags = step(interp, op);
 
-    if (op.op == Op::CGetL2) {
-      srcStack.insert(srcStack.end() - 1, op.op);
-    } else {
-      FTRACE(2, "   srcStack: pop {} push {}\n", op.numPop(), op.numPush());
-      for (int i = 0; i < op.numPop(); i++) {
-        srcStack.pop_back();
+    // The peephole wants the old values of srcStack, so defer the update to the
+    // end of the loop.
+    SCOPE_EXIT {
+      if (op.op == Op::CGetL2) {
+        srcStack.emplace(srcStack.end() - 1,
+                         op.op, (state.stack.end() - 2)->type.subtypeOf(TStr));
+      } else {
+        FTRACE(2, "   srcStack: pop {} push {}\n", op.numPop(), op.numPush());
+        for (int i = 0; i < op.numPop(); i++) {
+          srcStack.pop_back();
+        }
+        for (int i = 0; i < op.numPush(); i++) {
+          srcStack.emplace_back(
+            op.op, state.stack[srcStack.size()].type.subtypeOf(TStr));
+        }
       }
-      for (int i = 0; i < op.numPush(); i++) {
-        srcStack.push_back(op.op);
-      }
-    }
+    };
 
     auto genOut = [&] (const Bytecode* op) -> Op {
       if (options.ConstantProp && flags.canConstProp) {
@@ -596,7 +612,6 @@ void first_pass(const Index& index,
 
   if (it != fpiStack.end()) {
     fpiStack.erase(it, fpiStack.end());
-    ainfo.builtinsRemoved = true;
   }
 }
 
@@ -651,10 +666,6 @@ void do_optimize(const Index& index, FuncAnalysis&& ainfo) {
   do {
     again = false;
     visit_blocks_mutable("first pass", index, ainfo, first_pass);
-    if (ainfo.builtinsRemoved) {
-      again = true;
-      ainfo.builtinsRemoved = false;
-    }
 
     FTRACE(10, "{}", show(*ainfo.ctx.func));
     /*
@@ -732,7 +743,7 @@ void do_optimize(const Index& index, FuncAnalysis&& ainfo) {
         tc.isSoft() ||
         tc.isTypeVar() ||
         tc.isTypeConstant() ||
-        (tc.isThis() && !options.CheckThisTypeHints) ||
+        (tc.isThis() && !RuntimeOption::EvalCheckThisTypeHints) ||
         tc.type() != AnnotType::Object) {
       return;
     }
@@ -760,13 +771,13 @@ void do_optimize(const Index& index, FuncAnalysis&& ainfo) {
     if (t.subtypeOf(TKeyset))   return retype(AnnotType::Keyset);
   };
 
-  if (options.HardTypeHints) {
+  if (RuntimeOption::EvalHardTypeHints) {
     for (auto& p : func->params) {
       fixTypeConstraint(p.typeConstraint, TTop);
     }
   }
 
-  if (options.HardReturnTypeHints) {
+  if (RuntimeOption::EvalCheckReturnTypeHints >= 3) {
     auto const rtype = [&] {
       if (!func->isAsync) return ainfo.inferredReturn;
       if (!is_specialized_wait_handle(ainfo.inferredReturn)) return TGen;

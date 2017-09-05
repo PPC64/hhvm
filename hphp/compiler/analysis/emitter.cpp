@@ -3817,7 +3817,7 @@ void EmitterVisitor::visit(FileScopePtr file) {
     mainReturn.m_type = kInvalidDataType;
     bool notMergeOnly = false;
 
-    if (Option::UseHHBBC && SystemLib::s_inited) notMergeOnly = true;
+    if (RuntimeOption::EvalUseHHBBC && SystemLib::s_inited) notMergeOnly = true;
 
     auto region = createRegion(stmts, Region::Kind::Global);
     enterRegion(region);
@@ -7986,7 +7986,7 @@ buildMethodAttrs(MethodStatementPtr meth, FuncEmitter* fe, bool /*top*/) {
  */
 static TypeConstraint
 determine_type_constraint_from_annot(const TypeAnnotationPtr annot,
-                                     bool is_return) {
+                                     bool is_return, bool was_soft) {
   if (annot) {
     auto flags = TypeConstraint::ExtendedHint | TypeConstraint::HHType;
 
@@ -8007,7 +8007,7 @@ determine_type_constraint_from_annot(const TypeAnnotationPtr annot,
     if (annot->isNullable()) {
       flags = flags | TypeConstraint::Nullable;
     }
-    if (annot->isSoft()) {
+    if (annot->isSoft() || was_soft) {
       flags = flags | TypeConstraint::Soft;
     }
     if (!is_return &&
@@ -8043,7 +8043,7 @@ determine_type_constraint(const ParameterExpressionPtr& par) {
     };
   }
 
-  return determine_type_constraint_from_annot(par->annotation(), false);
+  return determine_type_constraint_from_annot(par->annotation(), false, false);
 }
 
 void EmitterVisitor::emitPostponedMeths() {
@@ -8280,7 +8280,7 @@ Attr EmitterVisitor::bindNativeFunc(MethodStatementPtr meth,
   if (nif && !(nativeAttrs & Native::AttrZendCompat)) {
     if (retType) {
       fe->retTypeConstraint =
-        determine_type_constraint_from_annot(retType, true);
+        determine_type_constraint_from_annot(retType, true, false);
     } else {
       fe->retTypeConstraint = TypeConstraint {
         s_Void.get(),
@@ -8361,6 +8361,7 @@ void EmitterVisitor::emitMethodMetadata(MethodStatementPtr meth,
   fe->retUserType = makeStaticString(meth->getReturnTypeConstraint());
 
   auto annot = meth->retTypeAnnotation();
+  auto const wasSoft = annot && annot->isSoft();
   // For a non-generator async function with a return annotation of the form
   // "Awaitable<T>", we set m_retTypeConstraint to T. For all other async
   // functions, we leave m_retTypeConstraint empty.
@@ -8369,18 +8370,17 @@ void EmitterVisitor::emitMethodMetadata(MethodStatementPtr meth,
     // "WaitHandle" and that it has at most one type parameter
     assert(annot->isAwaitable() || annot->isWaitHandle());
     assert(annot->numTypeArgs() <= 1);
-    bool isSoft = annot->isSoft();
     // If annot was "Awaitable" with no type args, getTypeArg() will return an
     // empty annotation
     annot = annot->getTypeArg(0);
-    // If the original annotation was soft, make sure we preserve the softness
-    if (annot && isSoft) annot->setSoft();
   }
   // Ideally we should handle the void case in TypeConstraint::check. This
   // should however get done in a different diff, since it could impact
   // perf in a negative way (#3145038)
   if (annot && !annot->isVoid()) {
-    fe->retTypeConstraint = determine_type_constraint_from_annot(annot, true);
+    fe->retTypeConstraint = determine_type_constraint_from_annot(annot,
+                                                                 true,
+                                                                 wasSoft);
   }
 
   // add the original filename for flattened traits
@@ -9883,7 +9883,7 @@ Id EmitterVisitor::emitClass(Emitter& e,
   if (cNode->isEnum()) {
     auto cs = static_pointer_cast<ClassStatement>(is);
     auto const typeConstraint =
-      determine_type_constraint_from_annot(cs->getEnumBaseTy(), true);
+      determine_type_constraint_from_annot(cs->getEnumBaseTy(), true, false);
     pce->setEnumBaseTy(typeConstraint);
   }
 
@@ -11201,12 +11201,12 @@ void genText(const std::vector<std::unique_ptr<UnitEmitter>>& ues,
 
 void commitGlobalData(std::unique_ptr<ArrayTypeTable::Builder> arrTable) {
   auto gd                        = Repo::GlobalData{};
-  gd.UsedHHBBC                   = Option::UseHHBBC;
+  gd.UsedHHBBC                   = RuntimeOption::EvalUseHHBBC;
   gd.EnableHipHopSyntax          = RuntimeOption::EnableHipHopSyntax;
-  gd.HardTypeHints               = HHBBC::options.HardTypeHints;
-  gd.HardReturnTypeHints         = HHBBC::options.HardReturnTypeHints;
+  gd.HardTypeHints               = RuntimeOption::EvalHardTypeHints;
+  gd.HardReturnTypeHints         = RuntimeOption::EvalCheckReturnTypeHints >= 3;
   gd.HardPrivatePropInference    = true;
-  gd.DisallowDynamicVarEnvFuncs  = HHBBC::options.DisallowDynamicVarEnvFuncs;
+  gd.DisallowDynamicVarEnvFuncs  = RuntimeOption::DisallowDynamicVarEnvFuncs;
   gd.ElideAutoloadInvokes        = HHBBC::options.ElideAutoloadInvokes;
   gd.PHP7_IntSemantics           = RuntimeOption::PHP7_IntSemantics;
   gd.PHP7_ScalarTypes            = RuntimeOption::PHP7_ScalarTypes;
@@ -11217,6 +11217,7 @@ void commitGlobalData(std::unique_ptr<ArrayTypeTable::Builder> arrTable) {
   gd.EnableRenameFunction        = RuntimeOption::EvalJitEnableRenameFunction;
   gd.CheckThisTypeHints          = RuntimeOption::EvalCheckThisTypeHints;
   gd.HackArrCompatNotices        = RuntimeOption::EvalHackArrCompatNotices;
+  gd.EnableIntrinsicsExtension   = RuntimeOption::EnableIntrinsicsExtension;
   gd.InitialNamedEntityTableSize =
     RuntimeOption::EvalInitialNamedEntityTableSize;
   gd.InitialStaticStringTableSize =
@@ -11297,7 +11298,7 @@ void emitAllHHBC(AnalysisResultPtr&& ar) {
     emitters.clear();
   };
 
-  if (!Option::UseHHBBC && ues.size()) {
+  if (!RuntimeOption::EvalUseHHBBC && ues.size()) {
     commitSome(ues);
   }
 
@@ -11323,7 +11324,7 @@ void emitAllHHBC(AnalysisResultPtr&& ar) {
     if (ues.size()) commitSome(ues);
   };
 
-  if (Option::GenerateBinaryHHBC && !Option::UseHHBBC) {
+  if (Option::GenerateBinaryHHBC && !RuntimeOption::EvalUseHHBBC) {
     commitLoop();
   }
 
@@ -11333,13 +11334,13 @@ void emitAllHHBC(AnalysisResultPtr&& ar) {
   ar->finish();
   ar.reset();
 
-  if (!Option::GenerateBinaryHHBC || Option::UseHHBBC) {
-    s_ueq.fetch(Option::UseHHBBC ? ues : ues_to_print);
+  if (!Option::GenerateBinaryHHBC || RuntimeOption::EvalUseHHBBC) {
+    s_ueq.fetch(RuntimeOption::EvalUseHHBBC ? ues : ues_to_print);
   }
 
   s_ueq.reset();
 
-  if (!Option::UseHHBBC) {
+  if (!RuntimeOption::EvalUseHHBBC) {
     if (Option::GenerateBinaryHHBC) {
       commitGlobalData(std::unique_ptr<ArrayTypeTable::Builder>{});
     }
@@ -11412,8 +11413,6 @@ Unit* hphp_compiler_parse(const char* code, int codeLen, const MD5& md5,
                           const char* filename, Unit** releaseUnit) {
   if (UNLIKELY(!code)) {
     // Do initialization when code is null; see above.
-    HHBBC::options.HardReturnTypeHints =
-      RuntimeOption::EvalCheckReturnTypeHints >= 3;
     Option::RecordErrors = false;
     Option::ParseTimeOpts = false;
     Option::WholeProgram = false;

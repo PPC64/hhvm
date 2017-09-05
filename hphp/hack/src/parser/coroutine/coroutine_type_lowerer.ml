@@ -7,8 +7,8 @@
  * of patent rights can be found in the PATENTS file in the same directory.
  *)
 
- module Syntax = Full_fidelity_editable_syntax
- module Token = Full_fidelity_editable_token
+ module Syntax = Full_fidelity_editable_positioned_syntax
+ module Token = Syntax.Token
  module TokenKind = Full_fidelity_token_kind
  open Coroutine_syntax
  open Syntax
@@ -29,7 +29,7 @@ let is_void node =
   | _ -> false
 
 let rewrite_return_type return_type =
-  if is_missing return_type then mixed_type
+  if is_missing return_type then mixed_syntax
   else if is_void return_type then unit_type_syntax
   else return_type
 

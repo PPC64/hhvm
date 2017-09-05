@@ -109,6 +109,7 @@
 #include "hphp/runtime/vm/type-constraint.h"
 #include "hphp/runtime/vm/type-profile.h"
 #include "hphp/runtime/vm/unwind.h"
+#include "hphp/runtime/vm/workload-stats.h"
 
 #include "hphp/runtime/vm/jit/code-cache.h"
 #include "hphp/runtime/vm/jit/debugger.h"
@@ -3643,9 +3644,22 @@ OPTBLD_INLINE void iopUnsetM(intva_t nDiscard, MemberKey mk) {
 static OPTBLD_INLINE void setWithRefImpl(TypedValue key, TypedValue* value) {
   auto& mstate = vmMInstrState();
   if (UNLIKELY(RuntimeOption::EvalHackArrCompatNotices)) {
-    mstate.base = UNLIKELY(value->m_type == KindOfRef)
-      ? ElemD<MOpMode::Define, true, true>(mstate.tvRef, mstate.base, key)
-      : ElemD<MOpMode::Define, false, true>(mstate.tvRef, mstate.base, key);
+    mstate.base = [&] {
+      if (LIKELY(value->m_type != KindOfRef)) {
+        return ElemD<MOpMode::Define, false, true>(
+          mstate.tvRef, mstate.base, key
+        );
+      }
+
+      // See the comment in SetWithRefMLElem() for an explanation of this check
+      // and the notice suppressor below.
+      if (!mstate.base->m_data.parr->isGlobalsArray()) {
+        raiseHackArrCompatRefBind(key);
+      }
+
+      SuppressHackArrCompatNotices shacn;
+      return ElemD<MOpMode::Define, true, true>(mstate.tvRef, mstate.base, key);
+    }();
   } else {
     mstate.base = UNLIKELY(value->m_type == KindOfRef)
       ? ElemD<MOpMode::Define, true, false>(mstate.tvRef, mstate.base, key)
@@ -3939,7 +3953,7 @@ OPTBLD_INLINE void iopGetMemoKeyL(local_var loc) {
   // have. This scheme needs to agree with HHBBC and the JIT.
   using MK = MemoKeyConstraint;
   auto const mkc = [&]{
-    if (!RuntimeOption::RepoAuthoritative || !Repo::global().HardTypeHints) {
+    if (!RuntimeOption::EvalHardTypeHints) {
       return MK::None;
     }
     if (loc.index >= func->numParams()) return MK::None;
@@ -7140,6 +7154,8 @@ DispatchSwitch:
 }
 
 static void dispatch() {
+  WorkloadStats guard(WorkloadStats::InInterp);
+
   DEBUG_ONLY auto const retAddr = dispatchImpl<false>();
   assert(retAddr == nullptr);
 }

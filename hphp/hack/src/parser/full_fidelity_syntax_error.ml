@@ -189,3 +189,10 @@ let error2048 = "Expected group use prefix to end with '\\'"
 let error2049 = "A namespace use clause may not specify the kind here."
 let error2050 = "A concrete constant declaration must have an initializer."
 let error2051 = "An abstract constant declaration must not have an initializer."
+let error2052 = "Cannot mix bracketed namespace declarations with " ^
+  "unbracketed namespace declarations"
+let error2053 = "Use of 'var' as synonym for 'public' in declaration disallowed in Hack. " ^
+  "Use 'public' instead."
+let error2054 = "Method declarations require a visibility modifier " ^
+  "such as public, private or protected."
+let error2055 = "At least one enumerated item is expected."

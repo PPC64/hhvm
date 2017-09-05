@@ -78,6 +78,7 @@ const StaticString s_set("__set");
 const StaticString s_isset("__isset");
 const StaticString s_unset("__unset");
 const StaticString s_callStatic("__callStatic");
+const StaticString s_toBoolean("__toBoolean");
 const StaticString s_86ctor("86ctor");
 const StaticString s_86cinit("86cinit");
 const StaticString s_Closure("Closure");
@@ -442,7 +443,8 @@ struct ClassInfo {
     magicGet,
     magicSet,
     magicIsset,
-    magicUnset;
+    magicUnset,
+    magicBool;
 };
 
 using MagicMapInfo = struct {
@@ -453,6 +455,7 @@ using MagicMapInfo = struct {
 const std::vector<std::pair<SString,MagicMapInfo>> magicMethodMap {
   { s_call.get(),       { &ClassInfo::magicCall,       AttrNone } },
   { s_callStatic.get(), { &ClassInfo::magicCallStatic, AttrNone } },
+  { s_toBoolean.get(),  { &ClassInfo::magicBool,       AttrNone } },
   { s_get.get(),        { &ClassInfo::magicGet,   AttrNoOverrideMagicGet } },
   { s_set.get(),        { &ClassInfo::magicSet,   AttrNoOverrideMagicSet } },
   { s_isset.get(),      { &ClassInfo::magicIsset, AttrNoOverrideMagicIsset } },
@@ -548,6 +551,15 @@ bool Class::couldHaveMagicGet() const {
     [] (SString) { return true; },
     [] (borrowed_ptr<ClassInfo> cinfo) {
       return cinfo->magicGet.derivedHas;
+    }
+  );
+}
+
+bool Class::couldHaveMagicBool() const {
+  return val.match(
+    [] (SString) { return true; },
+    [] (borrowed_ptr<ClassInfo> cinfo) {
+      return cinfo->magicBool.derivedHas;
     }
   );
 }
@@ -1031,7 +1043,9 @@ bool build_cls_info(borrowed_ptr<ClassInfo> cinfo) {
 void add_system_constants_to_index(IndexData& index) {
   for (auto cnsPair : Native::getConstants()) {
     auto& c = index.constants[cnsPair.first];
-    auto t = cnsPair.second.m_type == KindOfUninit ?
+    assertx(cnsPair.second.m_type != KindOfUninit ||
+            cnsPair.second.dynamic());
+    auto t = cnsPair.second.dynamic() ?
       TInitCell : from_cell(cnsPair.second);
     c.func = nullptr;
     c.type = t;
@@ -1132,6 +1146,7 @@ void add_unit_to_index(IndexData& index, const php::Unit& unit) {
 
 struct NamingEnv {
   struct Define;
+  struct Seen;
 
   borrowed_ptr<ClassInfo> try_lookup(SString name) const {
     auto const it = names.find(name);
@@ -1144,16 +1159,49 @@ struct NamingEnv {
     return ret;
   }
 
+  // Return true when the name has been seen before.
+  // This is intended only for checking circular dependencies in
+  // pre-resolution time.
+  bool seen(SString name) const {
+    return names.count(name);
+  }
+
 private:
   ISStringToOne<ClassInfo> names;
+};
+
+struct NamingEnv::Seen {
+
+  // Add to the seen set.
+  explicit Seen(NamingEnv& env, SString name): env(env), name(name) {
+    ITRACE(3, "visiting {}\n", name);
+    assert(!env.seen(name));
+
+    // A name can not be simultaneously in "defined" and "visiting" state.
+    // When one reaches the "define" case, it is already preresolved, and thus
+    // it has been removed from the "visiting" set since we've done visiting it.
+    env.names[name] = nullptr;
+  }
+
+  // Remove from the seen set when going out-of-scope
+  ~Seen() {
+    env.names.erase(name);
+  }
+
+  // Prevent copying
+  Seen(const Seen&)            = delete;
+  Seen& operator=(const Seen&) = delete;
+
+private:
+  Trace::Indent indent;
+  NamingEnv& env;
+  SString name;
 };
 
 struct NamingEnv::Define {
   explicit Define(NamingEnv& env, SString n, borrowed_ptr<ClassInfo> ci,
                   borrowed_ptr<const php::Class> cls)
-    : env(env)
-    , n(n)
-  {
+      : env(env), n(n) {
     ITRACE(2, "defining {} for {}\n", n, cls->name);
     always_assert(!env.names.count(n));
     env.names[n] = ci;
@@ -1261,10 +1309,12 @@ void resolve_combinations(IndexData& index,
 void preresolve(IndexData& index, NamingEnv& env, SString clsName) {
   if (index.classInfo.count(clsName)) return;
 
-  // TODO(#3649211): we'll need to handle inheritance cycles here
-  // after hphpc is fixed not to just remove them.
-
   ITRACE(2, "preresolve: {}\n", clsName);
+  if (env.seen(clsName)) {
+    ITRACE(3, "Circular inheritance detected: {}\n", clsName);
+    return;
+  }
+  NamingEnv::Seen seen(env, clsName);
   {
     Trace::Indent indent;
     for (auto& kv : find_range(index.classes, clsName)) {
@@ -1307,7 +1357,13 @@ void define_func_family(IndexData& index, borrowed_ptr<ClassInfo> cinfo,
     family->possibleFuncs.push_back(finfo);
   }
 
-  std::sort(begin(family->possibleFuncs), end(family->possibleFuncs));
+  std::sort(begin(family->possibleFuncs), end(family->possibleFuncs),
+            [] (const FuncInfo* a, const FuncInfo* b) {
+              if (auto d = a->first->name->compare(b->first->name)) {
+                return d < 0;
+              }
+              return std::less<const void*>{}(a, b);
+            });
   family->possibleFuncs.erase(
     std::unique(begin(family->possibleFuncs), end(family->possibleFuncs)),
     end(family->possibleFuncs)
@@ -1570,20 +1626,39 @@ void compute_iface_vtables(IndexData& index) {
 }
 
 void mark_magic_on_parents(ClassInfo& cinfo, ClassInfo& derived) {
+  auto any = false;
   for (auto& kv : magicMethodMap) {
     if ((derived.*kv.second.pmem).thisHas) {
-      (cinfo.*kv.second.pmem).derivedHas = true;
+      auto& derivedHas = (cinfo.*kv.second.pmem).derivedHas;
+      if (!derivedHas) {
+        derivedHas = any = true;
+      }
     }
   }
-  if (cinfo.parent) return mark_magic_on_parents(*cinfo.parent, derived);
+  if (!any) return;
+  if (cinfo.parent) mark_magic_on_parents(*cinfo.parent, derived);
+  for (auto iface : cinfo.declInterfaces) {
+    mark_magic_on_parents(*const_cast<ClassInfo*>(iface), derived);
+  }
+}
+
+bool has_magic_method(borrowed_ptr<const ClassInfo> cinfo, SString name) {
+  if (name == s_toBoolean.get()) {
+    // note that "having" a magic method includes the possibility that
+    // a parent class has it. This can't happen for the collection
+    // classes, because they're all final; but for SimpleXMLElement,
+    // we need to search.
+    while (cinfo->parent) cinfo = cinfo->parent;
+    return has_magic_bool_conversion(cinfo->cls->name);
+  }
+  return cinfo->methods.find(name) != end(cinfo->methods);
 }
 
 void find_magic_methods(IndexData& index) {
   for (auto& cinfo : index.allClassInfos) {
-    auto& methods         = cinfo->methods;
     bool any = false;
     for (auto& kv : magicMethodMap) {
-      bool const found = methods.find(kv.first) != end(methods);
+      bool const found = has_magic_method(borrow(cinfo), kv.first);
       any = any || found;
       (cinfo.get()->*kv.second.pmem).thisHas = found;
     }
@@ -1703,8 +1778,7 @@ void check_invariants(borrowed_ptr<const ClassInfo> cinfo) {
     auto& info = cinfo->*kv.second.pmem;
 
     // Magic method flags should be consistent with the method table.
-    always_assert(info.thisHas ==
-      (cinfo->methods.find(kv.first) != end(cinfo->methods)));
+    always_assert(info.thisHas == has_magic_method(cinfo, kv.first));
 
     // Non-'derived' flags (thisHas) about magic methods imply the derived
     // ones.

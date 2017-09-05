@@ -82,13 +82,12 @@ struct ObjectData : Countable, type_scan::MarkCountable<ObjectData> {
     UseIsset      = 0x0010, // __isset()
     UseUnset      = 0x0020, // __unset()
     IsWaitHandle  = 0x0040, // This is a c_WaitHandle or derived
-    HasClone      = 0x0100, // if IsCppBuiltin, has custom clone logic
-                            // if not IsCppBuiltin, defines __clone PHP method
+    IsWeakRefed   = 0x0080, // Is pointed to by at least one WeakRef
+    HasClone      = 0x0100, // if isCppBuiltin(), has custom clone logic
+                            // if !isCppBuiltin(), defines __clone PHP method
     CallToImpl    = 0x0200, // call o_to{Boolean,Int64,Double}Impl
     HasNativeData = 0x0400, // HNI Class with <<__NativeData("T")>>
     HasDynPropArr = 0x0800, // has a dynamic properties array
-    IsCppBuiltin  = 0x1000, // has a custom instanceCtor and instanceDtor
-                            // if you subclass ObjectData, you need this
     IsCollection  = 0x2000, // it's a collection (and the specific type is
                             // one of the CollectionType HeaderKind values
     HasPropEmpty  = 0x4000, // has custom propEmpty logic
@@ -137,14 +136,14 @@ struct ObjectData : Countable, type_scan::MarkCountable<ObjectData> {
   size_t heapSize() const;
 
   // WeakRef control methods.
-  inline void invalidateWeakRef() const {
-    if (UNLIKELY(m_weak_refed)) {
+  inline void invalidateWeakRef() {
+    if (UNLIKELY(getAttribute(IsWeakRefed))) {
       WeakRefData::invalidateWeakRef((uintptr_t)this);
     }
   }
 
-  inline void setWeakRefed(bool flag) const {
-    m_weak_refed = flag;
+  inline void setWeakRefed(bool flag) {
+    setAttribute(IsWeakRefed);
   }
 
  public:
@@ -204,6 +203,10 @@ struct ObjectData : Countable, type_scan::MarkCountable<ObjectData> {
 
   // Whether the object implements Iterator.
   bool isIterator() const;
+
+  // Has a custom instanceCtor and instanceDtor. If you subclass ObjectData
+  // in C++, you need this.
+  bool isCppBuiltin() const;
 
   // Whether the object is a collection, [and [not] mutable].
   bool isCollection() const;
@@ -364,30 +367,15 @@ struct ObjectData : Countable, type_scan::MarkCountable<ObjectData> {
   PropLookup<TypedValue*> getPropImpl(const Class*, const StringData*,
                                       bool copyDynArray);
 
-  struct PropAccessInfo {
-    struct Hash;
-
-    bool operator==(const PropAccessInfo& o) const {
-      return obj == o.obj && attr == o.attr && key->same(o.key);
-    }
-
-    ObjectData* obj;
-    const StringData* key;      // note: not necessarily static
-    ObjectData::Attribute attr;
-  };
-
-  struct PropRecurInfo {
-    using RecurSet = req::hash_set<PropAccessInfo, PropAccessInfo::Hash>;
-    const PropAccessInfo* activePropInfo;
-    RecurSet* activeSet;
-  };
-
  private:
   template<MOpMode mode>
   TypedValue* propImpl(TypedValue* tvRef, const Class* ctx,
                        const StringData* key);
 
   bool propEmptyImpl(const Class* ctx, const StringData* key);
+
+  template<typename K>
+  TypedValue* makeDynProp(K key, AccessFlags);
 
   bool invokeSet(const StringData* key, const TypedValue* val);
   InvokeResult invokeGet(const StringData* key);

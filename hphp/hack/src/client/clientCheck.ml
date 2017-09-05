@@ -76,7 +76,6 @@ let connect args =
     autostart = args.autostart;
     force_dormant_start = args.force_dormant_start;
     retries = Some args.retries;
-    retry_if_init = args.retry_if_init;
     expiry = args.timeout;
     no_load = args.no_load;
     profile_log = args.profile_log;
@@ -192,6 +191,25 @@ let main args =
     | MODE_REFACTOR (ref_mode, before, after) ->
       let conn = connect args in
       ClientRefactor.go conn args ref_mode before after;
+      Exit_status.No_error
+    | MODE_IDE_REFACTOR arg ->
+      let conn = connect args in
+      let tpos = Str.split (Str.regexp ":") arg in
+      let filename, line, char, new_name =
+        try
+          match tpos with
+          | [filename; line; char; new_name] ->
+            let filename = expand_path filename in
+            ServerUtils.FileName filename,
+              int_of_string line,
+              int_of_string char,
+              new_name
+          | _ -> raise Exit
+        with _ ->
+          Printf.eprintf "Invalid input\n";
+          raise Exit_status.(Exit_with Input_error)
+      in
+      ClientRefactor.go_ide conn args filename line char new_name;
       Exit_status.No_error
     | MODE_IDENTIFY_SYMBOL1 arg
     | MODE_IDENTIFY_SYMBOL2 arg

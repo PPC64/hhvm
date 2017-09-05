@@ -539,8 +539,7 @@ static inline uint32_t resetProfCountersDefault() {
 }
 
 static inline int retranslateAllRequestDefault() {
-  return RuntimeOption::ServerExecutionMode() &&
-    arch() != Arch::ARM ? 3000 : 0;
+  return RuntimeOption::ServerExecutionMode() ? 3000 : 0;
 }
 
 uint64_t ahotDefault() {
@@ -1179,6 +1178,7 @@ void RuntimeOption::Load(
     Config::Bind(Eval ## name, ini, config, "Eval."#name, defaultVal);
     EVALFLAGS()
 #undef F
+
     if (EvalPerfRelocate > 0) {
       setRelocateRequests(EvalPerfRelocate);
     }

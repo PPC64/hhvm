@@ -175,14 +175,14 @@ function hh_server_binary_routes() {
 
 function hh_codegen_binary_routes() {
   return array(
-    "buck"    => "/buck-out/bin/hphp/hack/src/hh_single_compile",
+    "buck"    => "/buck-out/gen/hphp/hack/src/hh_single_compile",
     "cmake"   => "/hphp/hack/bin"
   );
 }
 
 function php7_codegen_binary_routes() {
   return array(
-    "buck"    => "/buck-out/gen/hphp/php7/php7",
+    "buck"    => "/buck-out/gen/hphp/php7/php7/php7",
   # "cmake"   => "/hphp/php7/bin"
   );
 }
@@ -274,8 +274,10 @@ function hh_codegen_cmd($options, $config_file = null) {
   if (isset($config_file)) {
     $cmd .= ' -c "'.$config_file.'"';
   }
-  if (isset($options['hackc'])) $cmd .= ' -v Hack.Compiler.SourceMapping=1';
-  if (isset($options['hackc'])) $cmd .= ' --daemon';
+  if (isset($options['hackc'])) {
+    $cmd .= ' -vHack.Compiler.SourceMapping=1';
+    $cmd .= ' --daemon';
+  }
   return $cmd;
 }
 
@@ -521,6 +523,8 @@ function get_options($argv) {
     'hackc' => '',
     'php7' => '',
     'php7-runtime' => '',
+    'hack-only' => '',
+    'ignore-oids' => '',
   );
   $options = array();
   $files = array();
@@ -624,6 +628,7 @@ function find_test_files($file) {
     'http'       => 'hphp/test/server/http/tests',
     'fastcgi'    => 'hphp/test/server/fastcgi/tests',
     'zend'       => 'hphp/test/zend/good',
+    'zend7'       => 'hphp/test/zend7',
     'php7'       => 'hphp/test/php7-emitter',
     'facebook'   => 'hphp/facebook/test',
 
@@ -1065,6 +1070,7 @@ function hphp_cmd($options, $test, $timeout_prefix) {
     '--config',
     find_test_ext($test, 'ini', 'hphp_config'),
     read_opts_file("$test.hphp_opts"),
+    '-vRuntime.Eval.EnableIntrinsicsExtension=true',
     "-thhbc -l0 -k1 -o \"$test.repo\" \"$test\"",
     $extra_args
   ));
@@ -1452,7 +1458,31 @@ function run($options, $tests, $bad_test_file) {
   return 0;
 }
 
+function is_hack_file($options, $test) {
+  if (substr($test, -3) === '.hh') return true;
+
+  $file = fopen($test, 'r');
+  if ($file === false) return false;
+
+  // Skip lines that are a shebang or whitespace.
+  while (($line = fgets($file)) !== false) {
+    $line = trim($line);
+    if ($line === '' || substr($line, 0, 2) === '#!') continue;
+    if (substr($line, 0, 4) === '<?hh') return true;
+    break;
+  }
+  fclose($file);
+
+  return false;
+}
+
 function skip_test($options, $test) {
+  if (isset($options['hack-only']) &&
+      substr($test, -5) !== '.hhas' &&
+      !is_hack_file($options, $test)) {
+    return true;
+  }
+
   $skipif_test = find_test_ext($test, 'skipif');
   if (!$skipif_test) {
     return false;
@@ -1814,6 +1844,12 @@ function run_config_cli($options, $test, $cmd, $cmd_env) {
   return array($output, $stderr);
 }
 
+function replace_object_ids($str, $replacement) {
+  return preg_replace(
+    '/(object\([a-zA-Z_\\\\]+\)#)\d+/', '\1'.$replacement, $str
+  );
+}
+
 function run_config_post($outputs, $test, $options) {
   $output = $outputs[0];
   $stderr = $outputs[1];
@@ -1859,6 +1895,11 @@ function run_config_post($outputs, $test, $options) {
   if ((!$is_tc && ($type === 'expect' || $type === 'hhvm.expect')) ||
       ($is_tc && $type === 'typechecker.expect')) {
     $wanted = trim(file_get_contents($file));
+    if (isset($options['ignore-oids'])) {
+      $output = replace_object_ids($output, 'n');
+      $wanted = replace_object_ids($wanted, 'n');
+    }
+
     if (!$repeats) {
       $passed = !strcmp($output, $wanted);
       if (!$passed) {
@@ -1870,6 +1911,9 @@ function run_config_post($outputs, $test, $options) {
   } else if ((!$is_tc && ($type === 'expectf' || $type === 'hhvm.expectf')) ||
              ($is_tc && $type === 'typechecker.expectf')) {
     $wanted = trim(file_get_contents($file));
+    if (isset($options['ignore-oids'])) {
+      $wanted = replace_object_ids($wanted, '%d');
+    }
     $wanted_re = $wanted;
 
     // do preg_quote, but miss out any %r delimited sections.
@@ -1877,7 +1921,7 @@ function run_config_post($outputs, $test, $options) {
     $r = "%r";
     $startOffset = 0;
     $length = strlen($wanted_re);
-    while($startOffset < $length) {
+    while ($startOffset < $length) {
       $start = strpos($wanted_re, $r, $startOffset);
       if ($start !== false) {
         // we have found a start tag.

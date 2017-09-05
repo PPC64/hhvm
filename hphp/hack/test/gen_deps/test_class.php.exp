@@ -1,0 +1,7 @@
+test_class.php
+class \A -> class \B
+function \hint_on_shape -> class \B
+function \optional_hint -> class \B
+function \function_hint -> class \B
+function \function_hint -> class \A
+function \function_hint -> class \C

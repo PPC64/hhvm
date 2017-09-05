@@ -93,7 +93,7 @@ enum RefCount : std::conditional<one_bit_refcount, int8_t, int32_t>::type {
 
 using UnsignedRefCount = std::make_unsigned<RefCount>::type;
 
-enum GCBits {
+enum GCBits : uint8_t {
   Unmarked = 0,
   Mark = 1,
   Pin = 3,
@@ -126,8 +126,7 @@ protected:
       int8_t m_padding[3];
 #endif
       HeaderKind m_kind;
-      mutable uint8_t m_weak_refed:1;
-      mutable uint8_t m_marks:7;
+      mutable GCBits m_marks;
       mutable uint16_t m_aux16;
     };
     struct {
@@ -220,6 +219,19 @@ inline bool isArrayKind(HeaderKind k) {
 
 inline bool isFreeKind(HeaderKind k) {
   return k >= HeaderKind::Free;
+}
+
+namespace detail {
+// update these if you add more kinds for ObjectData that should
+// pass the isCppBuiltin() predicate.
+constexpr auto FirstCppBuiltin = HeaderKind::WaitHandle;
+constexpr auto LastCppBuiltin = HeaderKind::AsyncFuncFrame;
+static_assert((int)LastCppBuiltin - (int)FirstCppBuiltin == 11,
+              "keep predicate in sync with enum");
+}
+
+inline bool isCppBuiltin(HeaderKind k) {
+  return k >= detail::FirstCppBuiltin && k <= detail::LastCppBuiltin;
 }
 
 inline bool isHackArrayKind(HeaderKind k) {

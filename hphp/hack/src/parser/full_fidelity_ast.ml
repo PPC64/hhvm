@@ -8,17 +8,21 @@
  *
  *)
 
+module Syntax = Full_fidelity_editable_positioned_syntax
+module SyntaxValue = Syntax.Value
+module Token = Full_fidelity_editable_positioned_token
+
  (* What we're lowering from *)
- open Full_fidelity_positioned_syntax
- type node = Full_fidelity_positioned_syntax.t (* Let's be more explicit *)
+ open Syntax
+ type node = Syntax.t (* Let's be more explicit *)
  (* What we're lowering to *)
  open Ast
 
 module SyntaxKind = Full_fidelity_syntax_kind
 module TK = Full_fidelity_token_kind
-module PT = Full_fidelity_positioned_token
 module Trivia = Full_fidelity_positioned_trivia
 module TriviaKind = Full_fidelity_trivia_kind
+module SourceData = Full_fidelity_editable_positioned_original_source_data
 module SourceText = Full_fidelity_source_text
 open Prim_defs
 
@@ -62,7 +66,7 @@ type +'a parser = node -> env -> 'a
 type ('a, 'b) metaparser = 'a parser -> 'b parser
 
 let get_pos : node -> Pos.t = fun node ->
-  if !(lowerer_state.ignorePos)
+  if !(lowerer_state.ignorePos) || (value node) = Value.Synthetic
   then Pos.none
   else begin
     let pos_file = !(lowerer_state.filePath) in
@@ -73,7 +77,11 @@ let get_pos : node -> Pos.t = fun node ->
       let start_offset = start_offset node in
       if start_offset = 0 then 0 else start_offset - 1
     in
-    let end_offset = end_offset node in
+    let end_offset =
+      (*should be removed after resolving TODO above *)
+      let end_offset = end_offset node in
+      if end_offset = 0 then 0 else end_offset - 1
+    in
     let s_line, s_column = SourceText.offset_to_position text start_offset in
     let e_line, e_column = SourceText.offset_to_position text end_offset in
     let pos_start =
@@ -136,7 +144,9 @@ let mpYielding : ('a, ('a * bool)) metaparser = fun p node env ->
   let result = p node { env with saw_yield = local_ptr } in
   result, !local_ptr
 
-
+type expr_location =
+  | TopLevel
+  | InString
 
 
 let pos_name node =
@@ -174,22 +184,13 @@ let as_list : node -> node list =
   | syn -> [syn]
 
 let missing =
-  let module V = Full_fidelity_positioned_syntax.PositionedSyntaxValue in
-  let open Full_fidelity_source_text in
-  { syntax = Missing
-  ; value =
-    { V.source_text    = { text = ""; offset_map = Line_break_map.make "" }
-    ; V.offset         = 0
-    ; V.leading_width  = 0
-    ; V.width          = 0
-    ; V.trailing_width = 0
-    }
-  }
+  let value = SyntaxValue.Synthetic in
+  make Missing value
 
 
 
 let token_kind : node -> TK.t option = function
-  | { syntax = Token t; _ } -> Some (PT.kind t)
+  | { syntax = Token t; _ } -> Some (Token.kind t)
   | _ -> None
 
 let pBop : (expr -> expr -> expr_) parser = fun node env lhs rhs ->
@@ -271,26 +272,44 @@ let pKinds : kind list parser = couldMap ~f:(fun node env ->
   | _ -> missing_syntax "kind" node env
   )
 
-let syntax_of_token : PositionedToken.t -> node = fun t ->
-  { syntax = Token t
-  ; value  = PositionedSyntaxValue.make t.PT.source_text
-               t.PT.offset t.PT.leading_width t.PT.width t.PT.trailing_width
-  }
+let syntax_of_token : Token.t -> node = fun t ->
+  let value =
+    SyntaxValue.from_token t in
+  make (Token t) value
 
 (* TODO: Clean up string escaping *)
 let prepString2 : node list -> node list =
   let trimLeft ~n t =
-    PT.({ t with leading_width = t.leading_width + n; width = t.width - n })
+    Token.(
+      with_updated_original_source_data
+        t
+        SourceData.(fun t ->
+          { t with
+            leading_width = leading_width t + n;
+            width = width t - n;
+          }
+        )
+    )
   in
   let trimRight ~n t =
-    PT.({ t with trailing_width = t.trailing_width + n; width = t.width - n })
+    Token.(
+      with_updated_original_source_data
+        t
+        SourceData.(fun t ->
+          { t with
+            trailing_width = trailing_width t + n;
+            width = width t - n;
+          }
+        )
+    )
   in
   function
   | ({ syntax = Token t; _ }::ss)
-  when t.PT.width > 0 && (PT.text t).[0] = '"' ->
+  when (Token.width t) > 0 && (Token.text t).[0] = '"' ->
     let rec unwind = function
       | [{ syntax = Token t; _ }]
-      when t.PT.width > 0 && (PT.text t).[t.PT.width - 1] = '"' ->
+      when (Token.width t) > 0 &&
+          (Token.text t).[(Token.width t) - 1] = '"' ->
         let s = syntax_of_token (trimRight ~n:1 t) in
         if width s > 0 then [s] else []
       | x :: xs -> x :: unwind xs
@@ -299,18 +318,18 @@ let prepString2 : node list -> node list =
     let s = syntax_of_token (trimLeft ~n:1 t) in
     if width s > 0 then s :: unwind ss else unwind ss
   | ({ syntax = Token t; _ }::ss)
-  when t.PT.width > 3 && String.sub (PT.text t) 0 3 = "<<<" ->
+  when (Token.width t) > 3 && String.sub (Token.text t) 0 3 = "<<<" ->
     let rec unwind = function
-      | [{ syntax = Token t; _ }] when t.PT.width > 0 ->
-        let content = PT.text t in
-        let len = t.PT.width in
+      | [{ syntax = Token t; _ }] when (Token.width t) > 0 ->
+        let content = Token.text t in
+        let len = (Token.width t) in
         let n = len - (String.rindex_from content (len - 2) '\n') in
         let s = syntax_of_token (trimRight ~n t) in
         if width s > 0 then [s] else []
       | x :: xs -> x :: unwind xs
       | _ -> raise (Invalid_argument "Malformed String2 SyntaxList")
     in
-    let content = PT.text t in
+    let content = Token.text t in
     let n = (String.index content '\n') + 1 in
     let s = syntax_of_token (trimLeft ~n t) in
     if width s > 0 then s :: unwind ss else unwind ss
@@ -630,12 +649,12 @@ and pString2: node list -> env -> expr list =
     *)
     match l with
     | [] -> List.rev acc
-    | ({ syntax = Token { PT.kind = TK.Dollar; _ }; _ } as l)::
+    | ({ syntax = Token { Token.kind = TK.Dollar; _ }; _ } as l)::
       ({ syntax = EmbeddedBracedExpression {
           embedded_braced_expression_expression = {
             syntax = QualifiedNameExpression {
               qualified_name_expression = {
-                syntax = Token { PT.kind = TK.Name; _ }
+                syntax = Token { Token.kind = TK.Name; _ }
                 ; _ } as name
               ; _ }
             ; _ }
@@ -658,10 +677,17 @@ and pString2: node list -> env -> expr list =
             Pos.make_from_file_pos ~pos_file ~pos_start ~pos_end
         in
         aux tl env ((pos, id)::acc)
-    | x::xs -> aux xs env ((pExpr ~top_level:false x env)::acc)
+    | ({ syntax = Token { Token.kind = TK.Dollar; _ }; _ })::
+      ({ syntax = EmbeddedBracedExpression {
+          embedded_braced_expression_expression
+          ; _ }
+        ; _ } as expr_with_braces)
+      ::tl ->
+        aux tl env (pExpr ~location:InString expr_with_braces env::acc)
+    | x::xs -> aux xs env ((pExpr ~location:InString x env)::acc)
   in
   fun l env -> aux l env []
-and pExpr ?top_level:(top_level=true) : expr parser = fun node env ->
+and pExpr ?location:(location=TopLevel) : expr parser = fun node env ->
   let rec pExpr_ : expr_ parser = fun node env ->
     let pos = get_pos node in
     match syntax node with
@@ -774,7 +800,9 @@ and pExpr ?top_level:(top_level=true) : expr parser = fun node env ->
         end in
       Call (pExpr recv env, hints, couldMap ~f:pExpr args env, [])
     | QualifiedNameExpression { qualified_name_expression } ->
-      Id (pos_name qualified_name_expression)
+      if location = InString
+      then String (pos_name qualified_name_expression)
+      else Id (pos_name qualified_name_expression)
     | VariableExpression { variable_expression } ->
       Lvar (pos_name variable_expression)
 
@@ -856,7 +884,7 @@ and pExpr ?top_level:(top_level=true) : expr parser = fun node env ->
           (pExpr binary_left_operand  env)
           (pExpr binary_right_operand env)
 
-    | Token _ when top_level -> Id (pos_name node)
+    | Token _ when location = TopLevel -> Id (pos_name node)
     | Token _ -> String (pos, unesc_dbl (text node))
 
     | YieldExpression { yield_operand; _ } when text yield_operand = "break" ->
@@ -883,7 +911,7 @@ and pExpr ?top_level:(top_level=true) : expr parser = fun node env ->
       { scope_resolution_qualifier; scope_resolution_name; _ } ->
       let qual = pos_name scope_resolution_qualifier in
       begin match syntax scope_resolution_name with
-      | Token { PositionedToken.kind = TK.Variable; _ } ->
+      | Token { Token.kind = TK.Variable; _ } ->
         let name =
           get_pos scope_resolution_name, Lvar (pos_name scope_resolution_name)
         in
@@ -913,7 +941,7 @@ and pExpr ?top_level:(top_level=true) : expr parser = fun node env ->
       { embedded_subscript_receiver; embedded_subscript_index; _ } ->
       Array_get
       ( pExpr embedded_subscript_receiver env
-      , mpOptional pExpr embedded_subscript_index env
+      , mpOptional (pExpr ~location) embedded_subscript_index env
       )
     | ShapeExpression { shape_expression_fields; _ } ->
       Shape (
@@ -983,6 +1011,7 @@ and pExpr ?top_level:(top_level=true) : expr parser = fun node env ->
           | "true"  -> True
           | _       -> missing_syntax ("boolean (not: " ^ s ^ ")") expr env
           )
+        | Some TK.ExecutionString -> Null (* PHP Clowns *)
         | _ -> missing_syntax "literal" expr env
         )
 
@@ -1061,9 +1090,8 @@ and pExpr ?top_level:(top_level=true) : expr parser = fun node env ->
         (pos, ":" ^ name)
       in
       let combine b e =
-        syntax_of_token PT.(
-          make (kind b) (source_text b) (leading_start_offset b)
-            (start_offset e - start_offset b + width e) (leading b) (trailing e)
+        syntax_of_token Token.(
+          concatenate b e
         )
       in
       let aggregate_tokens node =
@@ -1252,7 +1280,7 @@ and pStmt : stmt parser = fun node env ->
       ( get_pos return_expression
       , mpOptional pExpr return_expression env
       )
-  | Full_fidelity_positioned_syntax.GotoLabel { goto_label_name; _ } ->
+  | Syntax.GotoLabel { goto_label_name; _ } ->
     let pos = get_pos goto_label_name in
     let label_name = text goto_label_name in
     Ast.GotoLabel (pos, label_name)
@@ -1712,10 +1740,10 @@ and pNamespaceUseClause ~prefix env kind node =
     let key = drop_pstr x name in
     let kind =
       match syntax kind with
-      | Token { PT.kind = TK.Namespace; _ } -> NSNamespace
-      | Token { PT.kind = TK.Type     ; _ } -> NSClass
-      | Token { PT.kind = TK.Function ; _ } -> NSFun
-      | Token { PT.kind = TK.Const    ; _ } -> NSConst
+      | Token { Token.kind = TK.Namespace; _ } -> NSNamespace
+      | Token { Token.kind = TK.Type     ; _ } -> NSClass
+      | Token { Token.kind = TK.Function ; _ } -> NSFun
+      | Token { Token.kind = TK.Const    ; _ } -> NSConst
       | Missing                             -> NSClassAndNamespace
       | _ -> missing_syntax "namespace use kind" kind env
     in
@@ -2043,18 +2071,20 @@ let scour_comments
       | TriviaKind.FixMe
       | TriviaKind.IgnoreError
         -> let open Str in
-           let line = Pos.line (get_pos node) in
+           let pos = get_pos node in
+           let line = Pos.line pos in
            let ignores = try IMap.find line fm with Not_found -> IMap.empty in
-           let reg = regexp "HH_\\(FIXME\\|IGNORE_ERROR\\)\\[\\([0-9]+\\)\\]" in
+           let reg = regexp "HH_\\(FIXME\\|IGNORE_ERROR\\)[ \\t\\n]*\\[?\\([0-9]+\\)\\]?" in
            let txt = Trivia.text t in
            (try ignore (search_forward reg txt 0) with
            | Not_found ->
-             let msg =
-               "Inconsistent trivia classification: Received " ^
-               TriviaKind.to_string (Trivia.kind t) ^ ", but failed to match " ^
-               "regexp for FIXME or IGNORE_ERROR. Either the lexer has a bug" ^
-               "in its trivia classification, or the lowerer is more " ^
-               "restrictive then the lexer."
+             let msg = Printf.sprintf
+               "Inconsistent trivia classification: Received %s, but failed to \
+                match regexp for FIXME or IGNORE_ERROR. Either the lexer has a \
+                bug in its trivia classification, or the lowerer is more \
+                restrictive than the lexer. Source: %s"
+               (TriviaKind.to_string (Trivia.kind t))
+               (Pos.string (Pos.to_absolute pos))
              in
              failwith msg;
            );
@@ -2067,9 +2097,9 @@ let scour_comments
       match syntax node with
       | Token t ->
         let f = go node in
-        let trivia = PositionedToken.leading t in
+        let trivia = Token.leading t in
         let acc = List.fold_left ~f ~init:acc trivia in
-        let trivia = PositionedToken.trailing t in
+        let trivia = Token.trailing t in
         List.fold_left ~f ~init:acc trivia
       | _ -> List.fold_left ~f:aux ~init:acc (children node)
     in
@@ -2142,12 +2172,13 @@ let from_text
   : result =
     let open Full_fidelity_syntax_tree in
     let tree   = make source_text in
-    let tree =
-      if lower_coroutines then
-        Coroutine_lowerer.lower_coroutines tree
-      else
-        tree in
     let script = Full_fidelity_positioned_syntax.from_tree tree in
+    let script = from_positioned_syntax script in
+    let script =
+      if lower_coroutines then
+        Coroutine_lowerer.lower_coroutines script
+      else
+        script in
     let fi_mode = if is_php tree then FileInfo.Mphp else
       let mode_string = String.trim (mode tree) in
       let mode_word =

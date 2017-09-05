@@ -19,6 +19,7 @@
 #include "hphp/php7/zend/zend_language_scanner_defs.h"
 #include "hphp/php7/bytecode.h"
 #include "hphp/php7/hhas.h"
+#include "hphp/util/embedded-data.h"
 
 #include <folly/Format.h>
 #include <folly/io/IOBuf.h>
@@ -27,11 +28,6 @@
 #include <string>
 #include <iostream>
 
-namespace HPHP { namespace php7 {
-  // TODO come up with something that actually changes
-  const static char build_id[] = "php7c";
-}}
-
 namespace {
 
 using HPHP::php7::CompilerException;
@@ -39,11 +35,26 @@ using HPHP::php7::LanguageException;
 using HPHP::php7::compile;
 using HPHP::php7::dump_asm;
 using HPHP::php7::makeFatalUnit;
-using HPHP::php7::build_id;
 
 struct Options {
   bool daemonEnabled{false};
 };
+
+
+std::string getBuildId() {
+  HPHP::embedded_data data;
+  auto constexpr unknown_version = "php7-unknown-version";
+  if (!HPHP::get_embedded_data("build_id", &data)) {
+    return unknown_version;
+  }
+
+  auto const str = HPHP::read_embedded_data(data);
+  if (str.empty()) {
+    return unknown_version;
+  }
+
+  return str;
+}
 
 static constexpr size_t read_chunk = 1024;
 static constexpr size_t allocate_chunk = 4096;
@@ -68,6 +79,8 @@ std::unique_ptr<folly::IOBuf> readAll(std::istream& in) {
   // coalesce and return the buffer
   auto buf = queue.move();
   buf->coalesce();
+  // PHP allows the cursor to be advanced to yy_limit + ZEND_MMAP_AHEAD, so
+  // don't tell it about our extra allocated space.
   buf->trimEnd(ZEND_MMAP_AHEAD);
   return buf;
 }
@@ -102,7 +115,7 @@ std::string runCompiler(const std::string& filename, const folly::IOBuf& buf) {
 }
 
 int runDaemon() {
-  std::cout << build_id << std::endl;
+  std::cout << getBuildId() << std::endl;
   while (true) {
     try {
       std::string filename;
@@ -126,8 +139,10 @@ int runDaemon() {
             code_length)) {
         throw std::runtime_error("Could not read code from stdin");
       }
+      // PHP allows the cursor to be advanced to yy_limit + ZEND_MMAP_AHEAD, so
+      // don't tell it about our extra allocated space.
       memset(buf->writableData() + code_length, '\0', ZEND_MMAP_AHEAD);
-      buf->append(code_length + ZEND_MMAP_AHEAD);
+      buf->append(code_length);
 
       auto hhas = runCompiler(filename, *buf);
       std::cout << hhas.length() << std::endl

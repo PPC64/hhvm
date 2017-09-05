@@ -27,6 +27,7 @@ type client_mode =
 | MODE_METHOD_JUMP_CHILDREN of string
 | MODE_METHOD_JUMP_ANCESTORS of string * string
 | MODE_REFACTOR of string * string * string
+| MODE_IDE_REFACTOR of string
 | MODE_FIND_CLASS_REFS of string
 (* TODO figure out why we can't reference FuzzySearchService from here *)
 | MODE_SEARCH of string * string
@@ -55,7 +56,6 @@ type client_check_env = {
   root: Path.t;
   from: string;
   output_json: bool;
-  retry_if_init: bool;
   retries: int;
   timeout: float option;
   autostart: bool;
@@ -83,6 +83,7 @@ let mode_to_string = function
   | MODE_METHOD_JUMP_CHILDREN _ -> "MODE_METHOD_JUMP_CHILDREN"
   | MODE_METHOD_JUMP_ANCESTORS _ -> "MODE_METHOD_JUMP_ANCESTORS"
   | MODE_REFACTOR _ -> "MODE_REFACTOR"
+  | MODE_IDE_REFACTOR _ -> "MODE_IDE_REFACTOR"
   | MODE_FIND_CLASS_REFS _ -> "MODE_FIND_CLASS_REFS"
   | MODE_SEARCH _ -> "MODE_SEARCH"
   | MODE_LINT _ -> "MODE_LINT"

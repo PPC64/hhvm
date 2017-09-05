@@ -308,6 +308,12 @@ Array& ObjectData::setDynPropArray(const Array& newArr) {
   return arr;
 }
 
+template<typename K>
+TypedValue* ObjectData::makeDynProp(K key, AccessFlags flags) {
+  SuppressHackArrCompatNotices shacn;
+  return reserveProperties().lvalAt(key, flags).asTypedValue();
+}
+
 Variant* ObjectData::realPropImpl(const String& propName, int flags,
                                   const String& context,
                                   bool copyDynArray) {
@@ -331,7 +337,7 @@ Variant* ObjectData::realPropImpl(const String& propName, int flags,
     // Property is not declared, and not dynamically created yet.
     if (!(flags & RealPropCreate)) return nullptr;
 
-    return &reserveProperties().lvalAt(propName, AccessFlags::Key);
+    return &tvAsVariant(makeDynProp(propName, AccessFlags::Key));
   }
 
   // Property is non-NULL if we reach here.
@@ -760,7 +766,7 @@ Variant ObjectData::o_invoke_few_args(const String& s, int count,
 }
 
 ObjectData* ObjectData::clone() {
-  if (getAttribute(HasClone) && getAttribute(IsCppBuiltin)) {
+  if (getAttribute(HasClone) && isCppBuiltin()) {
     if (isCollection()) {
       return collections::clone(this);
     }
@@ -794,7 +800,7 @@ ObjectData* ObjectData::clone() {
     // PHP classes that inherit from cpp builtins that have special clone
     // functionality *may* also define a __clone method, but it's totally
     // fine if a __clone doesn't exist.
-    if (method || !getAttribute(IsCppBuiltin)) {
+    if (method || !isCppBuiltin()) {
       assert(method);
       g_context->invokeMethodV(clone.get(), method);
     }
@@ -1024,12 +1030,30 @@ inline InvokeResult::InvokeResult(bool ok, Variant&& v) :
   val.m_aux.u_ok = ok;
 }
 
-struct ObjectData::PropAccessInfo::Hash {
+struct PropAccessInfo {
+  struct Hash;
+
+  bool operator==(const PropAccessInfo& o) const {
+    return obj == o.obj && attr == o.attr && key->same(o.key);
+  }
+
+  ObjectData* obj;
+  const StringData* key;      // note: not necessarily static
+  ObjectData::Attribute attr;
+};
+
+struct PropAccessInfo::Hash {
   size_t operator()(PropAccessInfo const& info) const {
     return hash_int64_pair(reinterpret_cast<intptr_t>(info.obj),
                            info.key->hash() |
                            (static_cast<int64_t>(info.attr) << 32));
   }
+};
+
+struct PropRecurInfo {
+  using RecurSet = req::hash_set<PropAccessInfo, PropAccessInfo::Hash>;
+  const PropAccessInfo* activePropInfo{nullptr};
+  RecurSet* activeSet{nullptr};
 };
 
 namespace {
@@ -1052,35 +1076,38 @@ namespace {
  * to a recursion error.
  */
 
-__thread ObjectData::PropRecurInfo propRecurInfo;
+IMPLEMENT_THREAD_LOCAL(PropRecurInfo, propRecurInfo);
 
 template <class Invoker>
 InvokeResult
-magic_prop_impl(const StringData* /*key*/,
-                const ObjectData::PropAccessInfo& info, Invoker invoker) {
-  if (UNLIKELY(propRecurInfo.activePropInfo != nullptr)) {
-    if (!propRecurInfo.activeSet) {
-      propRecurInfo.activeSet =
-        req::make_raw<ObjectData::PropRecurInfo::RecurSet>();
-      propRecurInfo.activeSet->insert(*propRecurInfo.activePropInfo);
+magic_prop_impl(const StringData* /*key*/, const PropAccessInfo& info,
+                Invoker invoker) {
+  auto recur_info = propRecurInfo.get();
+  if (UNLIKELY(recur_info->activePropInfo != nullptr)) {
+    auto activeSet = recur_info->activeSet;
+    if (!activeSet) {
+      activeSet = req::make_raw<PropRecurInfo::RecurSet>();
+      activeSet->insert(*recur_info->activePropInfo);
+      recur_info->activeSet = activeSet;
     }
-    if (!propRecurInfo.activeSet->insert(info).second) {
+    if (!activeSet->insert(info).second) {
       // We're already running a magic method on the same type here.
       return {false, make_tv<KindOfUninit>()};
     }
     SCOPE_EXIT {
-      propRecurInfo.activeSet->erase(info);
+      activeSet->erase(info);
     };
 
     return {true, invoker()};
   }
 
-  propRecurInfo.activePropInfo = &info;
+  recur_info->activePropInfo = &info;
   SCOPE_EXIT {
-    propRecurInfo.activePropInfo = nullptr;
-    if (UNLIKELY(propRecurInfo.activeSet != nullptr)) {
-      req::destroy_raw(propRecurInfo.activeSet);
-      propRecurInfo.activeSet = nullptr;
+    recur_info->activePropInfo = nullptr;
+    auto activeSet = recur_info->activeSet;
+    if (UNLIKELY(activeSet != nullptr)) {
+      req::destroy_raw(activeSet);
+      recur_info->activeSet = nullptr;
     }
   };
 
@@ -1091,7 +1118,7 @@ magic_prop_impl(const StringData* /*key*/,
 // methods.  __set takes 2 args, so it uses its own function.
 struct MagicInvoker {
   const StringData* magicFuncName;
-  const ObjectData::PropAccessInfo& info;
+  const PropAccessInfo& info;
 
   TypedValue operator()() const {
     auto const meth = info.obj->getVMClass()->lookupMethod(magicFuncName);
@@ -1184,7 +1211,8 @@ bool ObjectData::invokeNativeUnsetProp(const StringData* key) {
 template<MOpMode mode>
 TypedValue* ObjectData::propImpl(TypedValue* tvRef, const Class* ctx,
                                  const StringData* key) {
-  auto const lookup = getProp(ctx, key);
+  auto constexpr write = (mode == MOpMode::Define) || (mode == MOpMode::Unset);
+  auto const lookup = getPropImpl(ctx, key, write);
   auto const prop = lookup.prop;
 
   if (prop) {
@@ -1249,8 +1277,7 @@ TypedValue* ObjectData::propImpl(TypedValue* tvRef, const Class* ctx,
 
   if (mode == MOpMode::Warn) raiseUndefProp(key);
   if (mode == MOpMode::Define) {
-    auto& var = reserveProperties().lvalAt(StrNR(key), AccessFlags::Key);
-    return var.asTypedValue();
+    return makeDynProp(StrNR(key), AccessFlags::Key);
   }
 
   return const_cast<TypedValue*>(&immutable_null_base);
@@ -1461,9 +1488,7 @@ TypedValue* ObjectData::setOpProp(TypedValue& tvRef,
     tvUnboxIfNeeded(&r.val);
 
     if (prop) raise_error("Cannot access protected property");
-    prop = reinterpret_cast<TypedValue*>(
-      &reserveProperties().lvalAt(StrNR(key), AccessFlags::Key)
-    );
+    prop = makeDynProp(StrNR(key), AccessFlags::Key);
 
     // Normally this code path is defining a new dynamic property, but
     // unlike the non-magic case below, we may have already created it
@@ -1491,9 +1516,7 @@ TypedValue* ObjectData::setOpProp(TypedValue& tvRef,
   // No visible/accessible property, and no applicable magic method:
   // create a new dynamic property.  (We know this is a new property,
   // or it would've hit the visible && accessible case above.)
-  prop = reinterpret_cast<TypedValue*>(
-    &reserveProperties().lvalAt(StrNR(key), AccessFlags::Key)
-  );
+  prop = makeDynProp(StrNR(key), AccessFlags::Key);
   assert(prop->m_type == KindOfNull); // cannot exist yet
   setopBody(prop, op, val);
   return prop;
@@ -1549,9 +1572,7 @@ Cell ObjectData::incDecProp(Class* ctx, IncDecOp op, const StringData* key) {
     tvUnboxIfNeeded(&r.val);
     auto const dest = IncDecBody(op, &r.val);
     if (prop) raise_error("Cannot access protected property");
-    prop = reinterpret_cast<TypedValue*>(
-      &reserveProperties().lvalAt(StrNR(key), AccessFlags::Key)
-    );
+    prop = makeDynProp(StrNR(key), AccessFlags::Key);
 
     // Normally this code path is defining a new dynamic property, but
     // unlike the non-magic case below, we may have already created it
@@ -1576,9 +1597,7 @@ Cell ObjectData::incDecProp(Class* ctx, IncDecOp op, const StringData* key) {
   // No visible/accessible property, and no applicable magic method:
   // create a new dynamic property.  (We know this is a new property,
   // or it would've hit the visible && accessible case above.)
-  prop = reinterpret_cast<TypedValue*>(
-    &reserveProperties().lvalAt(StrNR(key), AccessFlags::Key)
-  );
+  prop = makeDynProp(StrNR(key), AccessFlags::Key);
   assert(prop->m_type == KindOfNull); // cannot exist yet
   return IncDecBody(op, prop);
 }
@@ -1662,9 +1681,9 @@ void ObjectData::getProp(const Class* klass,
       propVal->m_type != KindOfUninit &&
       !inserted[propInd]) {
     inserted[propInd] = true;
-    props.lvalAt(
-      StrNR(klass->declProperties()[propInd].mangledName).asString())
-      .setWithRef(tvAsCVarRef(propVal));
+    props.setWithRef(
+      StrNR(klass->declProperties()[propInd].mangledName).asString(),
+      tvAsCVarRef(propVal));
   }
 }
 

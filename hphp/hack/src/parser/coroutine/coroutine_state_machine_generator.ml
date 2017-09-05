@@ -10,13 +10,13 @@
 module CoroutineClosureGenerator = Coroutine_closure_generator
 module CoroutineStateMachineData = Coroutine_state_machine_data
 module CoroutineSyntax = Coroutine_syntax
-module EditableSyntax = Full_fidelity_editable_syntax
-module EditableToken = Full_fidelity_editable_token
-module Rewriter = Full_fidelity_rewriter.WithSyntax(EditableSyntax)
-module Utils = Full_fidelity_syntax_utilities.WithSyntax(EditableSyntax)
+module Syntax = Full_fidelity_editable_positioned_syntax
+module Token = Syntax.Token
+module Rewriter = Full_fidelity_rewriter.WithSyntax(Syntax)
+module Utils = Full_fidelity_syntax_utilities.WithSyntax(Syntax)
 module SuspendRewriter = Coroutine_suspend_rewriter
 
-open EditableSyntax
+open Syntax
 open CoroutineSyntax
 
 (*
@@ -101,7 +101,8 @@ let add_missing_return body =
 let all_used_locals node =
   let folder acc node =
     match syntax node with
-    | Token { EditableToken.kind = TokenKind.Variable; text; _; } ->
+    | Token ({ Token.kind = TokenKind.Variable; _; } as token) ->
+      let text = Token.text token in
       (* "$this" is treated as a local, but obviously we don't want to copy
       it in or out. *)
       if text = "$this" then acc else SSet.add text acc
@@ -114,14 +115,12 @@ let copy_in_syntax variable =
   let field_name = String_utils.lstrip variable "$" in
   make_assignment_syntax_variable
     (closure_name_syntax field_name)
-    (make_variable_syntax variable)
+    (make_variable_expression_syntax variable)
 
 (* $name = $closure->name *)
 let copy_out_syntax variable =
   let field_name = String_utils.lstrip variable "$" in
-  make_assignment_syntax_variable
-    (make_variable_syntax variable)
-    (closure_name_syntax field_name)
+  make_assignment_syntax variable (closure_name_syntax field_name)
 
 let add_try_finally used_locals body =
   (*TODO: if there are no used locals - just return the body ? *)
@@ -253,7 +252,7 @@ let extract_expressions_from_for_statement
     | condition_expr :: rev_control_exprs ->
       Core_list.rev_map
         ~f:make_expression_statement_from_list_item rev_control_exprs,
-      condition_expr in
+      get_list_item condition_expr in
   let end_of_loop_exprs = make_expression_statements for_end_of_loop in
   initializer_exprs, control_exprs, condition_expr, end_of_loop_exprs
 
@@ -318,7 +317,7 @@ let rewrite_for next_loop_label node =
   Rewriter.aggregating_rewrite_post rewrite node next_loop_label
 
 let get_token node =
-  match EditableSyntax.get_token node with
+  match Syntax.get_token node with
   | Some token -> token
   | None -> failwith "expected a token"
 
@@ -382,8 +381,7 @@ let rec rewrite_if_statement if_stmt =
       elseif_statement } ->
       let child_if_keyword = get_token elseif_keyword in
       let child_if_keyword =
-        EditableToken.with_kind child_if_keyword TokenKind.If in
-      let child_if_keyword = EditableToken.with_text child_if_keyword "if" in
+        Token.synthesize_from child_if_keyword TokenKind.If "if" in
       let child_if_keyword = make_token child_if_keyword in
       let child_if = {
         if_keyword = child_if_keyword;
@@ -433,11 +431,17 @@ let make_switch_section_syntax number =
   let label = make_int_case_label_syntax number in
   let statement = make_goto_statement_syntax (StateLabel number) in
   let fallthrough = make_missing() in
-  make_switch_section label statement fallthrough
+  make_switch_section
+    (make_list [ label; ])
+    (make_list [ statement; ])
+    fallthrough
 
 let default_section_syntax =
   let statement = make_goto_statement_syntax ErrorStateLabel in
-  make_switch_section default_label_syntax statement (make_missing())
+  make_switch_section
+    (make_list [ default_label_syntax; ])
+    (make_list [ statement; ])
+    (make_missing())
 
 let make_switch_sections number =
   let rec aux n acc =
@@ -591,7 +595,7 @@ let generate_coroutine_state_machine
   let new_body, coroutine_result_data_variables =
     lower_body original_body in
   let used_locals = Lambda_analyzer.partition_used_locals
-    context.Coroutine_context.parents function_parameter_list original_body in
+    context.Coroutine_context.parents context.Coroutine_context.original_node in
   let state_machine_data = compute_state_machine_data
     used_locals
     coroutine_result_data_variables

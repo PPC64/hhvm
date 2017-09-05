@@ -174,6 +174,7 @@ let error_tests =
   List.map
   [
     "test_alias_errors";
+    "test_method_modifier_errors";
     "test_errors_not_strict";
     "test_errors_strict";
     "test_no_errors_strict";
@@ -210,6 +211,12 @@ let error_tests =
     "test_misspelling_recovery2";
     "test_group_use_errors";
     "test_abstract_initializers";
+    "test_mixed_bracketed_unbracketed_namespaces1";
+    "test_mixed_bracketed_unbracketed_namespaces2";
+    "test_var_phpism";
+    "test_var_phpism2";
+    "test_var_phpism3";
+    "test_xhp_attribute_enum_errors";
   ] ~f:mapper
 
 let test_data = minimal_tests @ error_tests @

@@ -160,23 +160,18 @@ let hack_errors_to_lsp_diagnostic
 (************************************************************************)
 
 type server_conn = {
-  ic : Timeout.in_channel;
-  oc : out_channel;
+  ic: Timeout.in_channel;
+  oc: out_channel;
 
   (* Pending messages sent from the server. They need to be relayed to the
      client. *)
-  pending_messages : ServerCommandTypes.push Queue.t;
+  pending_messages: ServerCommandTypes.push Queue.t;
 }
-
-type message_source =
-  | No_source
-  | From_client
-  | From_server
 
 module Main_env = struct
   type t = {
     conn: server_conn;
-    needs_idle : bool;
+    needs_idle: bool;
     uris_with_diagnostics: SSet.t;
     ready_dialog_cancel: (unit -> unit) option; (* "hack server is now ready" dialog *)
   }
@@ -186,9 +181,9 @@ open Main_env
 module In_init_env = struct
   type t = {
     conn: server_conn;
-    start_time : float;
+    start_time: float;
     busy_dialog_cancel: (unit -> unit) option; (* "hack server is busy" dialog *)
-    file_edits : ClientMessageQueue.client_message ImmQueue.t;
+    file_edits: Jsonrpc_queue.jsonrpc_message ImmQueue.t;
     tail_env: Tail.env;
   }
 end
@@ -217,8 +212,8 @@ let initialize_params: Initialize.params option ref = ref None
 type event =
   | Server_hello
   | Server_message of ServerCommandTypes.push
-  | Client_message of ClientMessageQueue.client_message
-  | Tick (* once per second, on idle, only generated when server is connected *)
+  | Client_message of Jsonrpc_queue.jsonrpc_message
+  | Tick (* once per second, on idle *)
 
 (* Here are some exit points. The "exit_fail_delay" is in case the user    *)
 (* restarted hh_server themselves: we'll give them a chance to start it up *)
@@ -260,7 +255,7 @@ let requests_outstanding: Callback.t IMap.t ref = ref IMap.empty
 
 
 let event_to_string (event: event) : string =
-  let open ClientMessageQueue in
+  let open Jsonrpc_queue in
   match event with
   | Server_hello -> "Server hello"
   | Server_message ServerCommandTypes.DIAGNOSTIC _ -> "Server DIAGNOSTIC"
@@ -328,10 +323,10 @@ let rpc
    mandate id to be present. *)
 let respond
     (outchan: out_channel)
-    (c: ClientMessageQueue.client_message)
+    (c: Jsonrpc_queue.jsonrpc_message)
     (json: Hh_json.json)
   : Hh_json.json option =
-  let open ClientMessageQueue in
+  let open Jsonrpc_queue in
   let open Hh_json in
   let is_error = (Jget.val_opt (Some json) "code" <> None) in
   let response = JSON_Object (
@@ -442,7 +437,7 @@ let hack_log_error
   let root = get_root () in
   match event with
   | Some Client_message c ->
-    let open ClientMessageQueue in
+    let open Jsonrpc_queue in
     HackEventLogger.client_lsp_method_exception
       root c.method_ (kind_to_string c.kind) c.timestamp start_handle_t c.message_json_for_logging
       message stack source
@@ -451,26 +446,38 @@ let hack_log_error
 
 
 (* Determine whether to read a message from the client (the editor) or the
-   server (hh_server). *)
+   server (hh_server), or whether neither is ready within 1s. *)
 let get_message_source
     (server: server_conn)
-    (client: ClientMessageQueue.t)
-  : message_source =
+    (client: Jsonrpc_queue.t)
+    : [> `From_server | `From_client | `No_source ] =
   (* Take action on server messages in preference to client messages, because
      server messages are very easy and quick to service (just send a message to
      the client), while client messages require us to launch a potentially
      long-running RPC command. *)
   let has_server_messages = not (Queue.is_empty server.pending_messages) in
-  if has_server_messages then From_server else
-  if ClientMessageQueue.has_message client then From_client else
+  if has_server_messages then `From_server else
+  if Jsonrpc_queue.has_message client then `From_client else
 
   (* If no immediate messages are available, then wait up to 1 second. *)
   let server_read_fd = Unix.descr_of_out_channel server.oc in
-  let client_read_fd = ClientMessageQueue.get_read_fd client in
+  let client_read_fd = Jsonrpc_queue.get_read_fd client in
   let readable, _, _ = Unix.select [server_read_fd; client_read_fd] [] [] 1.0 in
-  if readable = [] then No_source
-  else if List.mem readable server_read_fd then From_server
-  else From_client
+  if readable = [] then `No_source
+  else if List.mem readable server_read_fd then `From_server
+  else `From_client
+
+
+(* A simplified version of get_message_source which only looks at client *)
+let get_client_message_source
+    (client: Jsonrpc_queue.t)
+  : [> `From_client | `No_source ] =
+  if Jsonrpc_queue.has_message client then `From_client else
+  let client_read_fd = Jsonrpc_queue.get_read_fd client in
+  let readable, _, _ = Unix.select [client_read_fd] [] [] 1.0 in
+  if readable = [] then `No_source
+  else `From_client
+
 
 (*  Read a message unmarshaled from the server's out_channel. *)
 let read_message_from_server (server: server_conn) : event =
@@ -492,34 +499,35 @@ let read_message_from_server (server: server_conn) : event =
    from either client or server, we block until that message is completely
    received. Note: if server is None (meaning we haven't yet established
    connection with server) then we'll just block waiting for client. *)
-let get_next_event (state: state) (client: ClientMessageQueue.t) : event =
+let get_next_event (state: state) (client: Jsonrpc_queue.t) : event =
   let from_server (server: server_conn) =
     if Queue.is_empty server.pending_messages
     then read_message_from_server server
     else Server_message (Queue.take server.pending_messages)
   in
 
-  let from_client (client: ClientMessageQueue.t) =
-    match ClientMessageQueue.get_message client with
-    | ClientMessageQueue.Message message -> Client_message message
-    | ClientMessageQueue.Fatal_exception edata ->
+  let from_client (client: Jsonrpc_queue.t) =
+    match Jsonrpc_queue.get_message client with
+    | Jsonrpc_queue.Message message -> Client_message message
+    | Jsonrpc_queue.Fatal_exception edata ->
       raise (Client_fatal_connection_exception edata)
-    | ClientMessageQueue.Recoverable_exception edata ->
+    | Jsonrpc_queue.Recoverable_exception edata ->
       raise (Client_recoverable_connection_exception edata)
   in
 
-  let from_either server client =
-    match get_message_source server client with
-    | No_source -> Tick
-    | From_client -> from_client client
-    | From_server -> from_server server
-  in
+  match state with
+  | Main_loop { Main_env.conn; _ } | In_init { In_init_env.conn; _ } -> begin
+      match get_message_source conn client with
+      | `From_client -> from_client client
+      | `From_server -> from_server conn
+      | `No_source -> Tick
+    end
+  | _ -> begin
+      match get_client_message_source client with
+      | `From_client -> from_client client
+      | `No_source -> Tick
+    end
 
-  let event = match state with
-    | Main_loop { Main_env.conn; _ } | In_init { In_init_env.conn; _ } -> from_either conn client
-    | _ -> from_client client
-  in
-  event
 
 
 (* cancel_if_stale: If a message is stale, throw the necessary exception to
@@ -529,13 +537,13 @@ let short_timeout = 2.5
 let long_timeout = 15.0
 
 let cancel_if_stale
-    (client: ClientMessageQueue.t)
-    (message: ClientMessageQueue.client_message)
+    (client: Jsonrpc_queue.t)
+    (message: Jsonrpc_queue.jsonrpc_message)
     (timeout: float)
   : unit =
-  let message_received_time = message.ClientMessageQueue.timestamp in
+  let message_received_time = message.Jsonrpc_queue.timestamp in
   let time_elapsed = (Unix.gettimeofday ()) -. message_received_time in
-  if time_elapsed >= timeout && ClientMessageQueue.has_message client
+  if time_elapsed >= timeout && Jsonrpc_queue.has_message client
   then raise (Error.RequestCancelled "request timed out")
 
 
@@ -544,7 +552,7 @@ let cancel_if_stale
 let respond_to_error (event: event option) (e: exn) (stack: string): unit =
   match event with
   | Some (Client_message c)
-    when c.ClientMessageQueue.kind = ClientMessageQueue.Request ->
+    when c.Jsonrpc_queue.kind = Jsonrpc_queue.Request ->
     print_error e stack |> respond stdout c |> ignore
   | _ -> ()
 
@@ -982,7 +990,7 @@ let do_documentFormatting
 
 (* do_server_busy: controls the progress / action-required indicator          *)
 let do_server_busy (status: ServerCommandTypes.busy_status) : unit =
-let open ServerCommandTypes in
+  let open ServerCommandTypes in
   let (progress, action) = match status with
     | Needs_local_typecheck -> (Some "Hack: preparing to check edits", None)
     | Doing_local_typecheck -> (Some "Hack: checking edits", None)
@@ -1119,9 +1127,11 @@ let report_progress_end
     Main_loop menv
 
 
-let do_initialize_after_hello
+(* After the server has sent 'hello', it means the persistent connection is   *)
+(* ready, so we can send our backlog of file-edits to the server.             *)
+let connect_after_hello
     (server_conn: server_conn)
-    (file_edits: ClientMessageQueue.client_message ImmQueue.t)
+    (file_edits: Jsonrpc_queue.jsonrpc_message ImmQueue.t)
   : unit =
   let open Marshal_tools in
   begin try
@@ -1132,8 +1142,8 @@ let do_initialize_after_hello
       if response <> ServerCommandTypes.Connected then
         failwith "Didn't get server Connected response";
 
-      let handle_file_edit (c: ClientMessageQueue.client_message) =
-        let open ClientMessageQueue in
+      let handle_file_edit (c: Jsonrpc_queue.jsonrpc_message) =
+        let open Jsonrpc_queue in
         match c.method_ with
         | "textDocument/didOpen" -> parse_didOpen c.params |> do_didOpen server_conn
         | "textDocument/didChange" -> parse_didChange c.params |> do_didChange server_conn
@@ -1150,30 +1160,7 @@ let do_initialize_after_hello
   rpc server_conn (ServerCommandTypes.SUBSCRIBE_DIAGNOSTIC 0)
 
 
-let do_initialize_start
-    (root: Path.t)
-  : Exit_status.t =
-  (* This basically does "hh_client start": a single attempt to open the     *)
-  (* socket, send+read version and compare for mismatch, send handoff and    *)
-  (* read response. It will print information to stderr. If the server is in *)
-  (* an unresponsive or invalid state then it will kill the server. Next if  *)
-  (* necessary it tries to spawn the server and wait until the monitor is    *)
-  (* responsive enough to print "ready". It will do a hard program exit if   *)
-  (* there were spawn problems.                                              *)
-  let env_start =
-    { ClientStart.
-      root;
-      no_load = false;
-      profile_log = false;
-      ai_mode = None;
-      silent = true;
-      exit_on_failure = false;
-      debug_port = None;
-    } in
-  ClientStart.main env_start
-
-
-let do_initialize_connect
+let connect_client
     (root: Path.t)
   : server_conn =
   let open Exit_status in
@@ -1187,14 +1174,13 @@ let do_initialize_connect
   let env_connect =
     { ClientConnect.
       root;
-      autostart = false; (* we already did a more aggressive start *)
+      autostart = true;
       force_dormant_start = false;
       retries = Some 3; (* each retry takes up to 1 second *)
       expiry = None; (* we can limit retries by time as well as by count *)
-      retry_if_init = true; (* not actually used *)
-      no_load = false; (* only relevant when autostart=true *)
+      no_load = false;
       profile_log = false; (* irrelevant *)
-      ai_mode = None; (* only relevant when autostart=true *)
+      ai_mode = None;
       progress_callback = ClientConnect.null_progress_reporter; (* we're fast! *)
       do_post_handoff_handshake = false;
     } in
@@ -1227,7 +1213,7 @@ let do_initialize_connect
       { Lsp.Initialize.retry = true; }))
 
 
-let do_initialize_hello_attempt
+let connect_attempt_hello
     (server_conn: server_conn)
   : bool =
   (* This waits up to 3 seconds for the server to send "Hello", the first     *)
@@ -1252,55 +1238,59 @@ let do_initialize_hello_attempt
       { Lsp.Initialize.retry = true; }))
 
 
-let do_initialize ()
-  : (Initialize.result * state) =
-  let open Initialize in
+(* connect: this method attempts to connect to the server. If it can within   *)
+(* three seconds then it returns Main_loop state; if not, In_init state.      *)
+(* Errors will be reported as exceptions, including LSP ServerErrorStart.     *)
+let connect ()
+  : state =
   let start_time = Unix.time () in
-  let local_config = ServerLocalConfig.load ~silent:true in
   let root = match get_root () with
     | None -> failwith "we should have root after an initialize request"
     | Some root -> root
   in
 
-  (* This code does the connection protocol. *)
-  let _result_code = do_initialize_start root in
-  let server_conn  = do_initialize_connect root in
-  let got_hello    = do_initialize_hello_attempt server_conn in
-  let new_state =
-    if got_hello then begin
-      do_initialize_after_hello server_conn ImmQueue.empty;
-      Main_loop {
-        conn = server_conn;
-        needs_idle = true;
-        uris_with_diagnostics = SSet.empty;
-        ready_dialog_cancel = None;
-      }
-    end else begin
-      let log_file = Sys_utils.readlink_no_fail (ServerFiles.log_link root) in
-      let clear_cancel_flag state = match state with
-        | In_init ienv -> In_init {ienv with In_init_env.busy_dialog_cancel = None}
-        | _ -> state in
-      let handle_result ~state ~result:_ = clear_cancel_flag state in
-      let handle_error ~state ~code:_ ~message:_ ~data:_ = clear_cancel_flag state in
-      let req = print_showMessageRequest MessageType.InfoMessage
-          "Waiting for Hack server to be ready..." [] in
-      let cancel = request stdout handle_result handle_error "window/showMessageRequest" req in
-      if supports_progress () then begin
-        let progress = "hh_server initializing" in
-        print_progress progress_id_initialize (Some progress) |> notify stdout "window/progress"
-      end;
-      let ienv =
-        { In_init_env.
-          conn = server_conn;
-          start_time;
-          busy_dialog_cancel = Some cancel;
-          file_edits = ImmQueue.empty;
-          tail_env = Tail.create_env log_file;
-        } in
-      In_init ienv
-    end
+  let server_conn = connect_client root in
+  let got_hello = connect_attempt_hello server_conn in
 
-  in
+  if got_hello then begin
+    connect_after_hello server_conn ImmQueue.empty;
+    Main_loop {
+      conn = server_conn;
+      needs_idle = true;
+      uris_with_diagnostics = SSet.empty;
+      ready_dialog_cancel = None;
+    }
+  end else begin
+    let log_file = Sys_utils.readlink_no_fail (ServerFiles.log_link root) in
+    let clear_cancel_flag state = match state with
+      | In_init ienv -> In_init {ienv with In_init_env.busy_dialog_cancel = None}
+      | _ -> state in
+    let handle_result ~state ~result:_ = clear_cancel_flag state in
+    let handle_error ~state ~code:_ ~message:_ ~data:_ = clear_cancel_flag state in
+    let req = print_showMessageRequest MessageType.InfoMessage
+        "Waiting for Hack server to be ready..." [] in
+    let cancel = request stdout handle_result handle_error "window/showMessageRequest" req in
+    if supports_progress () then begin
+      let progress = "hh_server initializing" in
+      print_progress progress_id_initialize (Some progress) |> notify stdout "window/progress"
+    end;
+    let ienv =
+      { In_init_env.
+        conn = server_conn;
+        start_time;
+        busy_dialog_cancel = Some cancel;
+        file_edits = ImmQueue.empty;
+        tail_env = Tail.create_env log_file;
+      } in
+    In_init ienv
+  end
+
+
+let do_initialize ()
+  : (Initialize.result * state) =
+  let open Initialize in
+  let local_config = ServerLocalConfig.load ~silent:true in
+  let new_state = connect () in
   let result = {
     server_capabilities = {
       textDocumentSync = {
@@ -1308,7 +1298,7 @@ let do_initialize ()
         want_change = IncrementalSync;
         want_willSave = false;
         want_willSaveWaitUntil = false;
-        want_didSave = { includeText = false }
+        want_didSave = Some { includeText = false }
       };
       hoverProvider = true;
       completionProvider = Some {
@@ -1355,11 +1345,11 @@ let regain_lost_server_if_necessary (state: state) (event: event) : state =
 let dismiss_ready_dialog_if_necessary (state: state) (event: event) : state =
   (* We'll auto-dismiss the ready dialog if it was up, in response to user    *)
   (* actions like typing or hover, and in response to a lost server.          *)
-  let open ClientMessageQueue in
+  let open Jsonrpc_queue in
   match state with
   | Main_loop ({ready_dialog_cancel = Some cancel; _} as menv) -> begin
       match event with
-      | Client_message {kind = ClientMessageQueue.Response; _} ->
+      | Client_message {kind = Jsonrpc_queue.Response; _} ->
         state
       | Client_message _
       | Server_message ServerCommandTypes.NEW_CLIENT_CONNECTED ->
@@ -1367,6 +1357,12 @@ let dismiss_ready_dialog_if_necessary (state: state) (event: event) : state =
       | _ ->
         state
     end
+  | _ -> state
+
+
+let handle_idle_if_necessary (state: state) (event: event) : state =
+  match state, event with
+  | Main_loop menv, Tick -> Main_loop { menv with needs_idle = true; }
   | _ -> state
 
 
@@ -1380,13 +1376,13 @@ let dismiss_ready_dialog_if_necessary (state: state) (event: event) : state =
 let handle_event
     ~(env: env)
     ~(state: state ref)
-    ~(client: ClientMessageQueue.t)
+    ~(client: Jsonrpc_queue.t)
     ~(event: event)
   : Hh_json.json option =
-  let open ClientMessageQueue in
+  let open Jsonrpc_queue in
   match !state, event with
   (* response *)
-  | _, Client_message c when c.kind = ClientMessageQueue.Response ->
+  | _, Client_message c when c.kind = Jsonrpc_queue.Response ->
     state := do_response !state c.id c.result c.error;
     None
 
@@ -1432,7 +1428,7 @@ let handle_event
 
   (* server completes initialization *)
   | In_init ienv, Server_hello ->
-    do_initialize_after_hello ienv.In_init_env.conn ienv.In_init_env.file_edits;
+    connect_after_hello ienv.In_init_env.conn ienv.In_init_env.file_edits;
     state := report_progress_end ienv;
     None
 
@@ -1600,7 +1596,7 @@ let main (env: env) : 'a =
   let open Marshal_tools in
   Printexc.record_backtrace true;
   HackEventLogger.client_set_from env.from;
-  let client = ClientMessageQueue.make () in
+  let client = Jsonrpc_queue.make () in
   let state = ref Pre_init in
   while true do
     let ref_event = ref None in
@@ -1610,17 +1606,13 @@ let main (env: env) : 'a =
     try
       let event = get_next_event !state client in
       ref_event := Some event;
-      if event <> Tick then begin
-        match !state with
-        | Main_loop menv -> state := Main_loop { menv with needs_idle = true; }
-        | _ -> ()
-      end;
+      state := handle_idle_if_necessary !state event;
       state := regain_lost_server_if_necessary !state event;
       state := dismiss_ready_dialog_if_necessary !state event;
       let response = handle_event ~env ~state ~client ~event in
       match event with
       | Client_message c -> begin
-          let open ClientMessageQueue in
+          let open Jsonrpc_queue in
           let response_for_logging = match response with
             | None -> ""
             | Some json -> json |> Hh_json.json_truncate |> Hh_json.json_to_string

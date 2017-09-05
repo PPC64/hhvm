@@ -88,7 +88,7 @@ struct Repo::GlobalData {
    * so, we assume that '$f()' doesn't read or write over locals (that
    * haven't been passed).
    */
-  bool DisallowDynamicVarEnvFuncs = false;
+  HackStrictOption DisallowDynamicVarEnvFuncs = HackStrictOption::OFF;
 
   /*
    * Indicates whether the repo was compiled with ElideAutoloadInvokes. If so,
@@ -147,6 +147,11 @@ struct Repo::GlobalData {
    */
   bool HackArrCompatNotices = false;
 
+  /*
+   * Should the extension containing HHVM intrinsics be enabled?
+   */
+  bool EnableIntrinsicsExtension = false;
+
   std::vector<const StringData*> APCProfile;
 
   template<class SerDe> void serde(SerDe& sd) {
@@ -168,6 +173,7 @@ struct Repo::GlobalData {
       (PromoteEmptyObject)
       (EnableRenameFunction)
       (HackArrCompatNotices)
+      (EnableIntrinsicsExtension)
       (APCProfile)
       ;
   }

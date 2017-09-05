@@ -203,8 +203,7 @@ module WithExpressionAndStatementAndTypeParser
 
     (* TODO: Some error cases not caught by the parser that should be caught
              in later passes:
-             (1) You cannot mix the "semi" and "compound" flavours in one script
-             (2) Qualified names are a superset of legal namespace names.
+             (1) Qualified names are a superset of legal namespace names.
     *)
     let (parser, namespace_token) = assert_token parser Namespace in
     let (parser1, token) = next_token parser in
@@ -216,7 +215,8 @@ module WithExpressionAndStatementAndTypeParser
       (* ERROR RECOVERY Plainly the name is missing. *)
       (with_error parser SyntaxError.error1004, (make_missing()))
     | _ ->
-      (with_error parser1 SyntaxError.error1004, make_token token) in
+      (* TODO: Death to PHPisms; keywords as namespace names *)
+      require_name_allow_keywords parser in
     let (parser, body) = parse_namespace_body parser in
     let result = make_namespace_declaration namespace_token name body in
     (parser, result)
@@ -563,9 +563,9 @@ module WithExpressionAndStatementAndTypeParser
       TODO: Add an error in a later pass for Hack files. *)
       parse_methodish parser (make_missing()) (make_missing())
     | Var ->
-      (* TODO: We allow "var" as a synonym for "public" in a property; this
+      (* We allow "var" as a synonym for "public" in a property; this
       is a PHP-ism that we do not support in Hack, but we parse anyways
-      so as to give an error later.  Write an error detection pass. *)
+      so as to give an error later. *)
       let (parser, var) = assert_token parser Var in
       parse_property_declaration parser var
     | kind when SimpleParser.expects parser kind -> (parser, make_missing())
@@ -1006,10 +1006,14 @@ module WithExpressionAndStatementAndTypeParser
 
   and parse_const_or_type_const_declaration parser abstr =
     let (parser, const) = assert_token parser Const in
-    if (peek_token_kind parser) = Type
-       && (peek_token_kind ~lookahead:1 parser <> Equal) then
+    let kind1 = peek_token_kind parser in
+    let kind2 = peek_token_kind ~lookahead:1 parser in
+    match kind1, kind2 with
+    | Type, (Equal | Semicolon) ->
+      parse_const_declaration parser abstr const
+    | Type, _ when kind2 <> Equal ->
       parse_type_const_declaration parser abstr const
-    else
+    | _, _ ->
       parse_const_declaration parser abstr const
 
   and parse_property_declaration parser modifiers =
@@ -1103,7 +1107,7 @@ module WithExpressionAndStatementAndTypeParser
       interfaces cannot have concrete type consts with type constraints
     *)
     let (parser, type_token) = assert_token parser Type in
-    let (parser, name) = require_name parser in
+    let (parser, name) = require_name_allow_keywords parser in
     let (parser, type_constraint) = parse_type_constraint_opt parser in
     let (parser, equal_token, type_specifier) = if is_missing abstr then
       let (parser, equal_token) = require_equal parser in
@@ -1369,7 +1373,7 @@ module WithExpressionAndStatementAndTypeParser
     let (parser, function_token) = require_function parser in
     let (parser, ampersand_token) = optional_token parser Ampersand in
     let (parser, label) =
-      parse_function_label parser in
+      parse_function_label_opt parser in
     let (parser, generic_type_parameter_list) =
       parse_generic_type_parameter_list_opt parser in
     let (parser, left_paren_token, parameter_list, right_paren_token) =
@@ -1395,12 +1399,15 @@ module WithExpressionAndStatementAndTypeParser
 
   (* A function label is either a function name, a __construct label, or a
   __destruct label. *)
-  and parse_function_label parser =
+  and parse_function_label_opt parser =
     let (parser1, token) = next_token parser in
     match Token.kind token with
     | Name
     | Construct
     | Destruct -> (parser1, make_token token)
+    | LeftParen ->
+      (* It turns out, it was just a verbose lambda; YOLO PHP *)
+      (parser, make_missing ())
     | _ ->
       (* TODO: We might have a non-reserved keyword as the name here; "empty",
       for example, is a keyword but a legal function name. What we do here is
