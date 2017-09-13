@@ -87,12 +87,14 @@ let remove_whitespace text =
 
 
 let test_minimal source =
-  let source_text = SourceText.make source in
+  let file_path = Relative_path.(create Dummy "<test_minimal>") in
+  let source_text = SourceText.make file_path source in
   let syntax_tree = SyntaxTree.make source_text in
   TestUtils.minimal_to_string (SyntaxTree.root syntax_tree)
 
 let test_mode source =
-  let source_text = SourceText.make source in
+  let file_path = Relative_path.(create Dummy "<test_mode>") in
+  let source_text = SourceText.make file_path source in
   let syntax_tree = SyntaxTree.make source_text in
   let lang = SyntaxTree.language syntax_tree in
   let mode = SyntaxTree.mode syntax_tree in
@@ -103,19 +105,14 @@ let test_mode source =
     lang mode is_strict is_hack is_php
 
 let test_errors source =
-  let source_text = SourceText.make source in
+  let file_path = Relative_path.(create Dummy "<test_errors>") in
+  let source_text = SourceText.make file_path source in
   let offset_to_position = SourceText.offset_to_position source_text in
   let syntax_tree = SyntaxTree.make source_text in
-  let is_strict = SyntaxTree.is_strict syntax_tree in
-  let is_hack = (SyntaxTree.language syntax_tree = "hh") in
-  let root = PositionedSyntax.from_tree syntax_tree in
-  let errors1 = SyntaxTree.errors syntax_tree in
-  let errors2 = ParserErrors.find_syntax_errors root is_strict is_hack in
-  let errors = errors1 @ errors2 in
+  let errors = ParserErrors.parse_errors syntax_tree in
   let mapper err = SyntaxError.to_positioned_string err offset_to_position in
   let errors = List.map errors ~f:mapper in
   Printf.sprintf "%s" (String.concat "\n" errors)
-
 
 let minimal_tests =
   let mapper testname =
@@ -145,6 +142,7 @@ let minimal_tests =
     "test_array_key_value_precedence";
     "test_enum";
     "test_class_with_attributes";
+    "test_class_with_qualified_name";
     "test_namespace";
     "test_empty_class";
     "test_class_method_declaration";
@@ -166,6 +164,7 @@ let minimal_tests =
     "context/test_extra_error_trivia";
     "test_funcall_with_type_arguments";
     "test_nested_namespace_declarations";
+    "test_xhp_attributes";
   ] ~f:mapper
 
 let error_tests =
@@ -217,6 +216,8 @@ let error_tests =
     "test_var_phpism2";
     "test_var_phpism3";
     "test_xhp_attribute_enum_errors";
+    "test_shapes";
+    "test_abstract_final_errors";
   ] ~f:mapper
 
 let test_data = minimal_tests @ error_tests @
@@ -230,7 +231,7 @@ let test_data = minimal_tests @ error_tests @
   {
     name = "test_mode_2";
     source = "";
-    expected = "Lang:Mode:Strict:falseHack:falsePhp:false";
+    expected = "Lang:phpMode:Strict:falseHack:falsePhp:true";
     test_function = test_mode;
   };
   {

@@ -81,10 +81,12 @@ void impl_vec(ISS& env, bool reduce, std::vector<Bytecode>&& bcs) {
 
     auto const wasPEI = env.flags.wasPEI;
     auto const canConstProp = env.flags.canConstProp;
+    auto const effectFree = env.flags.effectFree;
 
     FTRACE(3, "    (impl {}\n", show(env.ctx.func, *it));
     env.flags.wasPEI          = true;
     env.flags.canConstProp    = false;
+    env.flags.effectFree      = false;
     env.flags.strengthReduced = folly::none;
     default_dispatch(env, *it);
 
@@ -107,6 +109,7 @@ void impl_vec(ISS& env, bool reduce, std::vector<Bytecode>&& bcs) {
             env.collect.propagate_constants(*it, env.state, currentReduction)) {
           env.flags.canConstProp = false;
           env.flags.wasPEI = false;
+          env.flags.effectFree = true;
         } else {
           currentReduction.push_back(std::move(*it));
         }
@@ -117,6 +120,7 @@ void impl_vec(ISS& env, bool reduce, std::vector<Bytecode>&& bcs) {
     // then the whole thing could throw.
     env.flags.wasPEI = env.flags.wasPEI || wasPEI;
     env.flags.canConstProp = env.flags.canConstProp && canConstProp;
+    env.flags.effectFree = env.flags.effectFree && effectFree;
     if (env.state.unreachable) break;
   }
 
@@ -150,9 +154,10 @@ void in(ISS& env, const bc::EntryNop&) { nothrow(env); }
 
 void in(ISS& env, const bc::Dup& /*op*/) {
   nothrow(env);
+  auto const topEquiv = topStkEquiv(env);
   auto val = popC(env);
-  push(env, val);
-  push(env, std::move(val));
+  push(env, val, topEquiv);
+  push(env, std::move(val), topEquiv);
 }
 
 void in(ISS& env, const bc::AssertRATL& op) {
@@ -224,60 +229,78 @@ void in(ISS& env, const bc::BoxRNop&) {
   push(env, std::move(t));
 }
 
-void in(ISS& env, const bc::Null&)      { nothrow(env); push(env, TInitNull); }
-void in(ISS& env, const bc::NullUninit&){ nothrow(env); push(env, TUninit); }
-void in(ISS& env, const bc::True&)      { nothrow(env); push(env, TTrue); }
-void in(ISS& env, const bc::False&)     { nothrow(env); push(env, TFalse); }
+void in(ISS& env, const bc::Null&) {
+  effect_free(env);
+  push(env, TInitNull);
+}
+
+void in(ISS& env, const bc::NullUninit&) {
+  effect_free(env);
+  push(env, TUninit);
+}
+
+void in(ISS& env, const bc::True&) {
+  effect_free(env);
+  push(env, TTrue);
+}
+
+void in(ISS& env, const bc::False&) {
+  effect_free(env);
+  push(env, TFalse);
+}
 
 void in(ISS& env, const bc::Int& op) {
-  nothrow(env);
+  effect_free(env);
   push(env, ival(op.arg1));
 }
 
 void in(ISS& env, const bc::Double& op) {
-  nothrow(env);
+  effect_free(env);
   push(env, dval(op.dbl1));
 }
 
 void in(ISS& env, const bc::String& op) {
-  nothrow(env);
+  effect_free(env);
   push(env, sval(op.str1));
 }
 
 void in(ISS& env, const bc::Array& op) {
   assert(op.arr1->isPHPArray());
-  nothrow(env);
+  effect_free(env);
   push(env, aval(op.arr1));
 }
 
 void in(ISS& env, const bc::Vec& op) {
   assert(op.arr1->isVecArray());
-  nothrow(env);
+  effect_free(env);
   push(env, vec_val(op.arr1));
 }
 
 void in(ISS& env, const bc::Dict& op) {
   assert(op.arr1->isDict());
-  nothrow(env);
+  effect_free(env);
   push(env, dict_val(op.arr1));
 }
 
 void in(ISS& env, const bc::Keyset& op) {
   assert(op.arr1->isKeyset());
-  nothrow(env);
+  effect_free(env);
   push(env, keyset_val(op.arr1));
 }
 
 void in(ISS& env, const bc::NewArray& op) {
-  push(env, op.arg1 == 0 ? aempty() : counted_aempty());
+  push(env, op.arg1 == 0 ?
+       effect_free(env), aempty() : counted_aempty());
 }
 
 void in(ISS& env, const bc::NewDictArray& op) {
-  push(env, op.arg1 == 0 ? dict_empty() : counted_dict_empty());
+  push(env, op.arg1 == 0 ?
+       effect_free(env), dict_empty() : counted_dict_empty());
 }
 
 void in(ISS& env, const bc::NewMixedArray& op) {
-  push(env, op.arg1 == 0 ? aempty() : counted_aempty());
+  push(env, op.arg1 == 0 ?
+       effect_free(env), aempty() : counted_aempty());
 }
 
 void in(ISS& env, const bc::NewPackedArray& op) {
@@ -803,10 +826,11 @@ void in(ISS& /*env*/, const bc::Jmp&) {
 template<bool Negate, class JmpOp>
 void jmpImpl(ISS& env, const JmpOp& op) {
   nothrow(env);
+  auto const locId = topStkEquiv(env);
   auto const e = emptiness(popC(env));
   if (e == (Negate ? Emptiness::NonEmpty : Emptiness::Empty)) {
     jmp_nofallthrough(env);
-    env.propagate(op.target, env.state);
+    env.propagate(op.target, &env.state);
     return;
   }
 
@@ -820,7 +844,18 @@ void jmpImpl(ISS& env, const JmpOp& op) {
     jmp_nevertaken(env);
     return;
   }
-  env.propagate(op.target, env.state);
+
+  if (locId == NoLocalId) return env.propagate(op.target, &env.state);
+
+  auto loc = peekLocRaw(env, locId);
+  assertx(!loc.couldBe(TRef)); // we shouldn't have an equivLoc if it was
+
+  auto const converted_true = assert_nonemptiness(loc);
+  auto const converted_false = assert_emptiness(std::move(loc));
+
+  refineLoc(env, locId, Negate ? converted_true : converted_false);
+  env.propagate(op.target, &env.state);
+  refineLoc(env, locId, Negate ? converted_false : converted_true);
 }
 
 void in(ISS& env, const bc::JmpNZ& op) { jmpImpl<true>(env, op); }
@@ -857,7 +892,7 @@ void group(ISS& env, const bc::IsTypeL& istype, const JmpOp& jmp) {
   }();
 
   refineLoc(env, istype.loc1, negate ? was_true : was_false);
-  env.propagate(jmp.target, env.state);
+  env.propagate(jmp.target, &env.state);
   refineLoc(env, istype.loc1, negate ? was_false : was_true);
 }
 
@@ -936,7 +971,7 @@ void typeTestPropagate(ISS& env, Type valTy, Type testTy,
     push(env, std::move(valTy));
     if (takenOnSuccess) {
       jmp_nofallthrough(env);
-      env.propagate(jmp.target, env.state);
+      env.propagate(jmp.target, &env.state);
     } else {
       jmp_nevertaken(env);
     }
@@ -948,13 +983,13 @@ void typeTestPropagate(ISS& env, Type valTy, Type testTy,
       jmp_nevertaken(env);
     } else {
       jmp_nofallthrough(env);
-      env.propagate(jmp.target, env.state);
+      env.propagate(jmp.target, &env.state);
     }
     return;
   }
 
   push(env, std::move(takenOnSuccess ? testTy : failTy));
-  env.propagate(jmp.target, env.state);
+  env.propagate(jmp.target, &env.state);
   discard(env, 1);
   push(env, std::move(takenOnSuccess ? failTy : testTy));
 }
@@ -978,17 +1013,17 @@ void group(ISS& env, const bc::StaticLocCheck& slc, const JmpOp& jmp) {
       env.state = std::move(save);
       jmp_nevertaken(env);
     } else {
-      env.propagate(jmp.target, save);
+      env.propagate(jmp.target, &save);
       jmp_nofallthrough(env);
     }
     return;
   }
 
   if (takenOnInit) {
-    env.propagate(jmp.target, env.state);
+    env.propagate(jmp.target, &env.state);
     env.state = std::move(save);
   } else {
-    env.propagate(jmp.target, save);
+    env.propagate(jmp.target, &save);
   }
 }
 
@@ -1053,95 +1088,53 @@ void group(ISS& env, const bc::MemoGet& get, const bc::IsUninit& /*isuninit*/,
 }
 
 template<class JmpOp>
-void group(ISS& env, const bc::CGetL& cgetl, const JmpOp& jmp) {
-  auto const loc = derefLoc(env, cgetl.loc1);
-  auto const flag = emptiness(loc);
-  if (flag != Emptiness::Maybe) return impl(env, cgetl, jmp);
-
-  if (!locCouldBeUninit(env, cgetl.loc1)) nothrow(env);
-
-  auto const negate = jmp.op == Op::JmpNZ;
-  auto const converted_true = [&]() -> const Type {
-    if (is_opt(loc)) return unopt(loc);
-    if (loc.subtypeOf(TBool)) return TTrue;
-    return loc;
-  }();
-  auto const converted_false = [&]() -> const Type {
-    if (!could_have_magic_bool_conversion(loc) && loc.subtypeOf(TOptObj)) {
-      return TInitNull;
-    }
-    if (loc.subtypeOf(TInt))  return ival(0);
-    if (loc.subtypeOf(TBool)) return TFalse;
-    if (loc.subtypeOf(TDbl))  return dval(0);
-    // Can't tell if any of the other ?primitives are going to be
-    // null based on this, so leave those types alone.  E.g. a Str
-    // might contain "" and be falsey, or an array or collection
-    // could be empty.
-    return loc;
-  }();
-
-  refineLoc(env, cgetl.loc1, negate ? converted_true : converted_false);
-  env.propagate(jmp.target, env.state);
-  refineLoc(env, cgetl.loc1, negate ? converted_false : converted_true);
-}
-
-template<class JmpOp>
 void group(ISS& env,
-           const bc::CGetL& cgetl,
            const bc::InstanceOfD& inst,
            const JmpOp& jmp) {
-  auto bail = [&] { impl(env, cgetl, inst, jmp); };
+  auto bail = [&] { impl(env, inst, jmp); };
 
-  if (interface_supports_non_objects(inst.str1)) return bail();
+  auto const locId = topStkEquiv(env);
+  if (locId == NoLocalId || interface_supports_non_objects(inst.str1)) {
+    return bail();
+  }
+  auto const loc = peekLocRaw(env, locId);
+  assertx(!loc.couldBe(TRef)); // we shouldn't have an equivLoc if it was
   auto const rcls = env.index.resolve_class(env.ctx, inst.str1);
   if (!rcls) return bail();
 
   auto const instTy = subObj(*rcls);
-  auto const loc = derefLoc(env, cgetl.loc1);
   if (loc.subtypeOf(instTy) || !loc.couldBe(instTy)) {
     return bail();
   }
 
+  popC(env);
   auto const negate    = jmp.op == Op::JmpNZ;
   auto const was_true  = instTy;
   auto const was_false = loc;
-  refineLoc(env, cgetl.loc1, negate ? was_true : was_false);
-  env.propagate(jmp.target, env.state);
-  refineLoc(env, cgetl.loc1, negate ? was_false : was_true);
-}
-
-void group(ISS& env,
-           const bc::CGetL& cgetl,
-           const bc::FPushObjMethodD& fpush) {
-  auto const obj = locAsCell(env, cgetl.loc1);
-  impl(env, cgetl, fpush);
-  if (!is_specialized_obj(obj)) {
-    refineLoc(env, cgetl.loc1,
-              fpush.subop3 == ObjMethodOp::NullThrows ? TObj : TOptObj);
-  } else if (is_opt(obj) && fpush.subop3 == ObjMethodOp::NullThrows) {
-    refineLoc(env, cgetl.loc1, unopt(obj));
-  }
+  refineLoc(env, locId, negate ? was_true : was_false);
+  env.propagate(jmp.target, &env.state);
+  refineLoc(env, locId, negate ? was_false : was_true);
 }
 
 void in(ISS& env, const bc::Switch& op) {
   popC(env);
   forEachTakenEdge(op, [&] (BlockId id) {
-      env.propagate(id, env.state);
+      env.propagate(id, &env.state);
   });
 }
 
 void in(ISS& env, const bc::SSwitch& op) {
   popC(env);
   forEachTakenEdge(op, [&] (BlockId id) {
-      env.propagate(id, env.state);
+      env.propagate(id, &env.state);
   });
 }
 
 void in(ISS& env, const bc::RetC& /*op*/) {
-  doRet(env, popC(env));
+  doRet(env, popC(env), false);
 }
 void in(ISS& env, const bc::RetV& /*op*/) {
-  doRet(env, popV(env));
+  doRet(env, popV(env), false);
 }
 void in(ISS& /*env*/, const bc::Unwind& /*op*/) {}
 void in(ISS& env, const bc::Throw& /*op*/) {
@@ -1162,34 +1155,27 @@ void in(ISS& env, const bc::NativeImpl&) {
     assert(!(env.ctx.func->attrs & AttrReference));
     auto const resCls = env.index.builtin_class(env.ctx.cls->name);
     // Can still return null if parameter coercion fails
-    return doRet(env, union_of(objExact(resCls), TInitNull));
+    return doRet(env, union_of(objExact(resCls), TInitNull), true);
   }
 
   if (env.ctx.func->nativeInfo) {
-    return doRet(env, native_function_return_type(env.ctx.func));
+    return doRet(env, native_function_return_type(env.ctx.func), true);
   }
-  doRet(env, TInitGen);
+  doRet(env, TInitGen, true);
 }
 
 void in(ISS& env, const bc::CGetL& op) {
-  LocalId equivLocal = NoLocalId;
-  // If the local could be Uninit or a Ref, don't record equality because the
-  // value on the stack won't the same as in the local.
   if (!locCouldBeUninit(env, op.loc1)) {
     nothrow(env);
     constprop(env);
-    if (!locCouldBeRef(env, op.loc1) &&
-        !is_volatile_local(env.ctx.func, op.loc1)) {
-      equivLocal = op.loc1;
-    }
   }
-  push(env, locAsCell(env, op.loc1), equivLocal);
+  push(env, locAsCell(env, op.loc1), op.loc1);
 }
 
 void in(ISS& env, const bc::CGetQuietL& op) {
   nothrow(env);
   constprop(env);
-  push(env, locAsCell(env, op.loc1));
+  push(env, locAsCell(env, op.loc1), op.loc1);
 }
 
 void in(ISS& env, const bc::CUGetL& op) {
@@ -1200,7 +1186,7 @@ void in(ISS& env, const bc::CUGetL& op) {
   nothrow(env);
   if (!ty.couldBe(TUninit)) constprop(env);
   if (!ty.subtypeOf(TCell)) ty = TCell;
-  push(env, std::move(ty));
+  push(env, std::move(ty), op.loc1);
 }
 
 void in(ISS& env, const bc::PushL& op) {
@@ -1211,9 +1197,10 @@ void in(ISS& env, const bc::CGetL2& op) {
   // Can't constprop yet because of no INS_1 support in bc.h
   if (!locCouldBeUninit(env, op.loc1)) nothrow(env);
   auto loc = locAsCell(env, op.loc1);
+  auto topEquiv = topStkEquiv(env);
   auto top = popT(env);
-  push(env, std::move(loc));
-  push(env, std::move(top));
+  push(env, std::move(loc), op.loc1);
+  push(env, std::move(top), topEquiv);
 }
 
 namespace {
@@ -1655,7 +1642,7 @@ namespace {
 
 /*
  * If the value on the top of the stack is known to be equivalent to the local
- * its being moved/copied to, return folly::none with modifying any
+ * its being moved/copied to, return folly::none without modifying any
  * state. Otherwise, pop the stack value, perform the set, and return a pair
  * giving the value's type, and any other local its known to be equivalent to.
  */
@@ -1671,7 +1658,11 @@ folly::Optional<std::pair<Type, LocalId>> moveToLocImpl(ISS& env,
     if (equivLoc != NoLocalId) {
       if (equivLoc == op.loc1 ||
           locsAreEquiv(env, equivLoc, op.loc1)) {
-        return folly::none;
+        // We allow equivalency to ignore Uninit, so we need to check
+        // the types here.
+        if (peekLocRaw(env, op.loc1) == topC(env)) {
+          return folly::none;
+        }
       }
     } else {
       equivLoc = op.loc1;
@@ -2015,9 +2006,17 @@ void in(ISS& env, const bc::FPushFuncU& op) {
 }
 
 void in(ISS& env, const bc::FPushObjMethodD& op) {
+  auto loc = topStkEquiv(env);
   auto t1 = popC(env);
-  if (is_opt(t1) && op.subop3 == ObjMethodOp::NullThrows) {
-    t1 = unopt(t1);
+  if (op.subop3 == ObjMethodOp::NullThrows) {
+    if (!t1.couldBe(TObj)) {
+      fpiPush(env, ActRec { FPIKind::ObjMeth });
+      return unreachable(env);
+    }
+    if (is_opt(t1)) t1 = unopt(std::move(t1));
+  } else if (!t1.couldBe(TOptObj)) {
+    fpiPush(env, ActRec { FPIKind::ObjMeth });
+    return unreachable(env);
   }
   auto const clsTy = objcls(t1);
   auto const rcls = [&]() -> folly::Optional<res::Class> {
@@ -2030,6 +2029,17 @@ void in(ISS& env, const bc::FPushObjMethodD& op) {
     rcls,
     env.index.resolve_method(env.ctx, clsTy, op.str2)
   });
+  if (loc != NoLocalId) {
+    auto locTy = peekLocRaw(env, loc);
+    if (locTy.subtypeOf(TCell)) {
+      if (!is_specialized_obj(locTy)) {
+        refineLoc(env, loc,
+                  op.subop3 == ObjMethodOp::NullThrows ? TObj : TOptObj);
+      } else if (is_opt(locTy) && op.subop3 == ObjMethodOp::NullThrows) {
+        refineLoc(env, loc, unopt(locTy));
+      }
+    }
+  }
 }
 
 void in(ISS& env, const bc::FPushObjMethod& op) {
@@ -2130,19 +2140,26 @@ void in(ISS& env, const bc::FPushCufSafe&) {
   push(env, TBool);
 }
 
+void in(ISS& env, const bc::RaiseFPassWarning& op) {
+}
+
 void in(ISS& env, const bc::FPassL& op) {
   switch (prepKind(env, op.arg1)) {
   case PrepKind::Unknown:
-    if (!locCouldBeUninit(env, op.loc2)) nothrow(env);
+    if (!locCouldBeUninit(env, op.loc2) && op.subop3 == FPassHint::Any) {
+      nothrow(env);
+    }
     // This might box the local, we can't tell.  Note: if the local
     // is already TRef, we could try to leave it alone, but not for
     // now.
     setLocRaw(env, op.loc2, TGen);
     return push(env, TInitGen);
   case PrepKind::Val:
-    return reduce_fpass_arg(env, bc::CGetL { op.loc2 }, op.arg1, false);
+    return reduce_fpass_arg(env, bc::CGetL { op.loc2 }, op.arg1, false,
+                            op.subop3);
   case PrepKind::Ref:
-    return reduce_fpass_arg(env, bc::VGetL { op.loc2 }, op.arg1, true);
+    return reduce_fpass_arg(env, bc::VGetL { op.loc2 }, op.arg1, true,
+                            op.subop3);
   }
 }
 
@@ -2157,11 +2174,13 @@ void in(ISS& env, const bc::FPassN& op) {
   case PrepKind::Val: return reduce_fpass_arg(env,
                                               bc::CGetN {},
                                               op.arg1,
-                                              false);
+                                              false,
+                                              op.subop2);
   case PrepKind::Ref: return reduce_fpass_arg(env,
                                               bc::VGetN {},
                                               op.arg1,
-                                              true);
+                                              true,
+                                              op.subop2);
   }
 }
 
@@ -2171,11 +2190,13 @@ void in(ISS& env, const bc::FPassG& op) {
   case PrepKind::Val:     return reduce_fpass_arg(env,
                                                   bc::CGetG {},
                                                   op.arg1,
-                                                  false);
+                                                  false,
+                                                  op.subop2);
   case PrepKind::Ref:     return reduce_fpass_arg(env,
                                                   bc::VGetG {},
                                                   op.arg1,
-                                                  true);
+                                                  true,
+                                                  op.subop2);
   }
 }
 
@@ -2201,85 +2222,92 @@ void in(ISS& env, const bc::FPassS& op) {
     }
     return push(env, TInitGen);
   case PrepKind::Val:
-    return reduce_fpass_arg(env, bc::CGetS { op.slot }, op.arg1, false);
+    return reduce_fpass_arg(env, bc::CGetS { op.slot }, op.arg1, false,
+                            op.subop3);
   case PrepKind::Ref:
-    return reduce_fpass_arg(env, bc::VGetS { op.slot }, op.arg1, true);
+    return reduce_fpass_arg(env, bc::VGetS { op.slot }, op.arg1, true,
+                            op.subop3);
   }
 }
 
 void in(ISS& env, const bc::FPassV& op) {
-  nothrow(env);
-  switch (prepKind(env, op.arg1)) {
+  auto const kind = prepKind(env, op.arg1);
+  if (!fpassCanThrow(env, kind, op.subop2)) nothrow(env);
+  switch (kind) {
   case PrepKind::Unknown:
     popV(env);
     return push(env, TInitGen);
   case PrepKind::Val:
-    return reduce_fpass_arg(env, bc::Unbox {}, op.arg1, false);
+    return reduce_fpass_arg(env, bc::Unbox {}, op.arg1, false, op.subop2);
   case PrepKind::Ref:
-    return reduce_fpass_arg(env, bc::Nop {}, op.arg1, true);
+    return reduce_fpass_arg(env, bc::Nop {}, op.arg1, true, op.subop2);
   }
 }
 
 void in(ISS& env, const bc::FPassR& op) {
-  nothrow(env);
+  auto const kind = prepKind(env, op.arg1);
+  if (!fpassCanThrow(env, kind, op.subop2)) nothrow(env);
   if (fpiTop(env).kind == FPIKind::Builtin) {
-    switch (prepKind(env, op.arg1)) {
+    switch (kind) {
     case PrepKind::Unknown:
       not_reached();
     case PrepKind::Val:
-      return reduce(env, bc::UnboxR {});
+      return reduceFPassBuiltin(env, kind, op.subop2, op.arg1, bc::UnboxR {});
     case PrepKind::Ref:
-      return reduce(env, bc::BoxR {});
+      return reduceFPassBuiltin(env, kind, op.subop2, op.arg1, bc::BoxR {});
     }
   }
 
   auto const t1 = topT(env);
   if (t1.subtypeOf(TCell)) {
-    return reduce_fpass_arg(env, bc::UnboxRNop {}, op.arg1, false);
+    return reduce_fpass_arg(env, bc::UnboxRNop {}, op.arg1, false, op.subop2);
   }
 
   // If it's known to be a ref, this behaves like FPassV, except we need to do
   // it slightly differently to keep stack flavors correct.
   if (t1.subtypeOf(TRef)) {
-    switch (prepKind(env, op.arg1)) {
+    switch (kind) {
     case PrepKind::Unknown:
       popV(env);
       return push(env, TInitGen);
     case PrepKind::Val:
-      return reduce_fpass_arg(env, bc::UnboxR {}, op.arg1, false);
+      return reduce_fpass_arg(env, bc::UnboxR {}, op.arg1, false, op.subop2);
     case PrepKind::Ref:
-      return reduce_fpass_arg(env, bc::BoxRNop {}, op.arg1, true);
+      return reduce_fpass_arg(env, bc::BoxRNop {}, op.arg1, true, op.subop2);
     }
     not_reached();
   }
 
   // Here we don't know if it is going to be a cell or a ref.
-  switch (prepKind(env, op.arg1)) {
+  switch (kind) {
   case PrepKind::Unknown:      popR(env); return push(env, TInitGen);
   case PrepKind::Val:          popR(env); return push(env, TInitCell);
   case PrepKind::Ref:          popR(env); return push(env, TRef);
   }
 }
 
-void in(ISS& env, const bc::FPassVNop&) {
+void in(ISS& env, const bc::FPassVNop& op) {
   push(env, popV(env));
   if (fpiTop(env).kind == FPIKind::Builtin) {
-    return reduce(env, bc::Nop {});
+    return reduceFPassBuiltin(env, prepKind(env, op.arg1), op.subop2, op.arg1,
+                              bc::Nop {});
   }
-  nothrow(env);
+  if (op.subop2 != FPassHint::Cell) nothrow(env);
 }
 
-void in(ISS& env, const bc::FPassC& /*op*/) {
+void in(ISS& env, const bc::FPassC& op) {
   if (fpiTop(env).kind == FPIKind::Builtin) {
-    return reduce(env, bc::Nop {});
+    return reduceFPassBuiltin(env, prepKind(env, op.arg1), op.subop2, op.arg1,
+                              bc::Nop {});
   }
-  nothrow(env);
+  if (op.subop2 != FPassHint::Ref) nothrow(env);
 }
 
-void fpassCXHelper(ISS& env, uint32_t param, bool error) {
+void fpassCXHelper(ISS& env, uint32_t param, bool error, FPassHint hint) {
   auto const& fpi = fpiTop(env);
+  auto const kind = prepKind(env, param);
   if (fpi.kind == FPIKind::Builtin) {
-    switch (prepKind(env, param)) {
+    switch (kind) {
       case PrepKind::Unknown:
         not_reached();
       case PrepKind::Ref:
@@ -2287,15 +2315,25 @@ void fpassCXHelper(ISS& env, uint32_t param, bool error) {
         auto const& params = fpi.func->exactFunc()->params;
         if (param >= params.size() || params[param].mustBeRef) {
           if (error) {
-            return reduce(env,
-                          bc::String { s_byRefError.get() },
-                          bc::Fatal { FatalOp::Runtime });
+            return reduceFPassBuiltin(
+              env,
+              kind,
+              hint,
+              param,
+              bc::String { s_byRefError.get() },
+              bc::Fatal { FatalOp::Runtime }
+            );
           } else {
-            return reduce(env,
-                          bc::String { s_byRefWarn.get() },
-                          bc::Int { (int)ErrorMode::STRICT },
-                          bc::FCallBuiltin { 2, 2, s_trigger_error.get() },
-                          bc::PopC {});
+            return reduceFPassBuiltin(
+              env,
+              kind,
+              hint,
+              param,
+              bc::String { s_byRefWarn.get() },
+              bc::Int { (int)ErrorMode::STRICT },
+              bc::FCallBuiltin { 2, 2, s_trigger_error.get() },
+              bc::PopC {}
+            );
           }
         }
         // fall through
@@ -2305,19 +2343,19 @@ void fpassCXHelper(ISS& env, uint32_t param, bool error) {
     }
     not_reached();
   }
-  switch (prepKind(env, param)) {
+  switch (kind) {
     case PrepKind::Unknown: return;
-    case PrepKind::Val:     return reduce(env, bc::FPassC { param });
+    case PrepKind::Val:     return reduce(env, bc::FPassC { param, hint });
     case PrepKind::Ref:     /* will warn/fatal at runtime */ return;
   }
 }
 
 void in(ISS& env, const bc::FPassCW& op) {
-  fpassCXHelper(env, op.arg1, false);
+  fpassCXHelper(env, op.arg1, false, op.subop2);
 }
 
 void in(ISS& env, const bc::FPassCE& op) {
-  fpassCXHelper(env, op.arg1, true);
+  fpassCXHelper(env, op.arg1, true, op.subop2);
 }
 
 void pushCallReturnType(ISS& env, Type&& ty) {
@@ -2334,6 +2372,13 @@ const StaticString s_function_exists { "function_exists" };
 void fcallKnownImpl(ISS& env, uint32_t numArgs) {
   auto const ar = fpiPop(env);
   always_assert(ar.func.hasValue());
+
+  if (options.ConstantFoldBuiltins && ar.func->isFoldable()) {
+    if (auto val = const_fold(env, numArgs, *ar.func)) {
+      return push(env, std::move(*val));
+    }
+  }
+
   specialFunctionEffects(env, ar);
 
   if (ar.func->name()->isame(s_function_exists.get())) {
@@ -2439,12 +2484,10 @@ void in(ISS& env, const bc::FCallD& op) {
 }
 
 void in(ISS& env, const bc::FCallAwait& op) {
-  in(env, bc::FCallD { op.arg1, op.str2, op.str3 });
-  in(env, bc::UnboxRNop { });
-  in(env, bc::Await { });
-
-  env.flags.wasPEI = true;
-  env.flags.canConstProp = false;
+  impl(env,
+       bc::FCallD { op.arg1, op.str2, op.str3 },
+       bc::UnboxRNop {},
+       bc::Await {});
 }
 
 void fcallArrayImpl(ISS& env, int arg) {
@@ -2489,51 +2532,92 @@ void in(ISS& env, const bc::CufSafeReturn&) {
 
 void in(ISS& env, const bc::DecodeCufIter& op) {
   popC(env); // func
-  env.propagate(op.target, env.state); // before iter is modifed
+  env.propagate(op.target, &env.state); // before iter is modifed
 }
 
 void in(ISS& env, const bc::IterInit& op) {
   auto const t1 = popC(env);
-  // Take the branch before setting locals if the iter is already
-  // empty, but after popping.  Similar for the other IterInits
-  // below.
-  freeIter(env, op.iter1);
-  env.propagate(op.target, env.state);
-  if (t1.subtypeOfAny(TArrE, TVecE, TDictE, TKeysetE)) {
-    nothrow(env);
-    jmp_nofallthrough(env);
-    return;
-  }
   auto ity = iter_types(t1);
-  setLoc(env, op.loc3, ity.second);
-  setIter(env, op.iter1, TrackedIter { std::move(ity) });
+  if (!ity.mayThrowOnInit) nothrow(env);
+
+  auto const taken = [&]{
+    // Take the branch before setting locals if the iter is already
+    // empty, but after popping.  Similar for the other IterInits
+    // below.
+    freeIter(env, op.iter1);
+    env.propagate(op.target, &env.state);
+  };
+
+  auto const fallthrough = [&]{
+    setLoc(env, op.loc3, ity.value);
+    setIter(env, op.iter1, TrackedIter { std::move(ity) });
+  };
+
+  switch (ity.count) {
+    case IterTypes::Count::Empty:
+      taken();
+      mayReadLocal(env, op.loc3);
+      jmp_nofallthrough(env);
+      break;
+    case IterTypes::Count::Single:
+    case IterTypes::Count::NonEmpty:
+      fallthrough();
+      jmp_nevertaken(env);
+      break;
+    case IterTypes::Count::ZeroOrOne:
+    case IterTypes::Count::Any:
+      taken();
+      fallthrough();
+      break;
+  }
 }
 
 void in(ISS& env, const bc::MIterInit& op) {
   popV(env);
-  env.propagate(op.target, env.state);
+  env.propagate(op.target, &env.state);
   unbindLocalStatic(env, op.loc3);
   setLocRaw(env, op.loc3, TRef);
 }
 
 void in(ISS& env, const bc::IterInitK& op) {
   auto const t1 = popC(env);
-  freeIter(env, op.iter1);
-  env.propagate(op.target, env.state);
-  if (t1.subtypeOfAny(TArrE, TVecE, TDictE, TKeysetE)) {
-    nothrow(env);
-    jmp_nofallthrough(env);
-    return;
-  }
   auto ity = iter_types(t1);
-  setLoc(env, op.loc3, ity.second);
-  setLoc(env, op.loc4, ity.first);
-  setIter(env, op.iter1, TrackedIter { std::move(ity) });
+  if (!ity.mayThrowOnInit) nothrow(env);
+
+  auto const taken = [&]{
+    freeIter(env, op.iter1);
+    env.propagate(op.target, &env.state);
+  };
+
+  auto const fallthrough = [&]{
+    setLoc(env, op.loc3, ity.value);
+    setLoc(env, op.loc4, ity.key);
+    setIter(env, op.iter1, TrackedIter { std::move(ity) });
+  };
+
+  switch (ity.count) {
+    case IterTypes::Count::Empty:
+      taken();
+      mayReadLocal(env, op.loc3);
+      mayReadLocal(env, op.loc4);
+      jmp_nofallthrough(env);
+      break;
+    case IterTypes::Count::Single:
+    case IterTypes::Count::NonEmpty:
+      fallthrough();
+      jmp_nevertaken(env);
+      break;
+    case IterTypes::Count::ZeroOrOne:
+    case IterTypes::Count::Any:
+      taken();
+      fallthrough();
+      break;
+  }
 }
 
 void in(ISS& env, const bc::MIterInitK& op) {
   popV(env);
-  env.propagate(op.target, env.state);
+  env.propagate(op.target, &env.state);
   unbindLocalStatic(env, op.loc3);
   setLocRaw(env, op.loc3, TRef);
   setLoc(env, op.loc4, TInitCell);
@@ -2541,7 +2625,7 @@ void in(ISS& env, const bc::MIterInitK& op) {
 
 void in(ISS& env, const bc::WIterInit& op) {
   popC(env);
-  env.propagate(op.target, env.state);
+  env.propagate(op.target, &env.state);
   // WIter* instructions may leave the value locals as either refs
   // or cells, depending whether the rhs of the assignment was a
   // ref.
@@ -2550,7 +2634,7 @@ void in(ISS& env, const bc::WIterInit& op) {
 
 void in(ISS& env, const bc::WIterInitK& op) {
   popC(env);
-  env.propagate(op.target, env.state);
+  env.propagate(op.target, &env.state);
   setLocRaw(env, op.loc3, TInitGen);
   setLoc(env, op.loc4, TInitCell);
 }
@@ -2558,23 +2642,42 @@ void in(ISS& env, const bc::WIterInitK& op) {
 void in(ISS& env, const bc::IterNext& op) {
   auto const curLoc3 = locRaw(env, op.loc3);
 
-  match<void>(
+  auto const noTaken = match<bool>(
     env.state.iters[op.iter1],
     [&] (UnknownIter)           {
       setLoc(env, op.loc3, TInitCell);
+      return false;
     },
     [&] (const TrackedIter& ti) {
-      setLoc(env, op.loc3, ti.kv.second);
+      if (!ti.types.mayThrowOnNext) nothrow(env);
+      switch (ti.types.count) {
+        case IterTypes::Count::Single:
+        case IterTypes::Count::ZeroOrOne:
+          return true;
+        case IterTypes::Count::NonEmpty:
+        case IterTypes::Count::Any:
+          setLoc(env, op.loc3, ti.types.value);
+          return false;
+        case IterTypes::Count::Empty:
+          always_assert(false);
+      }
+      not_reached();
     }
   );
-  env.propagate(op.target, env.state);
+  if (noTaken) {
+    jmp_nevertaken(env);
+    freeIter(env, op.iter1);
+    return;
+  }
+
+  env.propagate(op.target, &env.state);
 
   freeIter(env, op.iter1);
-  if (curLoc3.subtypeOf(TInitCell)) setLocRaw(env, op.loc3, curLoc3);
+  setLocRaw(env, op.loc3, curLoc3);
 }
 
 void in(ISS& env, const bc::MIterNext& op) {
-  env.propagate(op.target, env.state);
+  env.propagate(op.target, &env.state);
   unbindLocalStatic(env, op.loc3);
   setLocRaw(env, op.loc3, TRef);
 }
@@ -2583,38 +2686,57 @@ void in(ISS& env, const bc::IterNextK& op) {
   auto const curLoc3 = locRaw(env, op.loc3);
   auto const curLoc4 = locRaw(env, op.loc4);
 
-  match<void>(
+  auto const noTaken = match<bool>(
     env.state.iters[op.iter1],
-    [&] (UnknownIter) {
+    [&] (UnknownIter)           {
       setLoc(env, op.loc3, TInitCell);
       setLoc(env, op.loc4, TInitCell);
+      return false;
     },
     [&] (const TrackedIter& ti) {
-      setLoc(env, op.loc3, ti.kv.second);
-      setLoc(env, op.loc4, ti.kv.first);
+      if (!ti.types.mayThrowOnNext) nothrow(env);
+      switch (ti.types.count) {
+        case IterTypes::Count::Single:
+        case IterTypes::Count::ZeroOrOne:
+          return true;
+        case IterTypes::Count::NonEmpty:
+        case IterTypes::Count::Any:
+          setLoc(env, op.loc3, ti.types.value);
+          setLoc(env, op.loc4, ti.types.key);
+          return false;
+        case IterTypes::Count::Empty:
+          always_assert(false);
+      }
+      not_reached();
     }
   );
-  env.propagate(op.target, env.state);
+  if (noTaken) {
+    jmp_nevertaken(env);
+    freeIter(env, op.iter1);
+    return;
+  }
+
+  env.propagate(op.target, &env.state);
 
   freeIter(env, op.iter1);
-  if (curLoc3.subtypeOf(TInitCell)) setLocRaw(env, op.loc3, curLoc3);
-  if (curLoc4.subtypeOf(TInitCell)) setLocRaw(env, op.loc4, curLoc4);
+  setLocRaw(env, op.loc3, curLoc3);
+  setLocRaw(env, op.loc4, curLoc4);
 }
 
 void in(ISS& env, const bc::MIterNextK& op) {
-  env.propagate(op.target, env.state);
+  env.propagate(op.target, &env.state);
   unbindLocalStatic(env, op.loc3);
   setLocRaw(env, op.loc3, TRef);
   setLoc(env, op.loc4, TInitCell);
 }
 
 void in(ISS& env, const bc::WIterNext& op) {
-  env.propagate(op.target, env.state);
+  env.propagate(op.target, &env.state);
   setLocRaw(env, op.loc3, TInitGen);
 }
 
 void in(ISS& env, const bc::WIterNextK& op) {
-  env.propagate(op.target, env.state);
+  env.propagate(op.target, &env.state);
   setLocRaw(env, op.loc3, TInitGen);
   setLoc(env, op.loc4, TInitCell);
 }
@@ -2634,7 +2756,7 @@ void in(ISS& env, const bc::CIterFree& op) {
 
 void in(ISS& env, const bc::IterBreak& op) {
   for (auto& kv : op.iterTab) freeIter(env, kv.second);
-  env.propagate(op.target, env.state);
+  env.propagate(op.target, &env.state);
 }
 
 /*
@@ -3142,21 +3264,12 @@ void interpStep(ISS& env, Iterator& it, Iterator stop) {
                   it + 2 != stop ? it[2].op : Op::Nop;
 
   switch (o1) {
-  case Op::CGetL:
+  case Op::InstanceOfD:
     switch (o2) {
-    case Op::JmpZ:   return group(env, it, it[0].CGetL, it[1].JmpZ);
-    case Op::JmpNZ:  return group(env, it, it[0].CGetL, it[1].JmpNZ);
-    case Op::InstanceOfD:
-      switch (o3) {
-      case Op::JmpZ:
-        return group(env, it, it[0].CGetL, it[1].InstanceOfD, it[2].JmpZ);
-      case Op::JmpNZ:
-        return group(env, it, it[0].CGetL, it[1].InstanceOfD, it[2].JmpNZ);
-      default: break;
-      }
-      break;
-    case Op::FPushObjMethodD:
-      return group(env, it, it[0].CGetL, it[1].FPushObjMethodD);
+    case Op::JmpZ:
+      return group(env, it, it[0].InstanceOfD, it[1].JmpZ);
+    case Op::JmpNZ:
+      return group(env, it, it[0].InstanceOfD, it[1].JmpNZ);
     default: break;
     }
     break;
@@ -3273,12 +3386,17 @@ StepFlags interpOps(Interp& interp,
       FTRACE(2, "   nothrow (due to constprop)\n");
       flags.wasPEI = false;
     }
+    if (!flags.effectFree) {
+      FTRACE(2, "   effect_free (due to constprop)\n");
+      flags.effectFree = true;
+    }
   }
 
+  assertx(!flags.effectFree || !flags.wasPEI);
   if (flags.wasPEI) {
     FTRACE(2, "   PEI.\n");
     for (auto factored : interp.blk->factoredExits) {
-      propagate(factored, stateBefore);
+      propagate(factored, &stateBefore);
     }
   }
   return flags;
@@ -3298,6 +3416,10 @@ RunFlags run(Interp& interp, PropagateFn propagate) {
   auto iter       = begin(interp.blk->hhbcs);
   while (iter != stop) {
     auto const flags = interpOps(interp, iter, stop, propagate);
+    if (interp.collect.effectFree && !flags.effectFree) {
+      interp.collect.effectFree = false;
+    }
+
     if (flags.usedLocalStatics) {
       if (!ret.usedLocalStatics) {
         ret.usedLocalStatics = std::move(flags.usedLocalStatics);
@@ -3332,14 +3454,14 @@ RunFlags run(Interp& interp, PropagateFn propagate) {
 
   FTRACE(2, "  <end block>\n");
   if (interp.blk->fallthrough != NoBlockId) {
-    propagate(interp.blk->fallthrough, interp.state);
+    propagate(interp.blk->fallthrough, &interp.state);
   }
   return ret;
 }
 
 StepFlags step(Interp& interp, const Bytecode& op) {
   auto flags   = StepFlags{};
-  auto noop    = [] (BlockId, const State&) {};
+  auto noop    = [] (BlockId, const State*) {};
   ISS env { interp, flags, noop };
   dispatch(env, op);
   return flags;

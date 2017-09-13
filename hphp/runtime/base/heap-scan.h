@@ -244,7 +244,6 @@ inline void ObjectData::scan(type_scan::Scanner& scanner) const {
 // Descriptive wrapper types to annotate root nodes
 struct PhpStack    { TYPE_SCAN_CONSERVATIVE_ALL; void* dummy; };
 struct CppStack    { TYPE_SCAN_CONSERVATIVE_ALL; void* dummy; };
-struct CppTls      { TYPE_SCAN_CONSERVATIVE_ALL; void* dummy; };
 
 // call fn(ptr,size,tyindex) for each thing in RDS, including the php stack
 // and the rds local segment. The RDS shared part cannot contain pointers.
@@ -272,21 +271,10 @@ inline void iterateRds(rds::Header* rds, Fn fn) {
      type_scan::getIndexForScan<PhpStack>());
 }
 
-template<class T> struct EphemeralPtrWrapper {
-  T ptr;
-  TYPE_SCAN_CUSTOM_FIELD(ptr) { scanner.enqueue(ptr); }
-};
-
 template<class Fn>
 void MemoryManager::iterateRoots(Fn fn) const {
-  using Wrapper = EphemeralPtrWrapper<HeapObject*>;
-  for (auto s = m_sweepables.next(); s != &m_sweepables; s = s->next()) {
-    if (auto h = static_cast<HeapObject*>(s->owner())) {
-      assert(h->kind() == HeaderKind::Resource || isObjectKind(h->kind()));
-      auto w = Wrapper{h};
-      fn(&w, sizeof(w), type_scan::getIndexForScan<Wrapper>());
-    }
-  }
+  fn(&m_sweepables, sizeof(m_sweepables),
+     type_scan::getIndexForScan<SweepableList>());
   for (auto& node: m_natives) {
     fn(&node, sizeof(node), type_scan::getIndexForScan<NativeNode*>());
   }
@@ -321,36 +309,11 @@ template<class Fn> void iterateRoots(Fn fn) {
   fn(sp, s_stackLimit + s_stackSize - uintptr_t(sp),
      type_scan::getIndexForScan<CppStack>());
 
-  // C++ threadlocal data, but don't scan MemoryManager
-  auto tdata = getCppTdata(); // tdata = { ptr, size }
-  if (tdata.second > 0) {
-    auto tm = (char*)tdata.first;
-    auto tm_end = tm + tdata.second;
-    auto mm = (char*)&MM();
-    auto mm_end = mm + sizeof(MemoryManager);
-    if (mm >= tm && mm_end <= tm_end) {
-      fn(tm, mm - tm, type_scan::getIndexForScan<CppTls>());
-      fn(mm_end, tm_end - mm_end, type_scan::getIndexForScan<CppTls>());
-    } else {
-      fn(tm, tdata.second, type_scan::getIndexForScan<CppTls>());
-    }
-  }
-
-  // ThreadLocal nodes (but skip MemoryManager)
+  // ThreadLocal nodes
   ThreadLocalManager::GetManager().iterate(fn);
 
   // Root handles & sweep lists
   MM().iterateRoots(fn);
-
-  // asio session
-  if (auto asio = AsioSession::Get()) {
-    // ThreadLocalProxy<T> instances aren't in ThreadLocalManager.
-    // asio was created with req::make_raw<AsioSession>, but we dont have
-    // the address of the thread local AsioSession*.
-    using Wrapper = EphemeralPtrWrapper<AsioSession*>;
-    auto w = Wrapper{asio};
-    fn(&w, sizeof(w), type_scan::getIndexForScan<Wrapper>());
-  }
 
   // Zend compat resources
 #ifdef ENABLE_ZEND_COMPAT

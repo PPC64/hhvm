@@ -88,6 +88,8 @@ OPCODES
 
 namespace {
 
+Type peekLocRaw(ISS& env, LocalId l);
+
 #ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-function"
@@ -130,6 +132,15 @@ void reduce(ISS& env, Bytecodes&&... hhbc) {
   reduce(env, { std::forward<Bytecodes>(hhbc)... });
 }
 
+bool fpassCanThrow(ISS& env, PrepKind kind, FPassHint hint) {
+  switch (kind) {
+  case PrepKind::Unknown: return hint != FPassHint::Any;
+  case PrepKind::Val:     return hint == FPassHint::Ref;
+  case PrepKind::Ref:     return hint == FPassHint::Cell;
+  }
+  not_reached();
+}
+
 void nothrow(ISS& env) {
   FTRACE(2, "    nothrow\n");
   env.flags.wasPEI = false;
@@ -139,9 +150,16 @@ void unreachable(ISS& env) {
   FTRACE(2, "    unreachable\n");
   env.state.unreachable = true;
 }
+
 void constprop(ISS& env) {
   FTRACE(2, "    constprop\n");
   env.flags.canConstProp = true;
+}
+
+void effect_free(ISS& env) {
+  FTRACE(2, "    effect_free\n");
+  nothrow(env);
+  env.flags.effectFree = true;
 }
 
 void jmp_nofallthrough(ISS& env) {
@@ -210,9 +228,18 @@ void killLocals(ISS& env) {
   env.state.equivLocals.clear();
 }
 
-void doRet(ISS& env, Type t) {
+void doRet(ISS& env, Type t, bool hasEffects) {
   readAllLocals(env);
   assert(env.state.stack.empty());
+  if (!hasEffects) {
+    for (auto const& l : env.state.locals) {
+      if (could_run_destructor(l)) {
+        hasEffects = true;
+        break;
+      }
+    }
+    if (!hasEffects) effect_free(env);
+  }
   env.flags.returned = t;
 }
 
@@ -370,9 +397,18 @@ Type& topV(ISS& env, uint32_t i = 0) {
   return topT(env, i);
 }
 
-void push(ISS& env, Type t, LocalId l = NoLocalId) {
+void push(ISS& env, Type t) {
   FTRACE(2, "    push: {}\n", show(t));
-  always_assert(l == NoLocalId || !is_volatile_local(env.ctx.func, l));
+  env.state.stack.push_back(StackElem {std::move(t), NoLocalId});
+}
+
+void push(ISS& env, Type t, LocalId l) {
+  if (l == NoLocalId || peekLocRaw(env, l).couldBe(TRef)) {
+    return push(env, t);
+  }
+  assertx(!is_volatile_local(env.ctx.func, l)); // volatiles are TGen
+  FTRACE(2, "    push: {} (={})\n",
+         show(t), local_string(*env.ctx.func, l));
   env.state.stack.push_back(StackElem {std::move(t), l});
 }
 
@@ -381,7 +417,13 @@ void push(ISS& env, Type t, LocalId l = NoLocalId) {
 
 void fpiPush(ISS& env, ActRec ar) {
   FTRACE(2, "    fpi+: {}\n", show(ar));
-  env.state.fpiStack.push_back(ar);
+  if (ar.kind != FPIKind::Ctor &&
+      ar.kind != FPIKind::Builtin &&
+      ar.func &&
+      (ar.func->isFoldable() || env.index.is_effect_free(*ar.func))) {
+    ar.foldable = true;
+  }
+  env.state.fpiStack.push_back(std::move(ar));
 }
 
 ActRec fpiPop(ISS& env) {
@@ -406,6 +448,25 @@ PrepKind prepKind(ISS& env, uint32_t paramId) {
   }
   assert(ar.kind != FPIKind::Builtin);
   return PrepKind::Unknown;
+}
+
+template<class... Bytecodes>
+void reduceFPassBuiltin(ISS& env, PrepKind kind, FPassHint hint, uint32_t arg,
+                        Bytecodes&&... bcs) {
+  assert(kind != PrepKind::Unknown);
+
+  // Since PrepKind is never Unknown for FCallBuiltins we should know statically
+  // if we will throw or not at runtime (PrepKind and FPassHint don't match).
+  if (fpassCanThrow(env, kind, hint)) {
+    auto ar = fpiTop(env);
+    assert(ar.kind == FPIKind::Builtin && ar.func && !ar.fallbackFunc);
+    return reduce(
+      env,
+      std::forward<Bytecodes>(bcs)...,
+      bc::RaiseFPassWarning { hint, ar.func->name(), arg }
+    );
+  }
+  return reduce(env, std::forward<Bytecodes>(bcs)...);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -514,13 +575,17 @@ void killAllStkEquiv(ISS& env) {
   for (auto& e : env.state.stack) e.equivLocal = NoLocalId;
 }
 
-Type locRaw(ISS& env, LocalId l) {
-  mayReadLocal(env, l);
+Type peekLocRaw(ISS& env, LocalId l) {
   auto ret = env.state.locals[l];
   if (is_volatile_local(env.ctx.func, l)) {
     always_assert_flog(ret == TGen, "volatile local was not TGen");
   }
   return ret;
+}
+
+Type locRaw(ISS& env, LocalId l) {
+  mayReadLocal(env, l);
+  return peekLocRaw(env, l);
 }
 
 void setLocRaw(ISS& env, LocalId l, Type t) {
@@ -588,13 +653,27 @@ bool locCouldBeRef(ISS& env, LocalId l) {
  * (VerifyParamType; or IsType/JmpCC), rather than an actual
  * modification to the local.
  */
-void refineLoc(ISS& env, LocalId l, Type t) {
-  auto v = locRaw(env, l);
+void refineLocHelper(ISS& env, LocalId l, Type t) {
+  auto v = peekLocRaw(env, l);
   if (is_volatile_local(env.ctx.func, l)) {
     always_assert_flog(v == TGen, "volatile local was not TGen");
     return;
   }
   if (v.subtypeOf(TCell)) env.state.locals[l] = std::move(t);
+}
+
+void refineLoc(ISS& env, LocalId l, Type t) {
+  auto equiv = findLocEquiv(env, l);
+  if (equiv != NoLocalId) {
+    auto raw = peekLocRaw(env, l);
+    do {
+      if (peekLocRaw(env, equiv).subtypeOf(raw)) {
+        refineLocHelper(env, equiv, t);
+      }
+      equiv = findLocEquiv(env, equiv);
+    } while (equiv != l);
+  }
+  refineLocHelper(env, l, t);
 }
 
 /*
@@ -606,7 +685,8 @@ void setLoc(ISS& env, LocalId l, Type t) {
   killLocEquiv(env, l);
   killStkEquiv(env, l);
   modifyLocalStatic(env, l, t);
-  refineLoc(env, l, std::move(t));
+  mayReadLocal(env, l);
+  refineLocHelper(env, l, std::move(t));
 }
 
 LocalId findLocal(ISS& env, SString name) {

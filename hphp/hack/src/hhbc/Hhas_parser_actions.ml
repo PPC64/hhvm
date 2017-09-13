@@ -381,7 +381,7 @@ let makenullaryinst s =
  | "Await" -> IAsync Await
  | "WHResult" -> IAsync WHResult
 
- | _ -> IComment ("NYI nullary: " ^ s)
+ | _ -> IComment (Hhbc_ast.nyi ^ " nullary: " ^ s)
 
 type iarg =
   | IAInt64 of int64
@@ -568,6 +568,17 @@ let incdecopofiarg arg =
       @@ Printf.sprintf "bad incdecop: '%s'" s
   )
   | _ -> report_error "wrong kind of incdecop arg"
+
+let fpasshintof arg =
+  match arg with
+  | IAId s -> (
+    match s with
+    | "Any" -> Any
+    | "Cell" -> Cell
+    | "Ref" -> Ref
+    | _ -> report_error @@ Printf.sprintf "bad fpasshint: '%s'" s
+  )
+  | _ -> report_error "wrong kind of fpasshint arg"
 
 let paramidofiarg arg =
   match arg with
@@ -775,14 +786,6 @@ let makeunaryinst s arg = match s with
    | "FPushCuf" -> ICall(FPushCuf (intofiarg arg))
    | "FPushCufF" -> ICall(FPushCufF (intofiarg arg))
    | "FPushCufSafe" -> ICall(FPushCufSafe (intofiarg arg))
-   | "FPassC" -> ICall(FPassC (intofiarg arg))
-   | "FPassCW" -> ICall(FPassCW (intofiarg arg))
-   | "FPassCE" -> ICall(FPassCE (intofiarg arg))
-   | "FPassV" -> ICall(FPassV (intofiarg arg))
-   | "FPassVNop" -> ICall(FPassVNop (intofiarg arg))
-   | "FPassR" -> ICall(FPassR (intofiarg arg))
-   | "FPassN" -> ICall(FPassN (intofiarg arg))
-   | "FPassG" -> ICall(FPassG (intofiarg arg))
    | "FCall" -> ICall(FCall (intofiarg arg))
    | "FCallUnpack" -> ICall(FCallUnpack (intofiarg arg))
 
@@ -823,7 +826,7 @@ let makeunaryinst s arg = match s with
       textual bytecode format represents them using directives and braces rather
       than instructions
    *)
-   | _ -> IComment ("NYI unary: " ^ s)
+   | _ -> IComment (Hhbc_ast.nyi ^ " unary: " ^ s)
 
 let makebinaryinst s arg1 arg2 =
 match s with
@@ -860,8 +863,14 @@ match s with
  | "FPushCtorI" -> ICall (FPushCtorI (intofiarg arg1, intofiarg arg2))
  | "DecodeCufIter" -> ICall (DecodeCufIter (intofiarg arg1, labelofiarg arg2))
  | "FPushCufIter" -> ICall (FPushCufIter (intofiarg arg1, iterofiarg arg2))
- | "FPassL" -> ICall (FPassL (intofiarg arg1, localidofiarg arg2))
- | "FPassS" -> ICall(FPassS (intofiarg arg1, intofiarg arg2))
+ | "FPassC" -> ICall(FPassC (intofiarg arg1, fpasshintof arg2))
+ | "FPassCW" -> ICall(FPassCW (intofiarg arg1, fpasshintof arg2))
+ | "FPassCE" -> ICall(FPassCE (intofiarg arg1, fpasshintof arg2))
+ | "FPassV" -> ICall(FPassV (intofiarg arg1, fpasshintof arg2))
+ | "FPassVNop" -> ICall(FPassVNop (intofiarg arg1, fpasshintof arg2))
+ | "FPassR" -> ICall(FPassR (intofiarg arg1, fpasshintof arg2))
+ | "FPassN" -> ICall(FPassN (intofiarg arg1, fpasshintof arg2))
+ | "FPassG" -> ICall(FPassG (intofiarg arg1, fpasshintof arg2))
  (* instruct_base *)
  | "BaseNC" -> IBase (BaseNC (intofiarg arg1, memberopmodeofiarg arg2))
  | "BaseNL" -> IBase (BaseNL (localidofiarg arg1, memberopmodeofiarg arg2))
@@ -902,7 +911,7 @@ match s with
  | "AssertRATL" -> IMisc (AssertRATL (localidofiarg arg1, stringofiarg arg2))
  | "AssertRATStk" -> IMisc (AssertRATStk (intofiarg arg1, stringofiarg arg2))
  | "Silence" -> IMisc (Silence (localidofiarg arg1, opsilenceofiarg arg2))
- | _ -> IComment ("NYI binary: " ^ s)
+ | _ -> IComment (Hhbc_ast.nyi ^ " binary: " ^ s)
 
 let maketernaryinst s arg1 arg2 arg3 =
  match s with
@@ -926,12 +935,12 @@ let maketernaryinst s arg1 arg2 arg3 =
       class_id_of_iarg arg2, function_id_of_iarg arg3))
  | "FCallBuiltin" ->
     ICall(FCallBuiltin (intofiarg arg1, intofiarg arg2, stringofiarg arg3))
+ | "FPassL" -> ICall (FPassL (intofiarg arg1, localidofiarg arg2, fpasshintof arg3))
+ | "FPassS" -> ICall(FPassS (intofiarg arg1, intofiarg arg2, fpasshintof arg3))
 
 (* instruct_final *)
  | "QueryM" ->
     IFinal (QueryM (intofiarg arg1, queryopofiarg arg2, memberkeyofiarg arg3))
- | "FPassM" ->
-    IFinal(FPassM (intofiarg arg1, intofiarg arg2, memberkeyofiarg arg3))
  | "IncDecM" ->
     IFinal(IncDecM (intofiarg arg1, incdecopofiarg arg2, memberkeyofiarg arg3))
  | "SetOpM" ->
@@ -956,7 +965,7 @@ let maketernaryinst s arg1 arg2 arg3 =
     IMisc(MemoSet(intofiarg arg1, localidofiarg arg2, intofiarg arg3 + 1))
  | "MemoGet" ->
     IMisc(MemoGet(intofiarg arg1, localidofiarg arg2, intofiarg arg3 + 1))
- | _ -> IComment ("NYI ternary: " ^ s)
+ | _ -> IComment (Hhbc_ast.nyi ^ " ternary: " ^ s)
 
 let makequaternaryinst s arg1 arg2 arg3 arg4 =
 match s with
@@ -972,4 +981,6 @@ match s with
                      labelofiarg arg2, localidofiarg arg3, localidofiarg arg4))
  | "MIterNextK" -> IIterator(MIterNextK(iterofiarg arg1,
                      labelofiarg arg2, localidofiarg arg3, localidofiarg arg4))
- | _ -> IComment ("NYI quaternary: " ^ s)
+ | "FPassM" ->
+    IFinal(FPassM (intofiarg arg1, intofiarg arg2, memberkeyofiarg arg3, fpasshintof arg4))
+ | _ -> IComment (Hhbc_ast.nyi ^ " quaternary: " ^ s)

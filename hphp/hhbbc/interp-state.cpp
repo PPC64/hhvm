@@ -34,6 +34,21 @@ namespace {
 
 template<class JoinOp>
 bool merge_into(Iter& dst, const Iter& src, JoinOp join) {
+  auto const mergeCounts = [](IterTypes::Count c1, IterTypes::Count c2) {
+    if (c1 == c2) return c1;
+    if (c1 == IterTypes::Count::Any) return c1;
+    if (c2 == IterTypes::Count::Any) return c2;
+    auto const nonEmpty = [](IterTypes::Count c) {
+      if (c == IterTypes::Count::Empty || c == IterTypes::Count::ZeroOrOne) {
+        return IterTypes::Count::Any;
+      }
+      return IterTypes::Count::NonEmpty;
+    };
+    if (c1 == IterTypes::Count::NonEmpty) return nonEmpty(c2);
+    if (c2 == IterTypes::Count::NonEmpty) return nonEmpty(c1);
+    return IterTypes::Count::ZeroOrOne;
+  };
+
   return match<bool>(
     dst,
     [&] (UnknownIter) { return false; },
@@ -45,10 +60,27 @@ bool merge_into(Iter& dst, const Iter& src, JoinOp join) {
           return true;
         },
         [&] (const TrackedIter& siter) {
-          auto k1 = join(diter.kv.first, siter.kv.first);
-          auto k2 = join(diter.kv.second, siter.kv.second);
-          auto const changed = k1 != diter.kv.first || k2 != diter.kv.second;
-          diter.kv = std::make_pair(std::move(k1), std::move(k2));
+          auto key = join(diter.types.key, siter.types.key);
+          auto value = join(diter.types.value, siter.types.value);
+          auto const count = mergeCounts(diter.types.count, siter.types.count);
+          auto const throws1 =
+            diter.types.mayThrowOnInit || siter.types.mayThrowOnInit;
+          auto const throws2 =
+            diter.types.mayThrowOnNext || siter.types.mayThrowOnNext;
+          auto const changed =
+            key != diter.types.key ||
+            value != diter.types.value ||
+            count != diter.types.count ||
+            throws1 != diter.types.mayThrowOnInit ||
+            throws2 != diter.types.mayThrowOnNext;
+          diter.types =
+            IterTypes {
+              std::move(key),
+              std::move(value),
+              count,
+              throws1,
+              throws2
+            };
           return changed;
         }
       );
@@ -61,8 +93,8 @@ std::string show(const Iter& iter) {
     iter,
     [&] (UnknownIter) { return "unk"; },
     [&] (const TrackedIter& ti) {
-      return folly::format("{}, {}", show(ti.kv.first),
-        show(ti.kv.second)).str();
+      return folly::sformat("{}, {}", show(ti.types.key),
+                            show(ti.types.value));
     }
   );
 }
@@ -297,7 +329,10 @@ bool merge_impl(State& dst, const State& src, JoinOp join) {
 
   if (src.equivLocals.size() < dst.equivLocals.size()) {
     for (auto i = src.equivLocals.size(); i < dst.equivLocals.size(); ++i) {
-      if (dst.equivLocals[i] != NoLocalId) killLocEquiv(dst, i);
+      if (dst.equivLocals[i] != NoLocalId) {
+        killLocEquiv(dst, i);
+        changed = true;
+      }
     }
     dst.equivLocals.resize(src.equivLocals.size());
   }
@@ -519,9 +554,12 @@ std::string state_string(const php::Func& f, const State& st,
 
   for (auto i = size_t{0}; i < st.equivLocals.size(); ++i) {
     if (st.equivLocals[i] == NoLocalId) continue;
-    folly::format(&ret, "{: <8} == {}\n",
-                  local_string(f, i),
-                  local_string(f, st.equivLocals[i]));
+    folly::format(&ret, "{: <8} ==", local_string(f, i));
+    for (auto j = st.equivLocals[i]; j != i; j = st.equivLocals[j]) {
+      ret += " ";
+      ret += local_string(f, j);
+    }
+    ret += "\n";
   }
 
   if (st.mInstrState.base.loc != BaseLoc::None) {
@@ -543,16 +581,10 @@ std::string property_state_string(const PropertiesInfo& props) {
   std::string ret;
 
   for (auto& kv : props.privateProperties()) {
-    ret += folly::format("$this->{: <14} :: {}\n",
-      kv.first,
-      show(kv.second)
-    ).str();
+    folly::format(&ret, "$this->{: <14} :: {}\n", kv.first, show(kv.second));
   }
   for (auto& kv : props.privateStatics()) {
-    ret += folly::format("self::${: <14} :: {}\n",
-      kv.first,
-      show(kv.second)
-    ).str();
+    folly::format(&ret, "self::${: <14} :: {}\n", kv.first, show(kv.second));
   }
 
   return ret;

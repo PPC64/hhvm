@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <cstring>
 #include <type_traits>
+#include <initializer_list>
 
 #include "hphp/util/assertions.h"
 #include "hphp/util/safe-cast.h"
@@ -55,6 +56,7 @@ struct CompactVector {
   CompactVector(size_type n, const T&);
   CompactVector(CompactVector&& other) noexcept;
   CompactVector(const CompactVector& other);
+  CompactVector(std::initializer_list<T> init);
   CompactVector& operator=(CompactVector&&);
   CompactVector& operator=(const CompactVector&);
   ~CompactVector();
@@ -156,6 +158,15 @@ CompactVector<T>& CompactVector<T>::operator=(const CompactVector& other) {
   clear();
   assign(other);
   return *this;
+}
+
+template <typename T>
+CompactVector<T>::CompactVector(std::initializer_list<T> init) :
+    m_data(nullptr) {
+  reserve_impl(init.size());
+  for (auto const& e : init) {
+    push_back(e);
+  }
 }
 
 template <typename T>
@@ -317,13 +328,19 @@ void CompactVector<T>::grow() {
 template <typename T>
 void CompactVector<T>::reserve_impl(size_type new_capacity) {
   if (m_data) {
-    auto const len = m_data->m_len;
+    auto len = m_data->m_len;
     auto const old_data = m_data;
+    auto old_elems = elems();
 
     m_data = (CompactVectorData*)malloc(required_mem(new_capacity));
 
-    memcpy(m_data, old_data, required_mem(len));
+    auto new_elems = elems();
+    m_data->m_len = len;
     m_data->m_capacity = safe_cast<uint32_t>(new_capacity);
+    while (len--) {
+      new (new_elems++) T(std::move(*old_elems));
+      old_elems++->~T();
+    }
     free(old_data);
   } else {
     // If there are currently no elements, all we have to do is allocate a

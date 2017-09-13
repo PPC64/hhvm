@@ -50,6 +50,7 @@ namespace {
 //////////////////////////////////////////////////////////////////////
 
 const StaticString s_invoke("__invoke");
+const StaticString s_86cinit("86cinit");
 
 //////////////////////////////////////////////////////////////////////
 
@@ -296,6 +297,7 @@ void analyze_iteratively(Index& index, php::Program& program,
 
     auto update_func = [&] (const FuncAnalysis& fa) {
       ContextSet deps;
+      index.refine_effect_free(fa.ctx.func, fa.effectFree);
       index.refine_return_type(fa.ctx.func, fa.inferredReturn, deps);
       index.refine_constants(fa, deps);
       index.refine_local_static_types(fa.ctx.func, fa.localStaticTypes);
@@ -316,18 +318,31 @@ void analyze_iteratively(Index& index, php::Program& program,
       }
     };
 
+    auto update_class = [&] (const ClassAnalysis& ca) {
+      index.refine_private_props(ca.ctx.cls,
+                                 ca.privateProperties);
+      index.refine_private_statics(ca.ctx.cls,
+                                   ca.privateStatics);
+      for (auto& fa : ca.methods)  update_func(fa);
+      for (auto& fa : ca.closures) update_func(fa);
+      if (ca.resolvedConstants.size()) {
+        ContextSet deps;
+        auto const f = find_method(ca.ctx.cls, s_86cinit.get());
+        assertx(f);
+        index.refine_class_constants(Context { ca.ctx.unit, f, ca.ctx.cls },
+                                     ca.resolvedConstants,
+                                     deps);
+        for (auto& d : deps) revisit.insert(work_item_for(d, mode));
+      }
+    };
+
     for (auto& result : results) {
       switch (result->type) {
       case WorkType::Func:
         update_func(result->func);
         break;
       case WorkType::Class:
-        index.refine_private_props(result->cls.ctx.cls,
-                                   result->cls.privateProperties);
-        index.refine_private_statics(result->cls.ctx.cls,
-                                     result->cls.privateStatics);
-        for (auto& fa : result->cls.methods)  update_func(fa);
-        for (auto& fa : result->cls.closures) update_func(fa);
+        update_class(result->cls);
         break;
       }
     }
@@ -493,8 +508,6 @@ whole_program(std::vector<std::unique_ptr<UnitEmitter>> ues,
 
   auto program = parse_program(std::move(ues));
 
-  LitstrTable::fini();
-
   state_after("parse", *program);
 
   Index index{borrow(program)};
@@ -518,6 +531,7 @@ whole_program(std::vector<std::unique_ptr<UnitEmitter>> ues,
   debug_dump_program(index, *program);
   print_stats(index, *program);
 
+  LitstrTable::fini();
   LitstrTable::init();
   LitstrTable::get().setWriting();
   make_unit_emitters(index, *program, [&] (std::unique_ptr<UnitEmitter> ue) {

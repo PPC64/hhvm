@@ -76,7 +76,9 @@ MODULES=\
   typing\
   utils\
   utils/collections\
+  utils/config_file\
   utils/errors\
+  utils/hashlib\
   utils/lint\
   utils/disk\
   utils/process\

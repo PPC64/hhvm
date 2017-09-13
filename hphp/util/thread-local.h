@@ -379,24 +379,25 @@ template<typename T> __thread typename ThreadLocalSingleton<T>::StorageType
 ///////////////////////////////////////////////////////////////////////////////
 // some classes don't need new/delete at all
 
-template<typename T, bool throwOnNull = true>
+template<typename T>
 struct ThreadLocalProxy {
   T *get() const {
-    if (m_p == nullptr && throwOnNull) {
-      throw Exception("ThreadLocalProxy::get() called before set()");
-    }
     return m_p;
   }
 
   void set(T* obj) {
+    if (!m_node.m_on_thread_exit_fn) {
+      m_node.m_on_thread_exit_fn = onThreadExit;
+      ThreadLocalManager::PushTop(m_node);
+      assert(!m_node.m_p);
+      m_node.m_p = this;
+    } else {
+      assert(m_node.m_p == this);
+    }
     m_p = obj;
   }
 
   bool isNull() const { return m_p == nullptr; }
-
-  void destroy() {
-    m_p = nullptr;
-  }
 
   T *operator->() const {
     return get();
@@ -406,7 +407,14 @@ struct ThreadLocalProxy {
     return *get();
   }
 
-  T * m_p;
+  static void onThreadExit(void* p) {
+    auto node = (ThreadLocalNode<ThreadLocalProxy<T>>*)p;
+    node->m_p = nullptr;
+  }
+
+  T* m_p;
+  ThreadLocalNode<ThreadLocalProxy<T>> m_node;
+  TYPE_SCAN_IGNORE_FIELD(m_node);
 };
 
 /*
@@ -433,10 +441,10 @@ struct ThreadLocalProxy {
 #define IMPLEMENT_THREAD_LOCAL_NO_CHECK(T, f) \
   __thread HPHP::ThreadLocalNoCheck<T> f
 
-#define DECLARE_THREAD_LOCAL_PROXY(T, N, f) \
-  __thread HPHP::ThreadLocalProxy<T, N> f
-#define IMPLEMENT_THREAD_LOCAL_PROXY(T, N, f) \
-  __thread HPHP::ThreadLocalProxy<T, N> f
+#define DECLARE_THREAD_LOCAL_PROXY(T, f) \
+  __thread HPHP::ThreadLocalProxy<T> f
+#define IMPLEMENT_THREAD_LOCAL_PROXY(T, f) \
+  __thread HPHP::ThreadLocalProxy<T> f
 
 } // namespace HPHP
 

@@ -6,12 +6,15 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 import argparse
+import itertools
 import multiprocessing
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
+
 
 hh_single_compile = "hh_single_compile.opt"
 pool_size = 60
@@ -32,30 +35,8 @@ nyis = {
     "NYI - Xhp attribute hint": 0,
     "NYI: default value closure body": 0,
 }
-nyi_to_ignore = [
-    " NYIN",
-    "SINNYIIYHE",
-    "GNYIS",
-    " NYI ZLA",
-    " NYIS ",
-    "RNYING",
-    "ETHIOPIC SYLLABLE NYI",
-    "SUNDANESE CONSONANT SIGN PANYIKU",
-    "LEPCHA CONSONANT SIGN NYIN-DO",
-    "NUBIAN NYI",
-    "SYLLABLE NYI",
-    "RADICAL NYI",
-    "LETTER NYI",
-    "MAENYI",
-    "MBANYI",
-    "PHASE-A NYI",
-    "PHASE-B NYI",
-    "PHASE-C NYI",
-    "PHASE-D NYI",
-    "PHASE-E NYI",
-    "PHASE-F NYI",
-    "MBANYI",
-]
+
+
 
 def p(text, bypass_quiet_mode=False):
     if not quiet_mode or bypass_quiet_mode:
@@ -76,8 +57,8 @@ def run_hack(input_filename):
         total_timeout.value += 1
         list_timeout.put(input_filename)
     if collect_nyis:
-        file_nyis = [l for l in stdoutdata.split('\n') if "NYI" in l]
-        cpt = file_nyis.count("NYI")
+        file_nyis = [l for l in stdoutdata.split('\n') if "HackCNYI" in l]
+        cpt = file_nyis.count("HackCNYI")
         for line in file_nyis:
             found = False
             for ti in nyis:
@@ -151,13 +132,12 @@ def list_php_files(directory):
     cpt = 0
     # Walk the tree.
     for root, _directories, files in os.walk(directory):
-        if "__tests__" not in root:
-            for filename in [file for file in files if file.endswith(".php")]:
-                cpt += 1
-                # Join the two strings in order to form the full filepath.
-                filepath = os.path.abspath(os.path.join(root, filename))
-                file_paths.append(filepath)  # Add it to the list.
-                p(collecting_str.format(cpt))
+        for filename in [file for file in files if file.endswith(".php")]:
+            cpt += 1
+            # Join the two strings in order to form the full filepath.
+            filepath = os.path.abspath(os.path.join(root, filename))
+            file_paths.append(filepath)  # Add it to the list.
+            p(collecting_str.format(cpt))
     p("\n")
     return file_paths  # Self-explanatory.
 
@@ -178,16 +158,29 @@ if __name__ == '__main__':
     start_time = time.time()
     pool.map_async(run_hack, files)
     pool.close()
+    animate = True
+
+    def animate():
+        for c in itertools.cycle(['|', '/', '-', '\\']):
+            if animate:
+                p('\rcompiling ' + c)
+                time.sleep(0.1)
+            else:
+                return
+    t = threading.Thread(target=animate)
+    t.start()
     pool.join()
     pool.terminate()
+    animate = False
     end_time = time.time()
-    p("Compiled {} files in {}\033[K\n".format(
+    p("\rCompiled {} files in {}\033[K\n".format(
         len(files),
         pretty_time_delta(end_time - start_time),
     ))
     p("\t{} timeout after {}\n".format(total_timeout.value, timeout_limit))
     i = 1
-    p("timeouts:\n")
+    if not list_timeout.empty():
+        p("timeouts:\n")
     while not list_timeout.empty():
         filename = list_timeout.get_nowait()
         p("{}\n".format(filename))
@@ -195,14 +188,13 @@ if __name__ == '__main__':
             p("\n")
         i += 1
     if collect_nyis:
-        p("known nyis:\n")
         while not sort_of_nyis.empty():
             nyis[sort_of_nyis.get()] += 1
         for k, v in nyis.items():
-            p("{} {}\n".format(v, k))
-        p("new nyis:\n")
+            if v > 0:
+                p("{} {}\n".format(v, k))
+        if not file_with_nyi.empty():
+            p("--> we found unknown NYIs in the following files:\n")
         while not file_with_nyi.empty():
             p("{}\n".format(file_with_nyi.get()))
-    p("time in seconds: ")
-    p(str(int(end_time - start_time)), True)
     p("\n")

@@ -30,7 +30,6 @@ module type S = sig
   val unimplemented_feature : Pos.t -> string -> unit
   val experimental_feature : Pos.t -> string -> unit
 
-  val call_time_pass_by_reference : Pos.t -> unit
   val fixme_format : Pos.t -> unit
   val typeparam_alok : Pos.t * string -> unit
   val unexpected_eof : Pos.t -> unit
@@ -373,4 +372,5 @@ module type S = sig
   val dynamic_class_property_name_in_strict_mode : Pos.t -> unit
   val varray_or_darray_not_supported : Pos.t -> unit
   val unknown_field_disallowed_in_shape : Pos.t -> Pos.t -> string -> unit
+  val nullable_cast : Pos.t -> string -> Pos.t -> unit
 end

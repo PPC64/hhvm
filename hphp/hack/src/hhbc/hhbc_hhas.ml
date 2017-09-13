@@ -21,6 +21,13 @@ open H
 (* Generic helpers *)
 let sep pieces = String.concat " " pieces
 
+let indent_text = "  "
+
+let string_of_optional_value f v =
+  Option.value_map v
+    ~default:""
+    ~f:(fun s -> " " ^ (f s))
+
 let string_of_class_id id =
   SU.quote_string (Hhbc_id.Class.to_raw_string id)
 let string_of_function_id id =
@@ -115,7 +122,7 @@ let string_of_lit_const instruction =
       sep ["ClsCnsD"; string_of_const_id cnsid; string_of_class_id cid]
     | File -> "File"
     | Dir -> "Dir"
-    | NYI text -> "NYI: " ^ text
+    | NYI text -> nyi ^ ": " ^ text
     | NullUninit -> "NullUninit"
     | AddElemV -> "AddElemV"
     | AddNewElemV -> "AddNewElemV"
@@ -217,6 +224,12 @@ let string_of_member_key mk =
   | PT id -> "PT:" ^ string_of_prop_id id
   | QT id -> "QT:" ^ string_of_prop_id id
   | W -> "W"
+
+let string_of_fpasshint h =
+  match h with
+  | Any -> "Any"
+  | Cell -> "Cell"
+  | Ref -> "Ref"
 
 let string_of_eq_op op =
   match op with
@@ -403,9 +416,10 @@ let string_of_final instruction =
   | BindM (n, mk) ->
     sep ["BindM";
       string_of_int n; string_of_member_key mk]
-  | FPassM (i, n, mk) ->
+  | FPassM (i, n, mk, h) ->
     sep ["FPassM";
-      string_of_param_num i; string_of_int n; string_of_member_key mk]
+      string_of_param_num i; string_of_int n; string_of_member_key mk;
+      string_of_fpasshint h]
   | SetM (i, mk) ->
     sep ["SetM";
       string_of_param_num i; string_of_member_key mk]
@@ -416,7 +430,7 @@ let string_of_final instruction =
     sep ["IncDecM";
       string_of_param_num i; string_of_incdec_op op; string_of_member_key mk]
   | _ ->
-    "# string_of_final NYI"
+    "# string_of_final " ^ nyi
 (*
 | IncDecM of num_params * incdec_op * MemberKey.t
 | SetOpM of num_params  * eq_op * MemberKey.t
@@ -463,26 +477,28 @@ let string_of_call instruction =
     sep ["FPushCufSafe"; string_of_int n]
   | CufSafeArray -> "CufSafeArray"
   | CufSafeReturn -> "CufSafeReturn"
-  | FPassC i ->
-    sep ["FPassC"; string_of_param_num i]
-  | FPassCW i ->
-    sep ["FPassCW"; string_of_param_num i]
-  | FPassCE i ->
-    sep ["FPassCE"; string_of_param_num i]
-  | FPassV i ->
-    sep ["FPassV"; string_of_param_num i]
-  | FPassVNop i ->
-    sep ["FPassVNop"; string_of_param_num i]
-  | FPassR i ->
-    sep ["FPassR"; string_of_param_num i]
-  | FPassL (i, lid) ->
-    sep ["FPassL"; string_of_param_num i; string_of_local_id lid]
-  | FPassN i ->
-    sep ["FPassN"; string_of_param_num i]
-  | FPassG i ->
-    sep ["FPassG"; string_of_param_num i]
-  | FPassS (i, id) ->
-    sep ["FPassS"; string_of_param_num i; string_of_classref id]
+  | FPassC (i, h) ->
+    sep ["FPassC"; string_of_param_num i; string_of_fpasshint h]
+  | FPassCW (i, h) ->
+    sep ["FPassCW"; string_of_param_num i; string_of_fpasshint h]
+  | FPassCE (i, h) ->
+    sep ["FPassCE"; string_of_param_num i; string_of_fpasshint h]
+  | FPassV (i, h) ->
+    sep ["FPassV"; string_of_param_num i; string_of_fpasshint h]
+  | FPassVNop (i, h) ->
+    sep ["FPassVNop"; string_of_param_num i; string_of_fpasshint h]
+  | FPassR (i, h) ->
+    sep ["FPassR"; string_of_param_num i; string_of_fpasshint h]
+  | FPassL (i, lid, h) ->
+    sep ["FPassL"; string_of_param_num i; string_of_local_id lid;
+         string_of_fpasshint h]
+  | FPassN (i, h) ->
+    sep ["FPassN"; string_of_param_num i; string_of_fpasshint h]
+  | FPassG (i, h) ->
+    sep ["FPassG"; string_of_param_num i; string_of_fpasshint h]
+  | FPassS (i, id, h) ->
+    sep ["FPassS"; string_of_param_num i; string_of_classref id;
+         string_of_fpasshint h]
   | FCall n ->
     sep ["FCall"; string_of_int n]
   | FCallD (n, c, f) ->
@@ -631,7 +647,7 @@ let string_of_generator = function
   | CreateCont -> "CreateCont"
   | Yield -> "Yield"
   | YieldK -> "YieldK"
-  | _ -> "### string_of_generator - NYI"
+  | _ -> "### string_of_generator - " ^ nyi
 
 let string_of_include_eval_define = function
   | Incl -> "Incl"
@@ -844,20 +860,27 @@ and string_of_is_reference b =
 
 and string_of_fun f use_list =
   let string_of_args p =
+    match snd @@ p.A.param_id with
+    | "" | "..." -> None
+    | name ->
     let hint =
       Option.value_map p.A.param_hint ~default:"" ~f:(string_of_hint ~ns:true)
     in
-    let name = snd @@ p.A.param_id in
     let default_val =
       Option.value_map
         p.A.param_expr
         ~default:""
-        ~f:(fun e -> " = " ^ (string_of_param_default_value e))
-    in
-      string_of_is_variadic p.A.param_is_variadic ^ hint ^ " "
-      ^ string_of_is_reference p.A.param_is_reference ^ name ^ default_val
+        ~f:(fun e -> " = " ^ (string_of_param_default_value e)) in
+    let param_text = string_of_is_variadic p.A.param_is_variadic ^ hint in
+    let param_text =
+      if String.length param_text = 0
+      then param_text
+      else param_text ^ " " in
+    let param_text =
+      param_text ^ string_of_is_reference p.A.param_is_reference ^ name in
+    Some (param_text ^ default_val)
   in
-  let args = String.concat ", " @@ List.map string_of_args f.A.f_params in
+  let args = String.concat ", " @@ Core_list.filter_map ~f:string_of_args f.A.f_params in
   let use_list_helper ((_, id), b) = (if b then "&" else "") ^ id in
   let use_statement = match use_list with
     | [] -> ""
@@ -866,15 +889,87 @@ and string_of_fun f use_list =
       ^ (String.concat ", " @@ List.map use_list_helper use_list)
       ^ ") "
   in
-  (* TODO: Pretty print body for closure as a default value *)
-  let body = "NYI: default value closure body" in
-  "function ("
+  (if f.A.f_static then "static " else "")
+  ^ "function ("
   ^ args
   ^ ") "
   ^ use_statement
-  ^ "{"
-  ^ body
-  ^ "}\\n"
+  ^ (string_of_statement ~indent:"" (A.Block f.A.f_body))
+
+and string_of_optional_expr e =
+  string_of_optional_value string_of_expression e
+
+and string_of_optional_int i =
+  string_of_optional_value string_of_int i
+
+and string_of_block_ ~start_indent ~block_indent ~end_indent block =
+  let lines =
+    (String.concat "" @@ List.map (string_of_statement ~indent:block_indent) block) in
+  start_indent ^ "{\\n" ^ lines ^ end_indent ^ "}\\n"
+
+and string_of_block ~indent block =
+  match block with
+  | [] | [A.Noop] -> ""
+  | [A.Block ([_] as block)]
+  | (_::_::_ as block)->
+    string_of_block_
+      ~start_indent:""
+      ~block_indent:(indent ^ indent_text)
+      ~end_indent:indent
+      block
+  | [stmt] ->
+    string_of_statement ~indent:"" stmt
+
+and string_of_statement ~indent stmt =
+  let text, is_single_line =
+    match stmt with
+    | A.Return (_, e) ->
+      "return" ^ (string_of_optional_expr e), true
+    | A.Expr e ->
+      string_of_expression e, true
+    | A.Break (_, level_opt) ->
+      "break" ^ (string_of_optional_int level_opt), true
+    | A.Continue (_, level_opt) ->
+      "continue" ^ (string_of_optional_int level_opt), true
+    | A.Throw e ->
+      "throw " ^ (string_of_expression e), true
+    | A.Block block ->
+      string_of_block_
+        ~start_indent:indent
+        ~block_indent:(indent ^ indent_text)
+        ~end_indent:indent
+        block,
+      false
+    | A.While (cond, body) ->
+      let header_text =
+        indent ^ "while (" ^ (string_of_expression cond) ^ ") " in
+      let body_text =
+        string_of_block
+        ~indent
+        body in
+      header_text ^ body_text, false
+
+    | A.If (cond, then_block, else_block) ->
+      let header_text =
+        indent ^ "if (" ^ (string_of_expression cond) ^ ") " in
+      let then_text = string_of_block
+        ~indent
+        then_block in
+      let else_text = string_of_block
+        ~indent
+        else_block in
+      header_text ^ then_text ^
+      (if String.length else_text <> 0 then " else " ^ else_text else ""),
+      false
+    | A.Noop -> "", false
+    | _ -> nyi, false in
+  let text =
+    if is_single_line then indent ^ text ^ ";\\n"
+    else text in
+  text
+
+and string_of_expression e =
+  string_of_param_default_value ~use_single_quote:true e
 
 and string_of_xml (_, id) attributes children =
   let p = Pos.none in
@@ -894,22 +989,23 @@ and string_of_xml (_, id) attributes children =
   ^ children
   ^ ", __FILE__, __LINE__)"
 
-and string_of_param_default_value expr =
+and string_of_param_default_value ?(use_single_quote=false) expr =
   let p = Pos.none in
   let middle_aux e1 s e2 =
     let e1 = string_of_param_default_value e1 in
     let e2 = string_of_param_default_value e2 in
     e1 ^ s ^ e2
   in
-  let expr = Ast_constant_folder.fold_expr
-    Namespace_env.empty_with_default_popt expr in
   match snd expr with
   | A.Id (_, litstr)
   | A.Id_type_arguments ((_, litstr), _)
   | A.Lvar (_, litstr) -> Php_escaping.escape litstr
   | A.Float (_, litstr) -> SU.Float.with_scientific_notation litstr
   | A.Int (_, litstr) -> SU.Integer.to_decimal litstr
-  | A.String (_, litstr) -> SU.quote_string_with_escape litstr
+  | A.String (_, litstr) ->
+    if use_single_quote
+    then SU.single_quote_string_with_escape litstr
+    else SU.quote_string_with_escape litstr
   | A.Null -> "NULL"
   | A.True -> "true"
   | A.False -> "false"
@@ -926,7 +1022,7 @@ and string_of_param_default_value expr =
     name = "ImmSet" || name = "ImmVector" || name = "ImmMap" ->
     "HH\\\\" ^ name ^ " {" ^ string_of_afield_list afl ^ "}"
   | A.Collection ((_, name), _) ->
-    "NYI - Default value for an unknown collection - " ^ name
+    nyi ^ " - Default value for an unknown collection - " ^ name
   | A.Shape fl ->
     let fl =
       List.map
@@ -1352,9 +1448,9 @@ let add_class_def buf class_def =
   add_doc buf 2 (Hhas_class.doc_comment class_def);
   add_uses buf class_def;
   add_enum_ty buf class_def;
+  List.iter (add_requirement buf) (Hhas_class.requirements class_def);
   List.iter (add_constant buf) (Hhas_class.constants class_def);
   List.iter (add_type_constant buf) (Hhas_class.type_constants class_def);
-  List.iter (add_requirement buf) (Hhas_class.requirements class_def);
   List.iter (add_property class_def buf) (Hhas_class.properties class_def);
   List.iter (add_method_def buf) (Hhas_class.methods class_def);
   (* TODO: other members *)

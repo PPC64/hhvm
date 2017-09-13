@@ -60,6 +60,7 @@ let rec parse_type_specifier ?(allow_var=false) parser =
   | Name -> parse_simple_type_or_type_constant_or_generic parser
   | Self
   | Parent -> parse_simple_type_or_type_constant parser
+  | Category
   | XHPClassName
   | QualifiedName -> parse_possible_generic_specifier_or_type_const parser
   | Array -> parse_array_type_specifier parser
@@ -114,16 +115,6 @@ and parse_simple_type_or_type_constant parser =
   let token = peek_token parser in
   match Token.kind token with
   | ColonColon -> parse_remaining_type_constant parser (make_token name)
-  | Self | Parent ->
-    begin
-      match peek_token_kind ~lookahead:1 parser with
-      | ColonColon -> parse_remaining_type_constant parser (make_token name)
-      | _ ->
-        (parser, make_type_constant
-                   (make_token token)
-                   (make_missing())
-                   (make_missing()))
-    end
   | _ -> (parser, make_simple_type_specifier (make_token name))
 
 and parse_simple_type_or_type_constant_or_generic parser =
@@ -585,6 +576,7 @@ and parse_soft_type_specifier parser =
 and parse_classname_type_specifier parser =
   (* SPEC
     classname-type-specifier:
+      classname
       classname  <  qualified-name generic-type-argument-list-opt >
 
       TODO: We parse any type as the class name type; we should write an
@@ -598,13 +590,22 @@ and parse_classname_type_specifier parser =
   (* TODO ERROR RECOVERY is unsophisticated here. *)
   let (parser, classname) = next_token parser in
   let classname = make_token classname in
-  let (parser, left_angle) = require_left_angle parser in
-  let (parser, classname_type) = parse_type_specifier parser in
-  let (parser, optional_comma) = optional_token parser Comma in
-  let (parser, right_angle) = require_right_angle parser in
-  let result = make_classname_type_specifier
-    classname left_angle classname_type optional_comma right_angle in
-  (parser, result)
+  match peek_token_kind parser with
+  | LessThan ->
+    let (parser, left_angle) = require_left_angle parser in
+    let (parser, classname_type) = parse_type_specifier parser in
+    let (parser, optional_comma) = optional_token parser Comma in
+    let (parser, right_angle) = require_right_angle parser in
+    let result = make_classname_type_specifier
+      classname left_angle classname_type optional_comma right_angle in
+    (parser, result)
+  | _ ->
+    let result =
+      make_classname_type_specifier
+        classname (make_missing()) (make_missing())
+        (make_missing()) (make_missing())
+    in
+    (parser, result)
 
 and parse_field_specifier parser =
   (* SPEC

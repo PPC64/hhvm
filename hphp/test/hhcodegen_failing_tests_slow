@@ -1,5 +1,6 @@
 slow/anon_class/anon_1.php
 slow/anon_class/extend_local.php
+slow/arithmetic/inc-dec-dollar-this.php
 slow/array_offset/429.php
 slow/array_offset/433.php
 slow/array_trailing_comma.php
@@ -13,7 +14,6 @@ slow/async/return-annotation-6.php
 slow/async/return-annotation-7.php
 slow/break_statement/badexp.php
 slow/break_statement/zero.php
-slow/bug-5127251.php
 slow/class_constant/abstract_const2.php
 slow/class_constant/abstract_const7.php
 slow/class_constant/globals-array.php
@@ -44,7 +44,6 @@ slow/constant/1597.php
 slow/constant/casing.php
 slow/constant/globals-array-constant.php
 slow/constant/magic_constants.php
-slow/constant/multi_const.php
 slow/constant/realias.php
 slow/constant/true_false_null.php
 slow/constructor/1719.php
@@ -78,6 +77,7 @@ slow/ext_phar/composer.php
 slow/ext_phar/create_tar.php
 slow/ext_phar/create_zip.php
 slow/ext_process/bad_shell_exec.php
+slow/ext_std/extract.008.php
 slow/ext_string/1764.php
 slow/ext_string/setlocale-threaded.php
 slow/finally/finally_break_008.php
@@ -101,7 +101,6 @@ slow/finally/try_finally_004.php
 slow/finally/try_finally_005.php
 slow/finally/try_finally_007.php
 slow/foreach_target_variables.php
-slow/function/classname-default.php
 slow/function_no_param_modifier.php
 slow/goto/label_in_finally.php
 slow/goto/label_out_finally.php
@@ -135,7 +134,6 @@ slow/hh_namespace_migration/hh_vector3.php
 slow/hh_namespace_migration/hh_vector5.php
 slow/hhbbc/array_011.php
 slow/hhbbc/array_access_004.php
-slow/hhbbc/closure_context_006.php
 slow/hhbbc/clsref-side-effects.php
 slow/hhbbc/magic_builtin_interfaces.php
 slow/hhbbc/option_type_hint_001.php
@@ -150,17 +148,13 @@ slow/keyset/hh-only1.php
 slow/keyset/hh-only2.php
 slow/keyset/init-parse-error1.php
 slow/keyset/init-parse-error2.php
+slow/labels/72.php
 slow/lang/deprecated.php
 slow/lang/mixedbag.php
 slow/lang/redefine_function.php
 slow/lang/tuple_non_hh.php
-slow/list_assignment/46.php
-slow/list_assignment/47.php
 slow/llvm/switch.php
-slow/memoize/args.php
-slow/memoize/basic.php
 slow/memoize/reset.php
-slow/memoize/untyped.php
 slow/memory/uninit-leak.php
 slow/namespace/2227.php
 slow/namespace/double_use1.php
@@ -191,8 +185,8 @@ slow/parser/async.php
 slow/parser/async_bad_class.php
 slow/parser/async_bad_if.php
 slow/parser/async_bad_tr.php
-slow/parser/backquote.php
 slow/parser/backquote-fail.php
+slow/parser/backquote.php
 slow/parser/bad_yield.php
 slow/parser/closure_return_types_both_places.php
 slow/parser/colon_colon_class.php
@@ -303,8 +297,6 @@ slow/php7_backported/scalar-types/scalar_strict_declaration_placement_008.php
 slow/php7_backported/scalar-types/strict_nested.php
 slow/php7_backported/varSyntax/indirect-fcall.php
 slow/php7_backported/varSyntax/staticMember.php
-slow/php7_bcbreak/5/ltr_eval/complex.php
-slow/php7_bcbreak/5/ltr_eval/simple.php
 slow/php7_bcbreak/5/php4_constructor/multiple_classes.php
 slow/php7_bcbreak/5/php4_constructor/reflecting.php
 slow/php7_bcbreak/5/php4_constructor/simple_class.php
@@ -318,7 +310,6 @@ slow/reflection/1342.php
 slow/reflection/2695.php
 slow/reflection/closure_namespace.php
 slow/reflection/dynamic_property2.php
-slow/reflection/isCallable.php
 slow/reflection/ns_closure.php
 slow/reflection/param_tostring_zendcompat.php
 slow/reflection/scalar_param_types/php-noforcehh.php
@@ -338,8 +329,6 @@ slow/traits/__class__.php
 slow/traits/duplicate_require.php
 slow/traits/require_constraint_iface_implements_error.php
 slow/traits/self_resolution.php
-slow/type_annotation/shape_type_param_with_known_and_unknown_fields.php
-slow/type_annotation/shape_type_param_with_unknown_fields.php
 slow/type_annotation/shape_typedef_with_multiple_optional_tokens.php
 slow/type_annotation/shape_usage_with_optional_field.php
 slow/type_assertions/1857.php
@@ -352,6 +341,7 @@ slow/types/scalar_names.php
 slow/unpack_args/unpack_call_error.php
 slow/unpack_args/unpack_call_multi.php
 slow/unset/1117.php
+slow/unset/1120.php
 slow/use_function/double_alias.php
 slow/use_function/override.php
 slow/use_namespace_class/double_use_ns.php

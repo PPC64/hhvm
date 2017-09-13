@@ -25,11 +25,11 @@ namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
-static __thread GlobalsArray* g_variables;
+static IMPLEMENT_THREAD_LOCAL_PROXY(GlobalsArray, g_variables);
 
 GlobalsArray* get_global_variables() {
-  assertx(g_variables != nullptr);
-  return g_variables;
+  assertx(!g_variables.isNull());
+  return g_variables.get();
 }
 
 GlobalsArray::GlobalsArray(NameValueTable* tab)
@@ -52,7 +52,7 @@ GlobalsArray::GlobalsArray(NameValueTable* tab)
   X(HTTP_RAW_POST_DATA,   init_null_variant);
 #undef X
 
-  g_variables = this;
+  g_variables.set(this);
   assert(hasExactlyOneRef());
 }
 
@@ -88,7 +88,7 @@ Cell GlobalsArray::NvGetKey(const ArrayData* ad, ssize_t pos) {
   if (iter.valid()) {
     auto k = iter.curKey();
     if (k->isRefCounted()) {
-      k->incRefCount();
+      k->rawIncRefCount();
       return make_tv<KindOfString>(const_cast<StringData*>(k));
     }
     return make_tv<KindOfPersistentString>(k);

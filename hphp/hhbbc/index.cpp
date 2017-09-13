@@ -278,6 +278,11 @@ struct FuncInfoValue {
    * Type info for local statics.
    */
   CompactVector<Type> localStaticTypes;
+
+  /*
+   * Whether the function is effectFree.
+   */
+  bool effectFree{false};
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -699,12 +704,7 @@ bool Func::isFoldable() const {
                        return fi->first->attrs & AttrIsFoldable;
                      },
                      [&](borrowed_ptr<FuncFamily> fa) {
-                       if (fa->possibleFuncs.empty()) return false;
-                       for (auto const& finfo : fa->possibleFuncs) {
-                         if (!(finfo->first->attrs & AttrIsFoldable))
-                           return false;
-                       }
-                       return true;
+                       return false;
                      });
 }
 
@@ -2767,6 +2767,19 @@ bool Index::is_async_func(res::Func rfunc) const {
     });
 }
 
+bool Index::is_effect_free(res::Func rfunc) const {
+  return match<bool>(
+    rfunc.val,
+    [&](res::Func::FuncName /*s*/) { return false; },
+    [&](res::Func::MethodName /*s*/) { return false; },
+    [&](borrowed_ptr<FuncInfo> finfo) {
+      return finfo->second.effectFree;
+    },
+    [&](borrowed_ptr<FuncFamily> fam) {
+      return false;
+    });
+}
+
 bool Index::any_interceptable_functions() const {
   return m_data->any_interceptable_functions;
 }
@@ -3016,19 +3029,19 @@ Index::lookup_iface_vtable_slot(borrowed_ptr<const php::Class> cls) const {
 
 //////////////////////////////////////////////////////////////////////
 
-void Index::refine_class_constants(const Context& ctx, ContextSet& deps) {
-  bool changed = false;
-  for (auto& c : ctx.func->cls->constants) {
-    if (c.val && c.val->m_type == KindOfUninit) {
-      auto const fa = analyze_func_inline(*this, ctx, { sval(c.name) });
-      auto val = tv(fa.inferredReturn);
-      if (val) {
-        changed = true;
-        c.val = *val;
-      }
-    }
+void Index::refine_class_constants(
+  const Context& ctx,
+  const CompactVector<std::pair<size_t, TypedValue>>& resolved,
+  ContextSet& deps) {
+  if (!resolved.size()) return;
+  auto& constants = ctx.func->cls->constants;
+  for (auto const& c : resolved) {
+    assertx(c.first < constants.size());
+    auto& cnst = constants[c.first];
+    assertx(cnst.val && cnst.val->m_type == KindOfUninit);
+    cnst.val = c.second;
   }
-  if (changed) find_deps(*m_data, ctx.func, Dep::ClsConst, deps);
+  find_deps(*m_data, ctx.func, Dep::ClsConst, deps);
 }
 
 void Index::refine_constants(const FuncAnalysis& fa, ContextSet& deps) {
@@ -3085,9 +3098,19 @@ void Index::refine_constants(const FuncAnalysis& fa, ContextSet& deps) {
     }
   }
   if (fa.readsUntrackedConstants) deps.emplace(fa.ctx);
-  if (func->name == s_86cinit.get()) {
-    refine_class_constants(fa.ctx, deps);
-  }
+}
+
+void Index::refine_effect_free(borrowed_ptr<const php::Func> func, bool flag) {
+  auto& fdata = create_func_info(*m_data, func)->second;
+  always_assert_flog(
+    !fdata.effectFree || flag,
+    "Index effectFree changed from true to false in {} {}{}.\n",
+    func->unit->filename,
+    func->cls ? folly::to<std::string>(func->cls->name->data(), "::") :
+    std::string{},
+    func->name);
+
+  fdata.effectFree = flag;
 }
 
 void Index::refine_local_static_types(
@@ -3108,7 +3131,7 @@ void Index::refine_local_static_types(
       newTy.subtypeOf(indexTy),
       "Index local static type invariant violated in {} {}{}.\n"
       "   Static Local {}: {} is not a subtype of {}\n",
-      func->unit->filename->data(),
+      func->unit->filename,
       func->cls ? folly::to<std::string>(func->cls->name->data(), "::")
       : std::string{},
       func->name->data(),

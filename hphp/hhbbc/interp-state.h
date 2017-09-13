@@ -70,6 +70,7 @@ struct ActRec {
   {}
 
   FPIKind kind;
+  bool foldable{false};
   folly::Optional<res::Class> cls;
   folly::Optional<res::Func> func;
   // Possible fallback func if we cannot determine which will be called.
@@ -80,7 +81,7 @@ struct ActRec {
  * State of an iterator in the program.
  */
 struct UnknownIter {};
-struct TrackedIter { std::pair<Type,Type> kv; };
+struct TrackedIter { IterTypes types; };
 using Iter = boost::variant< UnknownIter
                            , TrackedIter
                            >;
@@ -187,6 +188,7 @@ struct Base {
 struct StackElem {
   Type type;
   // A local which is known to have an equivalent value to this stack value.
+  // Note that the local may not match the stack value wrt Uninit.
   LocalId equivLocal;
 
   bool operator==(const StackElem& other) const {
@@ -270,8 +272,9 @@ struct State {
   copy_ptr<MInstrState> mInstrStateDefine;
 
   /*
-   * Mapping of a local to another local which is known to have an equivalent
-   * value.
+   * Mapping of a local to other locals which are known to have
+   * equivalent values. This equivalence ignores Uninit; users should
+   * compare types if they care.
    */
   CompactVector<LocalId> equivLocals;
 
@@ -363,6 +366,7 @@ struct CollectedInfo {
   PublicSPropIndexer* const publicStatics;
   ConstantMap cnsMap;
   bool mayUseVV{false};
+  bool effectFree{true};
   bool readsUntrackedConstants{false};
   const bool trackConstantArrays;
   bool (*propagate_constants)(const Bytecode& bc, const State& state,

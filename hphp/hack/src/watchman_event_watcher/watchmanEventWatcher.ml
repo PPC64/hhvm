@@ -160,6 +160,13 @@ let process_changes changes env =
   | Watchman_unavailable ->
     Hh_logger.log "Watchman unavailable. Exiting";
     exit 1
+  | Watchman_pushed (Changed_merge_base (mergebase, changes)) ->
+    Hh_logger.log "changed mergebase: %s" mergebase;
+    let changes = String.concat "\n" (SSet.elements changes) in
+    Hh_logger.log "changes: %s" changes;
+    let env = { env with state = Left_at mergebase; } in
+    let () = notify_waiting_clients env in
+    env
   | Watchman_pushed (State_enter (name, json)) ->
     Hh_logger.log "State_enter %s" name;
     let (>>=) = Option.(>>=) in
@@ -243,7 +250,8 @@ let check_new_connections env =
   let new_clients = get_new_clients env.socket in
   let env = List.fold_left new_clients ~init:env
     ~f:process_client in
-  HackEventLogger.processed_clients (List.length new_clients);
+  let count = List.length new_clients in
+  if count > 0 then HackEventLogger.processed_clients count;
   env
 
 let rec serve env =

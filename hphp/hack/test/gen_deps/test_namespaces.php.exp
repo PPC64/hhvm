@@ -1,2 +1,3 @@
-test_namespaces.php
-function \B\test -> class \B\Foo
+Fun \B\test -> Class \B\Foo
+Fun \B\test -> Fun \B\baz
+Fun \B\test -> Fun \bar

@@ -307,6 +307,10 @@ struct DceAction {
   DceAction(Action a, MaskType m) : action{a}, mask{m} {}
 };
 
+bool operator==(const DceAction& a, const DceAction& b) {
+  return a.action == b.action && a.mask == b.mask;
+}
+
 using DceActionMap = std::map<InstrId, DceAction>;
 using DceReplaceMap = std::map<InstrId, CompactVector<Bytecode>>;
 
@@ -349,6 +353,13 @@ struct DceState {
    * produces the stack value is also removable.
    */
   std::vector<UseInfo> stack;
+
+  /*
+   * Similar to stack, but for ActRecs. If entry is Use::Not then all
+   * parameters must be passed via FPassC, and we're going to kill
+   * each FPassC and the corresponding cell on the stack, and the FPush/FCall.
+   */
+  std::vector<UseInfo> fpiStack;
 
   /*
    * Locals known to be live at a point in a DCE walk.  This is used
@@ -789,6 +800,39 @@ void use(std::set<LocationId>& forcedLive,
   }
 }
 
+void combineActions(DceActionMap& dst, const DceActionMap& src) {
+  for (auto& i : src) {
+    auto ret = dst.insert(i);
+    if (!ret.second) {
+      if (i.second.action == DceAction::MinstrStackFixup ||
+          i.second.action == DceAction::MinstrStackFinal) {
+        assertx(i.second.action == ret.first->second.action);
+        ret.first->second.mask |= i.second.mask;
+        continue;
+      }
+
+      if (i.second.action == ret.first->second.action) {
+        continue;
+      }
+
+      assertx(i.second.action == DceAction::Kill ||
+              ret.first->second.action == DceAction::Kill);
+
+      if (i.second.action == DceAction::PopAndReplace ||
+          ret.first->second.action == DceAction::PopAndReplace) {
+        ret.first->second.action = DceAction::Replace;
+        continue;
+      }
+      if (ret.first->second.action == DceAction::PopInputs ||
+          i.second.action == DceAction::PopInputs) {
+        ret.first->second.action = DceAction::Kill;
+        continue;
+      }
+      always_assert(false);
+    }
+  }
+}
+
 /*
  * A UseInfo has been popped, and we want to perform its actions. If
  * its not linked we'll just add them to the dceState; otherwise we'll
@@ -804,25 +848,8 @@ DceActionMap& commitActions(Env& env, bool linked, const DceActionMap& am) {
   auto& dst = linked ?
     env.dceState.stack.back().actions : env.dceState.actionMap;
 
-  for (auto& i : am) {
-    auto ret = dst.insert(i);
-    if (!ret.second) {
-      if (i.second.action == DceAction::MinstrStackFixup ||
-          i.second.action == DceAction::MinstrStackFinal) {
-        assertx(i.second.action == ret.first->second.action);
-        ret.first->second.mask |= i.second.mask;
-      } else if (i.second.action != ret.first->second.action) {
-        assertx(i.second.action == DceAction::Kill);
-        if (ret.first->second.action == DceAction::PopAndReplace) {
-          ret.first->second.action = DceAction::Replace;
-        } else if (ret.first->second.action == DceAction::PopInputs) {
-          ret.first->second.action = DceAction::Kill;
-        } else {
-          always_assert(false);
-        }
-      }
-    }
-  }
+  combineActions(dst, am);
+
   if (!am.count(env.id)) {
     dst.emplace(env.id, DceAction::Kill);
   }
@@ -1206,26 +1233,36 @@ void dce(Env& env, const bc::Dup&) {
     });
 }
 
-void dce(Env& env, const bc::CGetL& op) {
+void cgetImpl(Env& env, LocalId loc, bool quiet) {
   stack_ops(env, [&] (UseInfo& ui) {
-      scheduleGenLoc(env, op.loc1);
-      if (allUnused(ui) && !readCouldHaveSideEffects(locRaw(env, op.loc1))) {
+      scheduleGenLoc(env, loc);
+      if (allUnused(ui) &&
+          (quiet || !readCouldHaveSideEffects(locRaw(env, loc)))) {
         return PushFlags::MarkUnused;
       }
-      if (!isLocLive(env, op.loc1) &&
-          couldBeCowType(locRaw(env, op.loc1)) &&
-          !setCouldHaveSideEffects(locRaw(env, op.loc1)) &&
-          !readCouldHaveSideEffects(locRaw(env, op.loc1))) {
-        markUisLive(env, isLinked(ui), ui);
-        addLocGen(env, op.loc1);
-        CompactVector<Bytecode> bcs;
-        bcs.emplace_back(bc::PushL { op.loc1 });
-        env.dceState.replaceMap.emplace(env.id, std::move(bcs));
-        ui.actions[env.id] = DceAction::Replace;
-        return PushFlags::MarkDead;
+      if (!isLocLive(env, loc) &&
+          couldBeCowType(locRaw(env, loc)) &&
+          !setCouldHaveSideEffects(locRaw(env, loc)) &&
+          !readCouldHaveSideEffects(locRaw(env, loc))) {
+        // note: PushL does not deal with Uninit, so we need the
+        // readCouldHaveSideEffects here, regardless of quiet.
+        env.dceState.replaceMap.insert({ env.id, { bc::PushL { loc } } });
+        env.dceState.actionMap.emplace(env.id, DceAction::Replace);
       }
       return PushFlags::MarkLive;
     });
+}
+
+void dce(Env& env, const bc::CGetL& op) {
+  cgetImpl(env, op.loc1, false);
+}
+
+void dce(Env& env, const bc::CGetQuietL& op) {
+  cgetImpl(env, op.loc1, true);
+}
+
+void dce(Env& env, const bc::CUGetL& op) {
+  cgetImpl(env, op.loc1, true);
 }
 
 void dce(Env& env, const bc::CGetL2& op) {
@@ -1585,8 +1622,7 @@ void dce(Env& env, const bc::QueryM& op) {
         env.dceState.minstrUI.emplace(std::move(ui));
       } else if (auto const val = tv(env.stateAfter.stack.back().type)) {
         addLocGenSet(env, env.flags.mayReadLocalSet);
-        CompactVector<Bytecode> bcs;
-        bcs.emplace_back(gen_constant(*val));
+        CompactVector<Bytecode> bcs { gen_constant(*val) };
         env.dceState.replaceMap.emplace(env.id, std::move(bcs));
         ui.actions[env.id] = DceAction::Replace;
         ui.location.id = env.id.idx;
@@ -1604,6 +1640,47 @@ void dce(Env& env, const bc::SetOpM& op)     { minstr_final(env, op, op.arg1); }
 void dce(Env& env, const bc::BindM& op)      { minstr_final(env, op, op.arg1); }
 void dce(Env& env, const bc::UnsetM& op)     { minstr_final(env, op, op.arg1); }
 void dce(Env& env, const bc::FPassM& op)     { minstr_final(env, op, op.arg2); }
+
+void dce(Env& env, const bc::FCallD& op) {
+  auto const& ar = env.stateBefore.fpiStack.back();
+  if (ar.foldable) {
+    auto const& ui = env.dceState.stack.back();
+    if (!isLinked(ui)) {
+      auto const val = tv(env.stateAfter.stack.back().type);
+      if (val) {
+        auto& fui = env.dceState.fpiStack.back();
+        fui.usage = Use::Not;
+        if (allUnused(ui)) {
+          fui.actions = ui.actions;
+          fui.actions[env.id] = DceAction::PopInputs;
+        } else {
+          fui.actions[env.id] = DceAction::PopAndReplace;
+          CompactVector<Bytecode> bcs { gen_constant(*val), bc::RGetCNop {} };
+          auto const& hhbcs =
+            env.dceState.ainfo.ctx.func->blocks[env.id.blk]->hhbcs;
+          if (hhbcs.size() > env.id.idx + 1) {
+            auto const& nextOp = hhbcs[env.id.idx + 1];
+            if (nextOp.op == Op::UnboxRNop) {
+              bcs.pop_back();
+              fui.actions[{env.id.blk, env.id.idx + 1}] = DceAction::Kill;
+            }
+          }
+          env.dceState.replaceMap.emplace(env.id, std::move(bcs));
+        }
+        env.dceState.stack.pop_back();
+        ignoreInputs(env, false, {{ env.id, DceAction::Kill }});
+        return;
+      }
+    }
+  }
+  stack_ops(env);
+}
+
+void dce(Env& env, const bc::FPassC& op) {
+  auto& fui = env.dceState.fpiStack.back();
+  if (fui.usage == Use::Not) return markDead(env);
+  stack_ops(env);
+}
 
 void dispatch_dce(Env& env, const Bytecode& op) {
 #define O(opcode, ...) case Op::opcode: dce(env, op.opcode); return;
@@ -1702,6 +1779,11 @@ struct DceOutState {
   folly::Optional<std::vector<UseInfo>>      dceStack;
 
   /*
+   * The union of the dceFpiStacks from the start of the normal successors.
+   */
+  folly::Optional<std::vector<UseInfo>>      dceFpiStack;
+
+  /*
    * The union of the slotUsage from the start of the normal
    * successors.
    */
@@ -1742,11 +1824,16 @@ dce_visit(const Index& index,
   dceState.isLocal    = dceOutState.isLocal;
 
   if (dceOutState.dceStack) {
+    assertx(dceOutState.dceFpiStack);
     dceState.stack = *dceOutState.dceStack;
     assert(dceState.stack.size() == states.back().first.stack.size());
+    dceState.fpiStack = *dceOutState.dceFpiStack;
+    assert(dceState.fpiStack.size() == states.back().first.fpiStack.size());
   } else {
     dceState.stack.resize(states.back().first.stack.size(),
                           UseInfo { Use::Used });
+    dceState.fpiStack.resize(states.back().first.fpiStack.size(),
+                             UseInfo { Use::Used });
   }
 
   if (dceOutState.slotUsage) {
@@ -1773,58 +1860,73 @@ dce_visit(const Index& index,
       states[idx+1].first,
     };
     auto const handled = [&] {
-      if (!dceState.minstrUI) return false;
-      if (visit_env.flags.wasPEI) {
-        dceState.minstrUI.clear();
-        return false;
-      }
-      if (isMemberDimOp(op.op)) {
-        dceState.minstrUI->actions[visit_env.id] = DceAction::Kill;
-        // we're almost certainly going to delete this op, but we might not,
-        // so we need to record its local uses etc just in case.
-        return false;
-      }
-      if (isMemberBaseOp(op.op)) {
-        auto const& final = blk->hhbcs[dceState.minstrUI->location.id];
-        if (final.numPop()) {
-          CompactVector<Bytecode> bcs;
-          for (auto i = 0; i < final.numPop(); i++) {
-            use(dceState.forcedLiveLocations,
-                dceState.stack, dceState.stack.size() - 1 - i);
-            if (op.op == Op::BaseR && i == op.BaseR.arg1) {
-              bcs.push_back(bc::PopR {});
-            } else {
-              bcs.push_back(bc::PopC {});
-            }
-          }
-          dceState.replaceMap.emplace(visit_env.id, std::move(bcs));
-          dceState.minstrUI->actions[visit_env.id] = DceAction::Replace;
-        } else {
-          dceState.minstrUI->actions[visit_env.id] = DceAction::Kill;
+      if (dceState.minstrUI) {
+        if (visit_env.flags.wasPEI) {
+          dceState.minstrUI.clear();
+          return false;
         }
-        commitActions(visit_env, false, dceState.minstrUI->actions);
-        dceState.minstrUI.clear();
-        return true;
+        if (isMemberDimOp(op.op)) {
+          dceState.minstrUI->actions[visit_env.id] = DceAction::Kill;
+          // we're almost certainly going to delete this op, but we might not,
+          // so we need to record its local uses etc just in case.
+          return false;
+        }
+        if (isMemberBaseOp(op.op)) {
+          auto const& final = blk->hhbcs[dceState.minstrUI->location.id];
+          if (final.numPop()) {
+            CompactVector<Bytecode> bcs;
+            for (auto i = 0; i < final.numPop(); i++) {
+              use(dceState.forcedLiveLocations,
+                  dceState.stack, dceState.stack.size() - 1 - i);
+              if (op.op == Op::BaseR && i == op.BaseR.arg1) {
+                bcs.push_back(bc::PopR {});
+              } else {
+                bcs.push_back(bc::PopC {});
+              }
+            }
+            dceState.replaceMap.emplace(visit_env.id, std::move(bcs));
+            dceState.minstrUI->actions[visit_env.id] = DceAction::Replace;
+          } else {
+            dceState.minstrUI->actions[visit_env.id] = DceAction::Kill;
+          }
+          commitActions(visit_env, false, dceState.minstrUI->actions);
+          dceState.minstrUI.clear();
+          return true;
+        }
+      }
+      if (isFPush(op.op)) {
+        auto ui = std::move(dceState.fpiStack.back());
+        dceState.fpiStack.pop_back();
+        if (ui.usage == Use::Not) {
+          ui.actions[visit_env.id] = DceAction::PopInputs;
+          ignoreInputs(visit_env, false, {{ visit_env.id, DceAction::Kill }});
+          commitActions(visit_env, false, ui.actions);
+          return true;
+        }
+      }
+      if (isFCallStar(op.op)) {
+        dceState.fpiStack.emplace_back(Use::Used);
       }
       return false;
     }();
     if (!handled) {
       dispatch_dce(visit_env, op);
-    }
 
-    /*
-     * When we see a PEI, liveness must take into account the fact
-     * that we could take an exception edge here (or'ing in the
-     * liveExn sets).
-     */
-    if (states[idx].second.wasPEI) {
-      FTRACE(2, "    <-- exceptions\n");
-      dceState.liveLocals |= dceOutState.locLiveExn;
-      dceState.liveSlots  |= dceOutState.slotLiveExn;
-    }
+      /*
+       * When we see a PEI, liveness must take into account the fact
+       * that we could take an exception edge here (or'ing in the
+       * liveExn sets).
+       */
+      if (states[idx].second.wasPEI) {
+        FTRACE(2, "    <-- exceptions\n");
+        dceState.liveLocals |= dceOutState.locLiveExn;
+        dceState.liveSlots  |= dceOutState.slotLiveExn;
+      }
 
-    dceState.usedLocals |= dceState.liveLocals;
-    dceState.usedSlots  |= dceState.liveSlots;
+      dceState.usedLocals |= dceState.liveLocals;
+      dceState.usedSlots  |= dceState.liveSlots;
+
+    }
 
     FTRACE(4, "    dce stack: {}\n",
       [&] {
@@ -1874,6 +1976,7 @@ struct DceAnalysis {
   std::bitset<kMaxTrackedLocals>      locLiveIn;
   std::bitset<kMaxTrackedClsRefSlots> slotLiveIn;
   std::vector<UseInfo>                stack;
+  std::vector<UseInfo>                fpiStack;
   std::vector<UseInfo>                slotUsage;
   std::set<LocationId>                forcedLiveLocations;
 };
@@ -1888,6 +1991,7 @@ DceAnalysis analyze_dce(const Index& index,
       dceState->liveLocals,
       dceState->liveSlots,
       dceState->stack,
+      dceState->fpiStack,
       dceState->slotUsage,
       dceState->forcedLiveLocations
     };
@@ -1901,6 +2005,13 @@ DceAnalysis analyze_dce(const Index& index,
 void dce_perform(const php::Func& func,
                  const DceActionMap& actionMap,
                  const DceReplaceMap& replaceMap) {
+
+  using It = std::vector<Bytecode>::iterator;
+  auto setloc = [] (int32_t srcLoc, It start, int n) {
+    while (n--) {
+      start++->srcLoc = srcLoc;
+    }
+  };
   for (auto const& elm : actionMap) {
     auto const& id = elm.first;
     auto const b = borrow(func.blocks[id.blk]);
@@ -1909,17 +2020,21 @@ void dce_perform(const php::Func& func,
       case DceAction::PopInputs:
         // we want to replace the bytecode with pops of its inputs
         if (auto const numToPop = numPop(b->hhbcs[id.idx])) {
+          auto const srcLoc = b->hhbcs[id.idx].srcLoc;
           b->hhbcs.erase(b->hhbcs.begin() + id.idx);
           b->hhbcs.insert(b->hhbcs.begin() + id.idx,
                           numToPop,
                           bc::PopC {});
+          setloc(srcLoc, b->hhbcs.begin() + id.idx, numToPop);
           break;
         }
         // Fall through
       case DceAction::Kill:
         if (b->hhbcs.size() == 1) {
           // we don't allow empty blocks
+          auto const srcLoc = b->hhbcs[0].srcLoc;
           b->hhbcs[0] = bc::Nop {};
+          b->hhbcs[0].srcLoc = srcLoc;
         } else {
           b->hhbcs.erase(b->hhbcs.begin() + id.idx);
         }
@@ -1931,21 +2046,26 @@ void dce_perform(const php::Func& func,
         b->hhbcs.insert(b->hhbcs.begin() + id.idx + 1,
                         numToPop,
                         bc::PopC {});
+        setloc(b->hhbcs[id.idx].srcLoc,
+               b->hhbcs.begin() + id.idx + 1, numToPop);
         break;
       }
       case DceAction::Replace:
       {
         auto it = replaceMap.find(id);
         always_assert(it != end(replaceMap) && !it->second.empty());
+        auto const srcLoc = b->hhbcs[id.idx].srcLoc;
         b->hhbcs.erase(b->hhbcs.begin() + id.idx);
         b->hhbcs.insert(b->hhbcs.begin() + id.idx,
                         begin(it->second), end(it->second));
+        setloc(srcLoc, b->hhbcs.begin() + id.idx, it->second.size());
         break;
       }
       case DceAction::PopAndReplace:
       {
         auto it = replaceMap.find(id);
         always_assert(it != end(replaceMap) && !it->second.empty());
+        auto const srcLoc = b->hhbcs[id.idx].srcLoc;
         auto const numToPop = numPop(b->hhbcs[id.idx]);
         b->hhbcs.erase(b->hhbcs.begin() + id.idx);
         b->hhbcs.insert(b->hhbcs.begin() + id.idx,
@@ -1955,6 +2075,7 @@ void dce_perform(const php::Func& func,
                           numToPop,
                           bc::PopC {});
         }
+        setloc(srcLoc, b->hhbcs.begin() + id.idx, numToPop + it->second.size());
         break;
       }
       case DceAction::MinstrStackFinal:
@@ -2233,6 +2354,26 @@ void global_dce(const Index& index, const FuncAnalysis& ai) {
     return ret;
   };
 
+  auto mergeFpiStacks = [&] (folly::Optional<std::vector<UseInfo>>& stkOut,
+                             const std::vector<UseInfo>& stkIn) {
+    if (!stkOut) {
+      stkOut = stkIn;
+      return true;
+    }
+    assert(stkOut->size() == stkIn.size());
+    if (debug) {
+      for (uint32_t i = 0; i < stkIn.size(); i++) {
+        DEBUG_ONLY auto const &in = stkIn[i];
+        DEBUG_ONLY auto const &out = (*stkOut)[i];
+        assertx(in.usage == out.usage);
+        if (in.usage == Use::Not) {
+          assertx(in.actions == out.actions);
+        }
+      }
+    }
+    return false;
+  };
+
   auto mergeUIVecs = [&] (folly::Optional<std::vector<UseInfo>>& stkOut,
                           const std::vector<UseInfo>& stkIn,
                           BlockId blk, bool isSlot) {
@@ -2322,12 +2463,19 @@ void global_dce(const Index& index, const FuncAnalysis& ai) {
       pbs.locLive |= result.locLiveIn;
       auto const oldPredSlotLive = pbs.slotLive;
       pbs.slotLive |= result.slotLiveIn;
-      auto changed = mergeUIVecs(pbs.slotUsage, result.slotUsage,
-                                 blk->id, true);
-      if (mergeUIVecs(pbs.dceStack, result.stack, blk->id, false) ||
-          changed ||
-          pbs.locLive != oldPredLocLive ||
-          pbs.slotLive != oldPredSlotLive) {
+      auto changed =
+        pbs.locLive != oldPredLocLive ||
+        pbs.slotLive != oldPredSlotLive;
+      if (mergeUIVecs(pbs.slotUsage, result.slotUsage, blk->id, true)) {
+        changed = true;
+      }
+      if (mergeFpiStacks(pbs.dceFpiStack, result.fpiStack)) {
+        changed = true;
+      }
+      if (mergeUIVecs(pbs.dceStack, result.stack, blk->id, false)) {
+        changed = true;
+      }
+      if (changed) {
         incompleteQ.push(rpoId(pred->id));
       }
     }
@@ -2378,9 +2526,7 @@ void global_dce(const Index& index, const FuncAnalysis& ai) {
       if (!actionMap.size()) {
         actionMap = std::move(ret.actionMap);
       } else {
-        for (auto& elm : ret.actionMap) {
-          actionMap.insert(std::move(elm));
-        }
+        combineActions(actionMap, ret.actionMap);
       }
     }
     if (ret.replaceMap.size()) {

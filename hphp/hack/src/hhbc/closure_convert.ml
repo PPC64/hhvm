@@ -49,6 +49,9 @@ type state = {
   (* Static variables in closures have special properties with mangled names
    * defined for them *)
   static_vars : ULS.t;
+  (* Set of closure names that used to have explicit 'use' language construct
+    in original anonymous function *)
+  explicit_use_set: SSet.t;
 }
 
 let initial_state =
@@ -62,14 +65,16 @@ let initial_state =
   hoisted_functions = [];
   namespace = Namespace_env.empty_with_default_popt;
   static_vars = ULS.empty;
+  explicit_use_set = SSet.empty;
 }
 
 (* Add a variable to the captured variables *)
 let add_var st var =
   (* If it's bound as a parameter or definite assignment, don't add it *)
-  (* Also don't add the pipe variable *)
+  (* Also don't add the pipe variable and superglobals *)
   if SSet.mem var st.defined_vars
   || var = Naming_special_names.SpecialIdents.dollardollar
+  || Naming_special_names.Superglobals.is_superglobal var
   then st
   else
   (* Don't bother if it's $this, as this is captured implicitly *)
@@ -153,7 +158,7 @@ let make_closure_name total_count env st =
   SU.Closures.mangle_closure
     (make_scope_name env.scope) st.per_function_count total_count
 
-let make_closure ~explicit_use ~class_num
+let make_closure ~class_num
   p total_count env st lambda_vars tparams fd body =
   let rec is_scope_static scope =
     match scope with
@@ -165,8 +170,9 @@ let make_closure ~explicit_use ~class_num
     | ScopeItem.Lambda :: scope ->
       not st.captured_this || is_scope_static scope
     | _ -> false in
+  let is_static = fd.f_static || is_scope_static env.scope in
   let md = {
-    m_kind = [Public] @ (if fd.f_static || is_scope_static env.scope then [Static] else []);
+    m_kind = [Public] @ (if is_static then [Static] else []);
     m_tparams = fd.f_tparams;
     m_constrs = [];
     m_name = (fst fd.f_name, "__invoke");
@@ -201,9 +207,9 @@ let make_closure ~explicit_use ~class_num
     c_span = p;
     c_doc_comment = None;
   } in
-  (* Horrid hack: use empty body for implicit closed vars, [Noop] otherwise *)
   let inline_fundef =
-    { fd with f_body = if explicit_use then [Noop] else [];
+    { fd with f_body = body;
+              f_static = is_static;
               f_name = (p, string_of_int class_num) } in
   inline_fundef, cd
 
@@ -436,14 +442,18 @@ and convert_lambda env st p fd use_vars_opt =
   let class_num = List.length st.hoisted_classes + env.defined_class_count in
   let inline_fundef, cd =
       make_closure
-      ~explicit_use:(Option.is_some use_vars_opt)
       ~class_num
       p total_count env st lambda_vars tparams fd block in
+  let explicit_use_set =
+    if Option.is_some use_vars_opt
+    then SSet.add (snd inline_fundef.f_name) st.explicit_use_set
+    else st.explicit_use_set in
   (* Restore capture and defined set *)
   let st = { st with captured_vars = captured_vars;
                      captured_this = captured_this || st.captured_this;
                      defined_vars = defined_vars;
-                     static_vars = static_vars; } in
+                     static_vars = static_vars;
+                     explicit_use_set; } in
   (* Add lambda captured vars to current captured vars *)
   let st = List.fold_left lambda_vars ~init:st ~f:add_var in
   let st = { st with hoisted_classes = cd :: st.hoisted_classes } in
@@ -711,4 +721,6 @@ let convert_toplevel_prog defs =
   let st, p = convert_defs env 0 0 initial_state defs in
   let fun_defs = List.rev_map st.hoisted_functions (fun fd -> false, Fun fd) in
   let class_defs = List.rev_map st.hoisted_classes (fun cd -> false, Class cd) in
-  fun_defs @ p @ class_defs
+
+  fun_defs @ p @ class_defs,
+  st.explicit_use_set

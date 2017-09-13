@@ -17,6 +17,8 @@ open Config_file.Getters
 open Reordered_argument_collections
 
 type t = {
+  version : string option;
+
   load_script      : Path.t option;
   load_script_timeout : int; (* in seconds *)
 
@@ -37,6 +39,7 @@ type t = {
   tc_options       : TypecheckerOptions.t;
   parser_options   : ParserOptions.t;
   formatter_override : Path.t option;
+  config_hash      : string option;
 }
 
 let filename = Relative_path.from_root ".hhconfig"
@@ -179,8 +182,9 @@ let prepare_ignored_fixme_codes config =
   |> List.fold_right ~init:ISet.empty ~f:ISet.add
 
 let load config_filename options =
-  let config = Config_file.parse (Relative_path.to_absolute config_filename) in
+  let config_hash, config = Config_file.parse (Relative_path.to_absolute config_filename) in
   let local_config = ServerLocalConfig.load ~silent:false in
+  let version = SMap.get config "version" in
   let load_script =
     Option.map (SMap.get config "load_script") maybe_relative_path in
   (* Since we use the unix alarm() for our timeouts, a timeout value of 0 means
@@ -205,6 +209,7 @@ let load config_filename options =
   Errors.ignored_fixme_codes :=
     (GlobalOptions.ignored_fixme_codes global_opts);
   {
+    version = version;
     load_script = load_script;
     load_script_timeout = load_script_timeout;
     load_mini_script = load_mini_script;
@@ -214,10 +219,12 @@ let load config_filename options =
     tc_options = global_opts;
     parser_options = global_opts;
     formatter_override = formatter_override;
+    config_hash = config_hash;
   }, local_config
 
 (* useful in testing code *)
 let default_config = {
+  version = None;
   load_script = None;
   load_script_timeout = 0;
   load_mini_script = None;
@@ -227,6 +234,7 @@ let default_config = {
   tc_options = TypecheckerOptions.default;
   parser_options = ParserOptions.default;
   formatter_override = None;
+  config_hash = None;
 }
 
 let set_parser_options config popt = { config with parser_options = popt }
@@ -240,3 +248,4 @@ let state_prefetcher_script config = config.state_prefetcher_script
 let typechecker_options config = config.tc_options
 let parser_options config = config.parser_options
 let formatter_override config = config.formatter_override
+let config_hash config = config.config_hash

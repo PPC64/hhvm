@@ -46,6 +46,7 @@ type mode =
   | Lint
   | Suggest
   | Dump_deps
+  | Dump_bazooka_deps
   | Dump_toplevel_deps
   | Identify_symbol of int * int
   | Find_local of int * int
@@ -119,6 +120,7 @@ let parse_options () =
   let set_ai x = set_mode (Ai (Ai_options.prepare ~server:false x)) () in
   let safe_array = ref false in
   let safe_vector_array = ref false in
+  let forbid_nullable_cast = ref false in
   let options = [
     "--ai",
       Arg.String (set_ai),
@@ -157,8 +159,11 @@ let parse_options () =
       Arg.Set no_builtins,
       " Don't use builtins (e.g. ConstSet)";
     "--dump-deps",
-      Arg.Unit (set_mode Dump_deps),
+      Arg.Unit (set_mode (Dump_deps)),
       " Print dependencies";
+    "--dump-bazooka-deps",
+      Arg.Unit (set_mode (Dump_bazooka_deps)),
+      " Print dependencies, simplified to toplevel";
     "--dump-toplevel-deps",
       Arg.Unit (set_mode Dump_toplevel_deps),
       " Print toplevel dependencies";
@@ -214,6 +219,9 @@ let parse_options () =
       Arg.Set safe_vector_array,
       " Enforce array subtyping relationships so that array<T> is not a \
       of array<int, T>.";
+    "--forbid_nullable_cast",
+      Arg.Set forbid_nullable_cast,
+      " Forbid casting from nullable values.";
     "--infer-return-types",
       Arg.Unit (set_mode Infer_return_types),
       " Infers return types of functions and methods.";
@@ -231,6 +239,15 @@ let parse_options () =
       GlobalOptions.tco_safe_array = !safe_array;
       GlobalOptions.tco_safe_vector_array = !safe_vector_array;
   } in
+  let tcopt =
+    if not !forbid_nullable_cast
+    then { tcopt with
+      GlobalOptions.tco_experimental_features =
+        SSet.remove GlobalOptions.tco_experimental_forbid_nullable_cast
+          tcopt.GlobalOptions.tco_experimental_features
+    }
+    else tcopt
+  in
   { filename = fn;
     mode = !mode;
     no_builtins = !no_builtins;
@@ -658,11 +675,17 @@ let handle_mode mode filename opts popt files_contents files_info errors =
         exit 2
       end
       else Printf.printf "No lint errors\n"
+  | Dump_bazooka_deps
   | Dump_deps ->
+    (* Don't typecheck builtins *)
+    let files_info = Relative_path.Map.fold builtins
+      ~f:begin fun k _ acc -> Relative_path.Map.remove acc k end
+      ~init:files_info
+    in
     Relative_path.Map.iter files_info begin fun fn fileinfo ->
       ignore @@ Typing_check_utils.check_defs opts.tcopt fn fileinfo
     end;
-    Typing_deps.dump_deps stdout
+    Typing_deps.dump_debug_deps ()
 
   | Dump_toplevel_deps ->
     (* Don't typecheck builtins *)
@@ -671,7 +694,6 @@ let handle_mode mode filename opts popt files_contents files_info errors =
       ~init:files_info
     in
     Relative_path.Map.iter files_info begin fun fn fileinfo ->
-      print_endline (Relative_path.to_absolute fn);
       let ast = Parser_heap.get_from_parser_heap popt fn in
       Dependency_visitors.print_deps popt ast
     end
@@ -779,7 +801,9 @@ let handle_mode mode filename opts popt files_contents files_info errors =
 (*****************************************************************************)
 
 let decl_and_run_mode ({filename; mode; no_builtins; tcopt; _} as opts) popt =
-  if mode = Dump_deps then Typing_deps.debug_trace := true;
+  if mode = Dump_deps then Typing_deps.debug_trace := Typing_deps.Full
+  else if mode = Dump_bazooka_deps
+    then Typing_deps.debug_trace := Typing_deps.Bazooka;
   Local_id.track_names := true;
   Ident.track_names := true;
   let builtins = if no_builtins then Relative_path.Map.empty else builtins in

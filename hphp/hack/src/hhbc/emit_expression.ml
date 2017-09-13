@@ -67,7 +67,7 @@ let optimize_cuf () =
 
 (* Emit a comment in lieu of instructions for not-yet-implemented features *)
 let emit_nyi description =
-  instr (IComment ("NYI: " ^ description))
+  instr (IComment (H.nyi ^ ": " ^ description))
 
 let make_varray p es = p, A.Array (List.map es ~f:(fun e -> A.AFvalue e))
 let make_kvarray p kvs =
@@ -554,7 +554,7 @@ and emit_class_get env param_num_opt qop need_ref cid prop =
     | (None, QueryOp.CGetQuiet) -> failwith "emit_class_get: CGetQuiet"
     | (None, QueryOp.Isset) -> instr_issets
     | (None, QueryOp.Empty) -> instr_emptys
-    | (Some i, _) -> instr (ICall (FPassS (i, 0)))
+    | (Some (i, h), _) -> instr (ICall (FPassS (i, 0, h)))
   ]
 
 (* Class constant <cid>::<id>.
@@ -608,9 +608,9 @@ and emit_string2 env exprs =
 and emit_lambda env fundef ids =
   (* Closure conversion puts the class number used for CreateCl in the "name"
    * of the function definition *)
-  let class_num = int_of_string (snd fundef.A.f_name) in
-  (* Horrid hack: use empty body for implicit closed vars, [Noop] otherwise *)
-  let explicit_use = match fundef.A.f_body with [] -> false | _ -> true in
+  let fundef_name = snd fundef.A.f_name in
+  let class_num = int_of_string fundef_name in
+  let explicit_use = SSet.mem fundef_name (Emit_env.get_explicit_use_set ()) in
   gather [
     gather @@ List.map ids
       (fun (x, isref) ->
@@ -823,7 +823,7 @@ and emit_xhp_obj_get_raw env e s nullflavor =
 and emit_xhp_obj_get ~need_ref env param_num_opt e s nullflavor =
   let call = emit_xhp_obj_get_raw env e s nullflavor in
   match param_num_opt with
-  | Some i -> gather [ call; instr_fpassr i ]
+  | Some (i, h) -> gather [ call; instr_fpassr i h ]
   | None -> gather [ call; if need_ref then instr_boxr else instr_unboxr ]
 
 and emit_get_class_no_args () =
@@ -1290,9 +1290,10 @@ and emit_quiet_expr env (_, expr_ as expr) =
  * If param_num_opt = Some i
  * then this is the i'th parameter to a function
  *)
-and emit_array_get ~need_ref env param_num_opt qop base_expr opt_elem_expr =
+and emit_array_get ~need_ref env param_num_hint_opt qop base_expr opt_elem_expr =
   let mode = get_queryMOpMode need_ref qop in
   let elem_expr_instrs, elem_stack_size = emit_elem_instrs env opt_elem_expr in
+  let param_num_opt = Option.map ~f:(fun (n, _h) -> n) param_num_hint_opt in
   let base_expr_instrs_begin,
       base_expr_instrs_end,
       base_setup_instrs,
@@ -1305,13 +1306,13 @@ and emit_array_get ~need_ref env param_num_opt qop base_expr opt_elem_expr =
   let total_stack_size = elem_stack_size + base_stack_size in
   let final_instr =
     instr (IFinal (
-      match param_num_opt with
+      match param_num_hint_opt with
       | None ->
         if need_ref then
           VGetM (total_stack_size, mk)
         else
           QueryM (total_stack_size, qop, mk)
-      | Some i -> FPassM (i, total_stack_size, mk)
+      | Some (i, h) -> FPassM (i, total_stack_size, mk, h)
     )) in
   gather [
     base_expr_instrs_begin;
@@ -1325,11 +1326,12 @@ and emit_array_get ~need_ref env param_num_opt qop base_expr opt_elem_expr =
  * If param_num_opt = Some i
  * then this is the i'th parameter to a function
  *)
-and emit_obj_get ~need_ref env param_num_opt qop expr prop null_flavor =
+and emit_obj_get ~need_ref env param_num_hint_opt qop expr prop null_flavor =
   match snd prop with
   | A.Id (_, s) when SU.Xhp.is_xhp s ->
-    emit_xhp_obj_get ~need_ref env param_num_opt expr s null_flavor
+    emit_xhp_obj_get ~need_ref env param_num_hint_opt expr s null_flavor
   | _ ->
+    let param_num_opt = Option.map ~f:(fun (n, _h) -> n) param_num_hint_opt in
     let mode = get_queryMOpMode need_ref qop in
     let prop_expr_instrs, prop_stack_size = emit_prop_instrs env prop in
     let base_expr_instrs_begin,
@@ -1344,13 +1346,13 @@ and emit_obj_get ~need_ref env param_num_opt qop expr prop null_flavor =
     let total_stack_size = prop_stack_size + base_stack_size in
     let final_instr =
       instr (IFinal (
-        match param_num_opt with
+        match param_num_hint_opt with
         | None ->
           if need_ref then
             VGetM (total_stack_size, mk)
           else
             QueryM (total_stack_size, qop, mk)
-        | Some i -> FPassM (i, total_stack_size, mk)
+        | Some (i, h) -> FPassM (i, total_stack_size, mk, h)
       )) in
     gather [
       base_expr_instrs_begin;
@@ -1616,51 +1618,65 @@ and emit_base ~is_object ~notice env mode base_offset param_num_opt (_, expr_ as
      1
 
 and emit_arg env i (pos, expr_ as expr) =
+  let force_hh =
+    Hhbc_options.enable_hiphop_syntax !Hhbc_options.compiler_options in
+  let is_hh = Emit_env.is_hh_file () in
+  let with_ref = expr_starts_with_ref expr in
+  let hint = match (is_hh || force_hh, with_ref) with
+  | (true, true) -> Ref
+  | (true, false) -> Cell
+  | (false, _) -> Any in
+  let expr_ = match expr_ with
+  | A.Unop (A.Uref, (_, e)) -> e
+  | _ -> expr_ in
   Emit_pos.emit_pos_then pos @@
   match expr_ with
   | A.Lvar (_, x) when SN.Superglobals.is_superglobal x ->
     gather [
       instr_string (SU.Locals.strip_dollar x);
-      instr_fpassg i
+      instr_fpassg i hint
     ]
 
   | A.Lvar ((_, str) as id)
     when not (is_local_this env str) || Emit_env.get_needs_local_this env ->
-    instr_fpassl i (get_local env id)
+    instr_fpassl i (get_local env id) hint
   | A.Lvarvar (n, id) ->
     gather [
       instr_cgetl (get_non_pipe_local id);
       instr_cgetn_seq (n - 1);
-      instr_fpassn i
+      instr_fpassn i hint
     ]
   | A.Array_get ((_, A.Lvar (_, x)), Some e) when x = SN.Superglobals.globals ->
     gather [
       emit_expr ~need_ref:false env e;
-      instr_fpassg i
+      instr_fpassg i hint
     ]
 
   | A.Array_get (base_expr, opt_elem_expr) ->
-    emit_array_get ~need_ref:false env (Some i) QueryOp.CGet base_expr opt_elem_expr
+    emit_array_get ~need_ref:false env (Some (i, hint)) QueryOp.CGet base_expr opt_elem_expr
 
   | A.Obj_get (e1, e2, nullflavor) ->
-    emit_obj_get ~need_ref:false env (Some i) QueryOp.CGet e1 e2 nullflavor
+    emit_obj_get ~need_ref:false env (Some (i, hint)) QueryOp.CGet e1 e2 nullflavor
 
   | A.Class_get (cid, e) ->
-    emit_class_get env (Some i) QueryOp.CGet false cid e
+    emit_class_get env (Some (i, hint)) QueryOp.CGet false cid e
 
   | A.Binop (A.Eq None, (_, A.List _ as e), (_, A.Lvar id)) ->
     let local = get_local env id in
+    let lhs_instrs, set_instrs =
+      emit_lval_op_list env (Some local) [] e in
     gather [
-      emit_lval_op_list env (Some local) [] e;
-      instr_fpassl i local;
+      lhs_instrs;
+      set_instrs;
+      instr_fpassl i local hint;
     ]
 
   | _ ->
     let instrs, flavor = emit_flavored_expr env expr in
     let fpass_kind = match flavor with
-      | Flavor.Cell -> instr_fpass (get_passByRefKind expr) i
-      | Flavor.Ref -> instr_fpassv i
-      | Flavor.ReturnVal -> instr_fpassr i
+      | Flavor.Cell -> instr_fpass (get_passByRefKind expr) i hint
+      | Flavor.Ref -> instr_fpassv i hint
+      | Flavor.ReturnVal -> instr_fpassr i hint
     in
     gather [
       instrs;
@@ -1836,7 +1852,7 @@ and get_call_builtin_func_info fn_name =
 and emit_call_user_func_args env i expr =
   gather [
     emit_expr ~need_ref:false env expr;
-    instr_fpass PassByRefKind.AllowCell i;
+    instr_fpass PassByRefKind.AllowCell i Any;
   ]
 
 and emit_call_user_func env id arg args =
@@ -2137,13 +2153,22 @@ and can_use_as_rhs_in_list_assignment expr =
  *     list($a, list($b, $c)) = $d
  * and list(list($a, $b), $c) = $d
  * will both assign to $c, $b and $a in that order.
+ * Returns a pair of instructions:
+ * 1. initialization part of the left hand side
+ * 2. assignment
+ * this is necessary to handle cases like:
+ * list($a[$f()]) = b();
+ * here f() should be invoked before b()
  *)
  and emit_lval_op_list env local indices expr =
-  match expr with
-  | (_, A.List exprs) ->
-    gather @@
-    List.rev @@
-    List.mapi exprs (fun i expr -> emit_lval_op_list env local (i::indices) expr)
+  match snd expr with
+  | A.List exprs ->
+    let lhs_instrs, set_instrs =
+      List.mapi exprs (fun i expr -> emit_lval_op_list env local (i::indices) expr)
+      |> List.unzip in
+    gather lhs_instrs,
+    gather (List.rev set_instrs)
+  | A.Omitted -> empty, empty
   | _ ->
     (* Generate code to access the element from the array *)
     let access_instrs =
@@ -2152,9 +2177,13 @@ and can_use_as_rhs_in_list_assignment expr =
       | None -> instr_null
     in
     (* Generate code to assign to the lvalue *)
-    let assign_instrs = emit_lval_op_nonlist env LValOp.Set expr access_instrs 1 in
+    (* Return pair: side effects to initialize lhs + assignment *)
+    let lhs_instrs, rhs_instrs, set_op =
+      emit_lval_op_nonlist_steps env LValOp.Set expr access_instrs 1 in
+    lhs_instrs,
     gather [
-      assign_instrs;
+      rhs_instrs;
+      set_op;
       instr_popc
     ]
 
@@ -2190,7 +2219,7 @@ and emit_lval_op env op expr1 opt_expr2 =
           | _ -> true)
       in
       if has_elements then
-        stash_in_local ~leave_on_stack:true env expr2
+        stash_in_local_with_prefix ~leave_on_stack:true env expr2
         begin fun local _break_label ->
           let local =
             if can_use_as_rhs_in_list_assignment (snd expr2) then
@@ -2451,12 +2480,26 @@ and emit_unop ~need_ref env op e =
 and emit_exprs env exprs =
   gather (List.map exprs (emit_expr ~need_ref:false env))
 
+(* allows to create a block of code that will
+- get a fresh temporary local
+- be wrapped in a try/fault where fault will clean temporary from the previous
+  bulletpoint*)
 and with_temp_local temp f =
+  let _, block =
+    with_temp_local_with_prefix temp (fun temp label -> empty, f temp label) in
+  block
+
+(* similar to with_temp_local with addition that
+  function 'f' that creates result block of code can generate an
+  additional prefix instruction sequence that should be
+  executed before the result block *)
+and with_temp_local_with_prefix temp f =
   let break_label = Label.next_regular () in
-  let block = f temp break_label in
-  if is_empty block then block
+  let prefix, block = f temp break_label in
+  if is_empty block then prefix, block
   else
     let fault_label = Label.next_fault () in
+    prefix,
     gather [
       instr_try_fault
         fault_label
@@ -2469,6 +2512,39 @@ and with_temp_local temp f =
       instr_label break_label;
     ]
 
+(* Similar to stash_in_local with addition that function that
+   creates a block of code can yield a prefix instrution
+  that will be executed as the first instruction in the result instruction set *)
+and stash_in_local_with_prefix ?(always_stash=false) ?(leave_on_stack=false)
+                   ?(always_stash_this=false) env e f =
+  match e with
+  | (_, A.Lvar id) when not always_stash
+    && not (is_local_this env (snd id) &&
+    ((Emit_env.get_needs_local_this env) || always_stash_this)) ->
+    let break_label = Label.next_regular () in
+    let prefix_instr, result_instr =
+      f (get_local env id) break_label in
+    gather [
+      prefix_instr;
+      result_instr;
+      instr_label break_label;
+      if leave_on_stack then instr_cgetl (get_local env id) else empty;
+    ]
+  | _ ->
+    let generate_value =
+      Local.scope @@ fun () -> emit_expr ~need_ref:false env e in
+    Local.scope @@ fun () ->
+      let temp = Local.get_unnamed_local () in
+      let prefix_instr, result_instr =
+        with_temp_local_with_prefix temp f in
+      gather [
+        prefix_instr;
+        generate_value;
+        instr_setl temp;
+        instr_popc;
+        result_instr;
+        if leave_on_stack then instr_pushl temp else instr_unsetl temp
+      ]
 (* Generate code to evaluate `e`, and, if necessary, store its value in a
  * temporary local `temp` (unless it is itself a local). Then use `f` to
  * generate code that uses this local and branches or drops through to
@@ -2480,25 +2556,5 @@ and with_temp_local temp f =
  *)
 and stash_in_local ?(always_stash=false) ?(leave_on_stack=false)
                    ?(always_stash_this=false) env e f =
-  match e with
-  | (_, A.Lvar id) when not always_stash
-    && not (is_local_this env (snd id) &&
-    ((Emit_env.get_needs_local_this env) || always_stash_this)) ->
-    let break_label = Label.next_regular () in
-    gather [
-      f (get_local env id) break_label;
-      instr_label break_label;
-      if leave_on_stack then instr_cgetl (get_local env id) else empty;
-    ]
-  | _ ->
-    let generate_value =
-      Local.scope @@ fun () -> emit_expr ~need_ref:false env e in
-    Local.scope @@ fun () ->
-      let temp = Local.get_unnamed_local () in
-      gather [
-        generate_value;
-        instr_setl temp;
-        instr_popc;
-        with_temp_local temp f;
-        if leave_on_stack then instr_pushl temp else instr_unsetl temp
-      ]
+  stash_in_local_with_prefix ~always_stash ~leave_on_stack ~always_stash_this
+    env e (fun temp label -> empty, f temp label)

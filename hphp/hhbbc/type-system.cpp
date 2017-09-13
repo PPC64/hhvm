@@ -1313,12 +1313,16 @@ bool Type::equivData(const Type& o) const {
   case DataTag::Int:
     return m_data.ival == o.m_data.ival;
   case DataTag::Dbl:
-    // For purposes of Type equivalence, NaNs are equal.
-    return m_data.dval == o.m_data.dval ||
-           (std::isnan(m_data.dval) && std::isnan(o.m_data.dval));
+    // +ve and -ve zero must not compare equal, but (for purposes of
+    // Type equivalence), NaNs are equal.
+    return m_data.dval == o.m_data.dval ?
+      std::signbit(m_data.dval) == std::signbit(o.m_data.dval) :
+      (std::isnan(m_data.dval) && std::isnan(o.m_data.dval));
   case DataTag::Obj:
-    assert(!m_data.dobj.whType);
-    assert(!o.m_data.dobj.whType);
+    if (!m_data.dobj.whType != !o.m_data.dobj.whType) return false;
+    if (m_data.dobj.whType && *m_data.dobj.whType != *o.m_data.dobj.whType) {
+      return false;
+    }
     return m_data.dobj.type == o.m_data.dobj.type &&
            m_data.dobj.cls.same(o.m_data.dobj.cls);
   case DataTag::Cls:
@@ -1346,16 +1350,22 @@ bool Type::subtypeData(const Type& o) const {
 
   switch (m_dataTag) {
   case DataTag::Obj:
-    assert(!m_data.dobj.whType);
-    assert(!o.m_data.dobj.whType);
-    if (m_data.dobj.type == o.m_data.dobj.type &&
-        m_data.dobj.cls.same(o.m_data.dobj.cls)) {
-      return true;
-    }
-    if (o.m_data.dobj.type == DObj::Sub) {
-      return m_data.dobj.cls.subtypeOf(o.m_data.dobj.cls);
-    }
-    return false;
+  {
+    auto const outer_ok = [&] {
+      if (m_data.dobj.type == o.m_data.dobj.type &&
+          m_data.dobj.cls.same(o.m_data.dobj.cls)) {
+        return true;
+      }
+      if (o.m_data.dobj.type == DObj::Sub) {
+        return m_data.dobj.cls.subtypeOf(o.m_data.dobj.cls);
+      }
+      return false;
+    }();
+    if (!outer_ok) return false;
+    if (!o.m_data.dobj.whType) return true;
+    if (!m_data.dobj.whType) return false;
+    return m_data.dobj.whType->subtypeOf(*o.m_data.dobj.whType);
+  }
   case DataTag::Cls:
     if (m_data.dcls.type == o.m_data.dcls.type &&
         m_data.dcls.cls.same(o.m_data.dcls.cls)) {
@@ -1395,8 +1405,10 @@ bool Type::couldBeData(const Type& o) const {
   case DataTag::None:
     not_reached();
   case DataTag::Obj:
-    assert(!m_data.dobj.whType);
-    assert(!o.m_data.dobj.whType);
+  {
+    if (o.m_data.dobj.whType && m_data.dobj.whType) {
+      return m_data.dobj.whType->couldBe(*o.m_data.dobj.whType);
+    }
     if (m_data.dobj.type == o.m_data.dobj.type &&
         m_data.dobj.cls.same(o.m_data.dobj.cls)) {
       return true;
@@ -1405,6 +1417,7 @@ bool Type::couldBeData(const Type& o) const {
       return m_data.dobj.cls.couldBe(o.m_data.dobj.cls);
     }
     return false;
+  }
   case DataTag::Cls:
     if (m_data.dcls.type == o.m_data.dcls.type &&
         m_data.dcls.cls.same(o.m_data.dcls.cls)) {
@@ -1416,14 +1429,11 @@ bool Type::couldBeData(const Type& o) const {
     return false;
   case DataTag::RefInner:
     return m_data.inner->couldBe(*o.m_data.inner);
-  case DataTag::ArrLikeVal:
-    return m_data.aval == o.m_data.aval;
   case DataTag::Str:
-    return m_data.sval == o.m_data.sval;
+  case DataTag::ArrLikeVal:
   case DataTag::Int:
-    return m_data.ival == o.m_data.ival;
   case DataTag::Dbl:
-    return m_data.dval == o.m_data.dval;
+    return equivData(o);
   case DataTag::ArrLikePacked:
     return couldBePacked(*m_data.packed, *o.m_data.packed);
   case DataTag::ArrLikePackedN:
@@ -1443,17 +1453,7 @@ bool Type::operator==(const Type& o) const {
 
   if (m_bits != o.m_bits) return false;
   if (hasData() != o.hasData()) return false;
-  if (!hasData() && !o.hasData()) return true;
-
-  if (is_specialized_wait_handle(*this)) {
-    if (is_specialized_wait_handle(o)) {
-      return wait_handle_inner(*this) == wait_handle_inner(o);
-    }
-    return false;
-  }
-  if (is_specialized_wait_handle(o)) {
-    return false;
-  }
+  if (!hasData()) return true;
 
   return equivData(o);
 }
@@ -1470,32 +1470,15 @@ bool Type::subtypeOf(const Type& o) const {
   // NB: We don't assert checkInvariants() here because this can be called from
   // checkInvariants() and it all takes too long if the type is deeply nested.
 
-  if (is_specialized_wait_handle(*this)) {
-    if (is_specialized_wait_handle(o)) {
-      return
-        wait_handle_inner(*this).subtypeOf(wait_handle_inner(o)) &&
-        wait_handle_outer(*this).subtypeOf(wait_handle_outer(o));
-    }
-    return wait_handle_outer(*this).subtypeOf(o);
-  }
-  if (is_specialized_wait_handle(o)) {
-    return subtypeOf(wait_handle_outer(o));
-  }
-
   auto const isect = static_cast<trep>(m_bits & o.m_bits);
   if (isect != m_bits) return false;
-  if (!mayHaveData(isect)) return true;
 
   // No data is always more general.
-  if (!hasData() && !o.hasData()) return true;
-  if (!o.hasData()) {
-    assert(hasData());
-    return true;
-  }
+  if (!o.hasData()) return true;
+  if (!hasData()) return !mayHaveData(m_bits);
 
-  // Both have data, and the intersection allows it, so it depends on
-  // what the data says.
-  return hasData() && subtypeData(o);
+  // Both have data, so it depends on what the data says.
+  return subtypeData(o);
 }
 
 bool Type::strictSubtypeOf(const Type& o) const {
@@ -1508,48 +1491,22 @@ bool Type::couldBe(const Type& o) const {
   assert(checkInvariants());
   assert(o.checkInvariants());
 
-  if (is_specialized_wait_handle(*this)) {
-    if (is_specialized_wait_handle(o)) {
-      return wait_handle_inner(*this).couldBe(wait_handle_inner(o));
-    }
-    return o.couldBe(wait_handle_outer(*this));
-  }
-  if (is_specialized_wait_handle(o)) {
-    return couldBe(wait_handle_outer(o));
-  }
-
   auto const isect = static_cast<trep>(m_bits & o.m_bits);
   if (isect == 0) return false;
-  if (subtypeOf(o) || o.subtypeOf(*this)) return true;
+  // just an optimization; if the intersection contains one of these,
+  // we're done because they don't support data.
+  if (isect & (BNull | BBool | BArrLikeE | BCStr)) return true;
+  // hasData is actually cheaper than mayHaveData, so do those checks first
+  if (!hasData() || !o.hasData()) return true;
+  // This looks like it could be problematic - eg BCell does not
+  // support data, but lots of its subtypes do. It seems like what we
+  // need here is !subtypeMayHaveData(isect) (a function we don't
+  // actually have). We know however that both inputs have data, so
+  // all we rely on here is that if A supports data, and B is a
+  // subtype of A that does not (eg TOptArr and TOptArrE), then no
+  // subtype of B can support data.
   if (!mayHaveData(isect)) return true;
-
-  /*
-   * From here we have an intersection that may have data, and we know
-   * that neither type completely contains the other.
-   *
-   * For most of our types, where m_data represents an exact constant
-   * value, this just means the types only overlap if there is no
-   * data.
-   *
-   * The exception to that are option types with data,
-   * objects/classes, and arrays.
-   */
-
-  /*
-   * If the intersection allowed data, and either type was an option
-   * type, we can simplify the case to whether the unopt'd version of
-   * the option type couldBe the other type.  (The case where
-   * TInitNull was the overlapping part would already be handled
-   * above, because !mayHaveData(TInitNull).)
-   */
-  if (is_opt(*this)) return is_opt(o) ? true : unopt(*this).couldBe(o);
-  if (is_opt(o))     return unopt(o).couldBe(*this);
-
-  if (hasData() && o.hasData()) {
-    assert(mayHaveData(isect));
-    return couldBeData(o);
-  }
-  return true;
+  return couldBeData(o);
 }
 
 bool Type::checkInvariants() const {
@@ -2853,6 +2810,68 @@ Type remove_uninit(Type t) {
   return TInitCell;
 }
 
+Type assert_emptiness(Type t) {
+  if (t.subtypeOfAny(TTrue, TArrN, TVecN, TDictN, TKeysetN)) {
+    return TBottom;
+  }
+  if (!could_have_magic_bool_conversion(t) && t.subtypeOf(TOptObj)) {
+    return TInitNull;
+  }
+
+  auto remove = [&] (trep m, trep e) {
+    if ((t.m_bits & m) == t.m_bits) {
+      auto bits = static_cast<trep>(t.m_bits & e);
+      if (t.hasData() && !mayHaveData(bits)) {
+        t = Type { bits };
+      } else {
+        t.m_bits = bits;
+      }
+      return true;
+    }
+    return false;
+  };
+
+  if (remove(BOptArr, BOptArrE) || remove(BOptVec, BOptVecE) ||
+      remove(BOptDict, BOptDictE) || remove(BOptKeyset, BOptKeysetE)) {
+    return t;
+  }
+
+  if (t.subtypeOf(TInt))     return ival(0);
+  if (t.subtypeOf(TBool))    return TFalse;
+  if (t.subtypeOf(TDbl))     return dval(0);
+  if (t.subtypeOf(TSStr))    return sempty();
+
+  if (t.subtypeOf(TOptInt))  return opt(ival(0));
+  if (t.subtypeOf(TOptBool)) return opt(TFalse);
+  if (t.subtypeOf(TOptDbl))  return opt(dval(0));
+  if (t.subtypeOf(TOptSStr)) return opt(sempty());
+
+  return t;
+}
+
+Type assert_nonemptiness(Type t) {
+  if (is_opt(t)) t = unopt(std::move(t));
+  if (t.subtypeOfAny(TNull, TFalse, TArrE, TVecE, TDictE, TKeysetE)) {
+    return TBottom;
+  }
+  if (t.subtypeOf(TBool)) return TTrue;
+
+  auto remove = [&] (trep m, trep e) {
+    if ((t.m_bits & m) == t.m_bits) {
+      t.m_bits = static_cast<trep>(t.m_bits & e);
+      return true;
+    }
+    return false;
+  };
+
+  if (remove(BOptArr, BOptArrN) || remove(BOptVec, BOptVecN) ||
+      remove(BOptDict, BOptDictN) || remove(BOptKeyset, BOptKeysetN)) {
+    return t;
+  }
+
+  return remove_uninit(std::move(t));
+}
+
 //////////////////////////////////////////////////////////////////////
 
 /*
@@ -3582,29 +3601,72 @@ std::pair<Type,Type> array_newelem(Type arr, const Type& val) {
   return array_like_newelem(std::move(arr), val);
 }
 
-std::pair<Type,Type> iter_types(const Type& iterable) {
-  // Optional types are okay here because a null will not set any locals.
-  if (!iterable.subtypeOfAny(TOptArr, TOptVec, TOptDict, TOptKeyset)) {
-    return { TInitCell, TInitCell };
+IterTypes iter_types(const Type& iterable) {
+  // Only array types and objects can be iterated. Everything else raises a
+  // warning and jumps out of the loop.
+  if (!iterable.couldBeAny(TArr, TVec, TDict, TKeyset, TObj)) {
+    return { TBottom, TBottom, IterTypes::Count::Empty, true, true };
   }
+
+  // Optional types are okay here because a null will not set any locals (but it
+  // might throw).
+  if (!iterable.subtypeOfAny(TOptArr, TOptVec, TOptDict, TOptKeyset)) {
+    return {
+      TInitCell,
+      TInitCell,
+      IterTypes::Count::Any,
+      true,
+      iterable.couldBe(TObj)
+    };
+  }
+
+  auto const mayThrow = is_opt(iterable);
+
+  if (iterable.subtypeOfAny(TOptArrE, TOptVecE, TOptDictE, TOptKeysetE)) {
+    return { TBottom, TBottom, IterTypes::Count::Empty, mayThrow, false };
+  }
+
+  // If we get a null, it will be as if we have any empty array, so consider
+  // that possibly "empty".
+  auto const maybeEmpty =
+    mayThrow ||
+    !iterable.subtypeOfAny(TOptArrN, TOptVecN, TOptDictN, TOptKeysetN);
+
+   auto const count = [&](folly::Optional<size_t> size){
+    if (size) {
+      assert(*size > 0);
+      if (*size == 1) {
+        return maybeEmpty
+          ? IterTypes::Count::ZeroOrOne
+          : IterTypes::Count::Single;
+      }
+    }
+    return maybeEmpty ? IterTypes::Count::Any : IterTypes::Count::NonEmpty;
+  };
 
   if (!is_specialized_array_like(iterable)) {
-    if (iterable.subtypeOf(TOptSVec))    return { TInt, TInitUnc };
-    if (iterable.subtypeOf(TOptSDict))   return { TUncArrKey, TInitUnc };
-    if (iterable.subtypeOf(TOptSKeyset)) return { TUncArrKey, TUncArrKey };
-    if (iterable.subtypeOf(TOptSArr))    return { TUncArrKey, TInitUnc };
+    auto kv = [&]() -> std::pair<Type, Type> {
+      if (iterable.subtypeOf(TOptSVec))    return { TInt, TInitUnc };
+      if (iterable.subtypeOf(TOptSDict))   return { TUncArrKey, TInitUnc };
+      if (iterable.subtypeOf(TOptSKeyset)) return { TUncArrKey, TUncArrKey };
+      if (iterable.subtypeOf(TOptSArr))    return { TUncArrKey, TInitUnc };
 
-    if (iterable.subtypeOf(TOptVec))     return { TInt, TInitCell };
-    if (iterable.subtypeOf(TOptDict))    return { TArrKey, TInitCell };
-    if (iterable.subtypeOf(TOptKeyset))  return { TArrKey, TArrKey };
-    if (iterable.subtypeOf(TOptArr))     return { TArrKey, TInitCell };
+      if (iterable.subtypeOf(TOptVec))     return { TInt, TInitCell };
+      if (iterable.subtypeOf(TOptDict))    return { TArrKey, TInitCell };
+      if (iterable.subtypeOf(TOptKeyset))  return { TArrKey, TArrKey };
+      if (iterable.subtypeOf(TOptArr))     return { TArrKey, TInitCell };
 
-    always_assert(false);
+      always_assert(false);
+    }();
+
+    return {
+      std::move(kv.first),
+      std::move(kv.second),
+      count(folly::none),
+      mayThrow,
+      false
+    };
   }
-
-  // Note: we don't need to handle possible emptiness explicitly,
-  // because if the array was empty we won't ever pull anything out
-  // while iterating.
 
   switch (iterable.m_dataTag) {
   case DataTag::None:
@@ -3615,16 +3677,50 @@ std::pair<Type,Type> iter_types(const Type& iterable) {
   case DataTag::Cls:
   case DataTag::RefInner:
     always_assert(0);
-  case DataTag::ArrLikeVal:
-    return val_key_values(iterable.m_data.aval);
+  case DataTag::ArrLikeVal: {
+    auto kv = val_key_values(iterable.m_data.aval);
+    return {
+      std::move(kv.first),
+      std::move(kv.second),
+      count(iterable.m_data.aval->size()),
+      mayThrow,
+      false
+    };
+  }
   case DataTag::ArrLikePacked:
-    return { TInt, packed_values(*iterable.m_data.packed) };
+    return {
+      TInt,
+      packed_values(*iterable.m_data.packed),
+      count(iterable.m_data.packed->elems.size()),
+      mayThrow,
+      false
+    };
   case DataTag::ArrLikePackedN:
-    return { TInt, iterable.m_data.packedn->type };
-  case DataTag::ArrLikeMap:
-    return map_key_values(*iterable.m_data.map);
+    return {
+      TInt,
+      iterable.m_data.packedn->type,
+      count(folly::none),
+      mayThrow,
+      false
+    };
+  case DataTag::ArrLikeMap: {
+    auto kv = map_key_values(*iterable.m_data.map);
+    return {
+      std::move(kv.first),
+      std::move(kv.second),
+      count(iterable.m_data.map->map.size()),
+      mayThrow,
+      false
+    };
+  }
   case DataTag::ArrLikeMapN:
-    return { iterable.m_data.mapn->key, iterable.m_data.mapn->val };
+    return {
+      iterable.m_data.mapn->key,
+      iterable.m_data.mapn->val,
+      count(folly::none),
+      mayThrow,
+      false
+    };
   }
 
   not_reached();

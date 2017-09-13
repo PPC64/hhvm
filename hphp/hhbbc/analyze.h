@@ -99,6 +99,15 @@ struct FuncAnalysis {
   bool mayUseVV;
 
   /*
+   * Flag to indicate that the function is effectFree, in the sense
+   * that calls to it can be constant folded or dced (note that calls
+   * are never truly effect free, because profilers could be enabled,
+   * or other surprise flags could fire - but we ignore that for this
+   * flag).
+   */
+  bool effectFree{false};
+
+  /*
    * Known types of local statics.
    */
   CompactVector<Type> localStaticTypes;
@@ -119,8 +128,12 @@ struct ClassAnalysis {
 
   // FuncAnalysis results for each of the methods on the class, and
   // for each closure allocated in the class's context.
-  std::vector<FuncAnalysis> methods;
-  std::vector<FuncAnalysis> closures;
+  CompactVector<FuncAnalysis> methods;
+  CompactVector<FuncAnalysis> closures;
+
+  // Constants which we resolved by evaluating the 86cinit
+  // The size_t is the index into ctx.cls->constants
+  CompactVector<std::pair<size_t,TypedValue>> resolvedConstants;
 
   // Inferred types for private instance and static properties.
   PropState privateProperties;
