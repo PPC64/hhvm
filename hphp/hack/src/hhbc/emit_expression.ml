@@ -192,7 +192,9 @@ let get_queryMOpMode need_ref op =
 
 let is_local_this env id =
   let scope = Emit_env.get_scope env in
-  id = SN.SpecialIdents.this && Ast_scope.Scope.has_this scope
+  id = SN.SpecialIdents.this
+  && Ast_scope.Scope.has_this scope
+  && not (Ast_scope.Scope.is_toplevel scope)
 
 let is_legal_lval_op_on_this op =
   match op with
@@ -393,6 +395,7 @@ and emit_cast env hint expr =
       | _ when id = SN.Typehints.real
             || id = SN.Typehints.double
             || id = SN.Typehints.float -> instr (IOp CastDouble)
+      | _ when id = "unset" -> gather [ instr_popc; instr_null ]
       | _ -> emit_nyi "cast type"
       end
       (* TODO: unset *)
@@ -1362,13 +1365,19 @@ and emit_obj_get ~need_ref env param_num_hint_opt qop expr prop null_flavor =
       final_instr
     ]
 
+and is_special_class_constant_accessed_with_class_id (_, cName) id =
+  id = SN.Members.mClass &&
+  cName <> SN.Classes.cSelf &&
+  cName <> SN.Classes.cParent &&
+  cName <> SN.Classes.cStatic
+
 and emit_elem_instrs env opt_elem_expr =
   match opt_elem_expr with
   (* These all have special inline versions of member keys *)
   | Some (_, (A.Int _ | A.String _)) -> empty, 0
   | Some (_, (A.Lvar (_, id))) when not (is_local_this env id) -> empty, 0
-  | Some (_, (A.Class_const (_, (_, id))))
-    when id = SN.Members.mClass -> empty, 0
+  | Some (_, (A.Class_const (cid, (_, id))))
+    when is_special_class_constant_accessed_with_class_id cid id -> empty, 0
   | Some expr -> emit_expr ~need_ref:false env expr, 1
   | None -> empty, 0
 
@@ -1393,8 +1402,9 @@ and get_elem_member_key env stack_index opt_expr =
   (* Special case for literal string *)
   | Some (_, A.String (_, str)) -> MemberKey.ET str
   (* Special case for class name *)
-  | Some (_, (A.Class_const ((_, cid), (_, id))))
-    when id = SN.Members.mClass -> MemberKey.ET cid
+  | Some (_, (A.Class_const ((_, cName) as cid, (_, id))))
+    when is_special_class_constant_accessed_with_class_id cid id ->
+    MemberKey.ET cName
   (* General case *)
   | Some _ -> MemberKey.EC stack_index
   (* ELement missing (so it's array append) *)
@@ -2298,7 +2308,7 @@ and emit_lval_op_nonlist_steps env op (_, expr_) rhs_instrs rhs_stack_size =
   | A.Lvar (pos, str) when str = SN.SpecialIdents.this && not (is_legal_lval_op_on_this op) ->
     Emit_fatal.raise_fatal_parse pos "Cannot re-assign $this"
 
-  | A.Lvar id when not (is_local_this env (snd id)) ->
+  | A.Lvar id when not (is_local_this env (snd id)) || op = LValOp.Unset ->
     empty,
     rhs_instrs,
     emit_final_local_op op (get_local env id)
@@ -2407,6 +2417,7 @@ and emit_lval_op_nonlist_steps env op (_, expr_) rhs_instrs rhs_stack_size =
       rhs_instrs,
       final_instr
     end
+
   | A.Unop (uop, e) ->
     empty,
     rhs_instrs,
@@ -2414,6 +2425,11 @@ and emit_lval_op_nonlist_steps env op (_, expr_) rhs_instrs rhs_stack_size =
       emit_lval_op_nonlist env op e empty rhs_stack_size;
       from_unop uop;
     ]
+
+  | A.BracedExpr e ->
+    emit_expr ~need_ref:false env e,
+    rhs_instrs,
+    emit_final_named_local_op op
 
   | _ ->
     emit_nyi "lval expression",

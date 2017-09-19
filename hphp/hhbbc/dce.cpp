@@ -598,11 +598,12 @@ Type topC(Env& env, uint32_t idx = 0) {
 }
 
 bool popCouldRunDestructor(Env& env, uint32_t i = 0) {
-  // If there's an equivLocal, we know that it's not the last
+  // If there's an equivLoc, we know that it's not the last
   // reference, so popping the stack won't run any destructors.
   auto const& s = env.stateBefore.stack;
   auto const& e = s[s.size() - i - 1];
-  return e.equivLocal == NoLocalId && could_run_destructor(e.type);
+  return (e.equivLoc == NoLocalId || e.equivLoc == StackDupId) &&
+    could_run_destructor(e.type);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -1263,6 +1264,22 @@ void dce(Env& env, const bc::CGetQuietL& op) {
 
 void dce(Env& env, const bc::CUGetL& op) {
   cgetImpl(env, op.loc1, true);
+}
+
+void dce(Env& env, const bc::PushL& op) {
+  stack_ops(env, [&] (UseInfo& ui) {
+      scheduleGenLoc(env, op.loc1);
+      if (allUnused(ui)) {
+        if (isLocLive(env, op.loc1) ||
+            could_run_destructor(locRaw(env, op.loc1))) {
+          env.dceState.replaceMap.insert(
+            { env.id, { bc::UnsetL { op.loc1 } } });
+          ui.actions.emplace(env.id, DceAction::Replace);
+        }
+        return PushFlags::MarkUnused;
+      }
+      return PushFlags::MarkLive;
+    });
 }
 
 void dce(Env& env, const bc::CGetL2& op) {

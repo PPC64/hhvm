@@ -28,8 +28,6 @@ module WithStatementAndDeclAndTypeParser
   include PrecedenceParser
   include Full_fidelity_parser_helpers.WithParser(PrecedenceParser)
 
-  exception Cancel_attempt
-
   type binary_expression_prefix_kind =
     | Prefix_byref_assignment | Prefix_assignment | Prefix_none
 
@@ -84,9 +82,7 @@ module WithStatementAndDeclAndTypeParser
 
   let rec parse_expression parser =
     let (parser, term) = parse_term parser in
-    if kind term = SyntaxKind.QualifiedNameExpression
-    then parse_remaining_expression_or_specified_function_call parser term
-    else parse_remaining_expression parser term
+    parse_remaining_expression parser term
 
   and parse_expression_with_reset_precedence parser =
     with_reset_precedence parser parse_expression
@@ -332,13 +328,25 @@ module WithStatementAndDeclAndTypeParser
     string text. *)
 
     let (parser, left_brace) = assert_token parser LeftBrace in
-    let (parser, expr) = parse_expression_with_reset_precedence parser in
-    let (parser1, token) = next_token_no_trailing parser in
-    let (parser, right_brace) =
-      if (Token.kind token) = RightBrace then
-        (parser1, make_token token)
-      else
-        (with_error parser SyntaxError.error1006, (make_missing())) in
+    let (parser1, name_or_keyword_as_name) = next_token_as_name parser in
+    let (parser1, right_brace) = next_token parser1 in
+    let (parser, expr, right_brace) =
+      match Token.kind name_or_keyword_as_name, Token.kind right_brace with
+      | Name, RightBrace ->
+        let expr = make_token name_or_keyword_as_name in
+        let right_brace = make_token right_brace in
+        parser1, expr, right_brace
+      | _, _ ->
+        let (parser, expr) = parse_expression_with_reset_precedence parser in
+        let (parser1, token) = next_token_no_trailing parser in
+        let (parser, right_brace) =
+          if (Token.kind token) = RightBrace then
+            (parser1, make_token token)
+          else
+            (with_error parser SyntaxError.error1006, (make_missing()))
+        in
+        parser, expr, right_brace
+    in
     let node = make_embedded_braced_expression left_brace expr right_brace in
     (parser, node)
 
@@ -543,7 +551,7 @@ module WithStatementAndDeclAndTypeParser
       | Variable ->
         let (parser, expr) = parse_embedded_expression parser1 token in
         aux parser (expr :: acc)
-      | Dollar ->  handle_dollar parser1 token acc
+      | Dollar -> handle_dollar parser1 token acc
       | _ -> aux parser1 (merge_head token acc) in
 
     let (parser, results) = aux parser [head] in
@@ -612,18 +620,19 @@ module WithStatementAndDeclAndTypeParser
     | None -> true
     | Some kind -> operator_has_lower_precedence kind parser
 
-  and parse_remaining_expression_or_specified_function_call parser term =
-    try begin
-      let parser, type_arguments = parse_generic_type_arguments_opt parser in
-      if kind type_arguments <> SyntaxKind.TypeArguments
-      || List.exists is_missing @@ children type_arguments
-      then raise Cancel_attempt;
-      let term = make_generic_type_specifier term type_arguments in
-      let parser, function_call = parse_function_call parser term in
-      if kind function_call <> SyntaxKind.FunctionCallExpression
-      then raise Cancel_attempt;
-      parser, function_call
-    end with Cancel_attempt -> parse_remaining_expression parser term
+  and parse_remaining_expression_or_specified_function_call parser term
+      prefix_kind =
+    let parser1, type_arguments = parse_generic_type_arguments_opt parser in
+    if kind type_arguments <> SyntaxKind.TypeArguments
+    || List.exists is_missing @@ children type_arguments
+    || parser1.errors <> parser.errors
+    then parse_remaining_binary_expression parser term prefix_kind
+    else
+      let (parser, left, args, right) = parse_expression_list_opt parser1 in
+      let result = make_function_call_with_type_arguments_expression
+        term type_arguments left args right
+      in
+      parse_remaining_expression parser result
 
   (* checks if t is a prefix unary expression where operator has expected kind
      and and operand matched predicate *)
@@ -701,6 +710,9 @@ module WithStatementAndDeclAndTypeParser
     (* Binary operators *)
     (* TODO Add an error if PHP and / or / xor are used in Hack.  *)
     (* TODO Add an error if PHP style <> is used in Hack. *)
+    | LessThan when kind term = SyntaxKind.QualifiedNameExpression ->
+      parse_remaining_expression_or_specified_function_call parser term
+        assignment_prefix_kind
     | And
     | Or
     | Xor
@@ -723,6 +735,7 @@ module WithStatementAndDeclAndTypeParser
     | LessThanLessThanEqual
     | GreaterThanGreaterThanEqual
     | EqualEqualEqual
+    | LessThan
     | GreaterThan
     | Percent
     | Dot
@@ -743,8 +756,6 @@ module WithStatementAndDeclAndTypeParser
     | BarGreaterThan
     | QuestionQuestion ->
       parse_remaining_binary_expression parser term assignment_prefix_kind
-    | LessThan ->
-      parse_funcall_with_tyargs_or_remaining_binary_expression parser term assignment_prefix_kind
     | Instanceof ->
       parse_instanceof_expression parser term
     | QuestionMinusGreaterThan
@@ -915,26 +926,6 @@ TODO: This will need to be fixed to allow situations where the qualified name
     let result =
       make_object_creation_expression new_token designator left args right in
     (parser, result)
-  and parse_funcall_with_tyargs_or_remaining_binary_expression parser term prefix_kind =
-    (* This function is invoked on seeing a <. since a < b > ... is invalid as a binary
-     * expression, first attempt to parse a function call with type arguments,
-     * and if that fails default to a binary expression.
-     * SPEC
-       function-call-expression-with-type-arguments:
-         postfix-expression < type-argument-list-opt > ( argument-expression-list-opt )
-     *)
-    let parser1, type_arguments = parse_generic_type_arguments_opt parser in
-    if kind type_arguments <> SyntaxKind.TypeArguments
-    || List.exists is_missing @@ children type_arguments
-    || (List.length parser1.errors) > 0
-       (* Bail out if we're not dealing with a type annotation. *)
-    then parse_remaining_binary_expression parser term prefix_kind
-    else
-      let (parser, left, args, right) = parse_expression_list_opt parser1 in
-      let result =
-        make_function_call_with_type_arguments_expression term type_arguments left args right
-      in
-      parse_remaining_expression parser result
   and parse_function_call parser receiver =
     (* SPEC
       function-call-expression:
@@ -987,7 +978,7 @@ TODO: This will need to be fixed to allow situations where the qualified name
   and is_easy_cast_type kind =
     (* See comments below. *)
     match kind with
-    | Array | Bool | Double | Float | Int | Object | String -> true
+    | Array | Bool | Double | Float | Int | Object | String | Unset -> true
     | _ -> false
 
   and token_implies_cast kind =
@@ -1200,7 +1191,7 @@ TODO: This will need to be fixed to allow situations where the qualified name
     cast-expression:
       (  cast-type  ) unary-expression
     cast-type:
-      array, bool, double, float, int, object, string, or a name
+      array, bool, double, float, int, object, string, unset or a name
 
     TODO: This implies that a cast "(name)" can only be a simple name, but
     I would expect that (\Foo\Bar), (:foo), (array<int>), and the like
@@ -1661,28 +1652,56 @@ TODO: This will need to be fixed to allow situations where the qualified name
       (parser, make_qualified_name_expression name)
 
   and parse_collection_literal_expression parser name =
-    let parser, left_brace = assert_token parser LeftBrace in
-    let parser, initialization_list = parse_optional_initialization parser in
-    let parser, right_brace = require_right_brace parser in
+
+    (* SPEC
+    collection-literal:
+      key-collection-class-type  {  cl-initializer-list-with-keys-opt  }
+      non-key-collection-class-type  {  cl-initializer-list-without-keys-opt  }
+      pair-type  {  cl-element-value  ,  cl-element-value  }
+
+      The types are grammatically qualified names; however the specification
+      states that they must be as follows:
+      * keyed collection type can be Map or ImmMap
+      * non-keyed collection type can be Vector, ImmVector, Set or ImmSet
+      * pair type can be Pair
+
+      We will not attempt to determine if the names give the name of an
+      appropriate type here. That's for the type checker.
+
+      The argumment lists are:
+
+      * for keyed, an optional comma-separated list of
+        expression => expression pairs
+      * for non-keyed, an optional comma-separated list of expressions
+      * for pairs, a comma-separated list of exactly two expressions
+
+      In all three cases, the lists may be comma-terminated.
+      TODO: This fact is not represented in the specification; it should be.
+      This work item is tracked by spec issue #109.
+    *)
+
+    let (parser, left_brace, initialization_list, right_brace) =
+      parse_braced_comma_list_opt_allow_trailing parser parse_init_expression in
     (* Validating the name is a collection type happens in a later phase *)
     let syntax = make_collection_literal_expression
-      name left_brace initialization_list right_brace
-    in
+      name left_brace initialization_list right_brace in
     (parser, syntax)
 
-  and parse_optional_initialization parser =
-    if peek_token_kind parser = RightBrace then
-      parser, make_missing ()
+  and parse_init_expression parser =
+    (* ERROR RECOVERY
+       We expect either a list of expr, expr, expr, ... or
+       expr => expr, expr => expr, expr => expr, ...
+       Rather than require at parse time that the list be all one or the other,
+       we allow both, and give an error in the type checker.
+    *)
+    let parser, expr1 = parse_expression_with_reset_precedence parser in
+    let parser, arrow = optional_token parser TokenKind.EqualGreaterThan in
+    if is_missing arrow then
+      (parser, expr1)
     else
-    let parser1, expr = parse_expression parser in
-    match peek_token_kind parser1 with
-    | EqualGreaterThan ->
-      parse_comma_list_allow_trailing
-        parser RightBrace SyntaxError.error1015 parse_keyed_element_initializer
-    | _ ->
-      parse_comma_list_allow_trailing
-        parser RightBrace SyntaxError.error1015
-        parse_expression_with_reset_precedence
+      let parser, expr2 = parse_expression_with_reset_precedence parser in
+      let syntax = make_element_initializer expr1 arrow expr2 in
+      (parser, syntax)
 
   and parse_keyed_element_initializer parser =
     let parser, expr1 = parse_expression_with_reset_precedence parser in
@@ -2028,26 +2047,37 @@ TODO: This will need to be fixed to allow situations where the qualified name
     (parser, node)
 
   and parse_xhp_attribute parser =
-    let (parser1, token, _) = next_xhp_element_token parser in
+    let (parser1, token, _) = next_xhp_element_token ~attribute:true parser in
     if (Token.kind token) != XHPElementName then
       (parser, None)
     else
+      (* TODO(T21789285): Remove ugly xhp bug *)
+      let prev_errors = Lexer.errors (lexer parser) in
+      let curr_errors = Lexer.errors (lexer parser1) in
+      let colon_bug = prev_errors != curr_errors in
       let name = make_token token in
       let (parser, token, _) = next_xhp_element_token parser1 in
       if (Token.kind token) != Equal then
-        let node = make_xhp_attribute name (make_missing()) (make_missing()) in
-        let parser = with_error parser SyntaxError.error1016 in
+        let value =
+          if colon_bug
+          then make_token (Token.make TokenKind.XHPStringLiteral 0 [] [])
+          else make_missing ()
+        in
+        let node = make_xhp_attribute name (make_missing()) value in
+        let parser = if colon_bug then parser1 else
+          with_error parser1 SyntaxError.error1016
+        in
         (* ERROR RECOVERY: The = is missing; assume that the name belongs
            to the attribute, but that the remainder is missing, and start
            looking for the next attribute. *)
         (parser, Some node)
       else
         let equal = make_token token in
-        let (parser2, token, text) = next_xhp_element_token parser in
+        let (parser1, token, text) = next_xhp_element_token parser in
         match (Token.kind token) with
         | XHPStringLiteral ->
           let node = make_xhp_attribute name equal (make_token token) in
-          (parser2, Some node)
+          (parser1, Some node)
         | LeftBrace ->
           let (parser, expr) = parse_braced_expression parser in
           let node = make_xhp_attribute name equal expr in

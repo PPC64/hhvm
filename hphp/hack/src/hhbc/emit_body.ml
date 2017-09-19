@@ -17,10 +17,10 @@ let has_type_constraint ti =
   | Some ti when (Hhas_type_info.has_type_constraint ti) -> true
   | _ -> false
 
-let emit_method_prolog ~pos ~params ~needs_local_this =
+let emit_method_prolog ~pos ~params ~should_emit_init_this =
   Emit_pos.emit_pos_then pos @@
   gather (
-    (if needs_local_this
+    (if should_emit_init_this
     then instr (IMisc (InitThisLoc (Local.Named "$this")))
     else empty)
     ::
@@ -187,21 +187,10 @@ let emit_body
     Hhas_type_info.has_type_constraint return_type_info && not is_generator in
   let default_dropthrough =
     if default_dropthrough <> None then default_dropthrough else begin
-    let verify_return_instr =
-      match ret with
-      | None
-      | Some (_, (A.Happly ((_, "void"), [])
-                | A.Happly ((_, "WaitHandle"), [])
-                | A.Happly ((_, "Awaitable"),
-                  [_, A.Happly ((_, "void"), [])])
-                | A.Happly ((_, "WaitHandle"),
-                  [_, A.Happly ((_, "void"), [])]))) -> empty
-      | _ when is_generator || is_pair_generator -> empty
-      | _ -> instr_verifyRetTypeC
-    in
-    if is_async
-    then Some (gather [instr_null; verify_return_instr; instr_retc])
-    else None end
+      if is_async && verify_return
+      then Some (gather [instr_null; instr_verifyRetTypeC; instr_retc])
+      else None
+    end
   in
   Emit_statement.set_verify_return verify_return;
   Emit_statement.set_default_dropthrough default_dropthrough;
@@ -211,13 +200,60 @@ let emit_body
     Emit_param.from_asts
       ~namespace ~tparams ~generate_defaults:(not is_memoize) ~scope params
   in
-  let has_this = Ast_scope.Scope.has_this scope in
-  let needs_local_this, decl_vars =
-    Decl_vars.from_ast ~is_closure_body ~has_this ~params:params body in
-  let adjust_closure = if is_closure_body then 1 else 0 in
   Jump_targets.reset ();
-  Local.reset_local
-    (List.length params + List.length decl_vars + adjust_closure);
+
+  let remove_this vars =
+    List.filter vars (fun s -> s <> "$this") in
+
+  let move_this vars =
+    if List.mem vars "$this"
+    then remove_this vars @ ["$this"]
+    else vars in
+
+  let starts_with s prefix =
+    String.length s >= String.length prefix &&
+    String.sub s 0 (String.length prefix) = prefix in
+
+  let has_this = Ast_scope.Scope.has_this scope in
+  let is_toplevel = Ast_scope.Scope.is_toplevel scope in
+  (* see comment in decl_vars.ml, method on_efun of declvar_visitor
+     why Decl_vars needs 'explicit_use_set' *)
+  let explicit_use_set = Emit_env.get_explicit_use_set () in
+
+  let needs_local_this, decl_vars =
+    Decl_vars.from_ast
+      ~is_closure_body
+      ~has_this
+      ~params
+      ~is_toplevel
+      ~explicit_use_set
+      body in
+  let decl_vars=
+    if is_closure_body
+    then
+      let ast_class =
+        match scope with
+        | _ :: _:: Ast_scope.ScopeItem.Class ast_class :: _ -> ast_class
+        | _ -> failwith "impossible, closure scope should be lambda->method->class" in
+      (* reorder decl_vars to match HHVM *)
+      let captured_vars =
+        ast_class.Ast.c_body
+        |> List.concat_map ~f:(fun item ->
+          match item with
+          | Ast.ClassVars(_, _, cvl, _) ->
+            List.filter_map cvl ~f:(fun (_, (_, id), _) ->
+              if not (starts_with id "86static_")
+              then Some ("$" ^ id) else None)
+          | _ -> []) in
+      "$0Closure" ::
+      captured_vars @
+      List.filter (move_this decl_vars) (fun v -> not (List.mem captured_vars v))
+    else
+      match scope with
+      | _ :: Ast_scope.ScopeItem.Class _ :: _ -> move_this decl_vars
+      | _ -> decl_vars in
+
+  Local.reset_local (List.length params + List.length decl_vars);
   let env = Emit_env.(
     empty |>
     with_namespace namespace |>
@@ -239,9 +275,12 @@ let emit_body
     | Some (ILabel _) -> true
     | _ -> false
   in
+  let should_emit_init_this = needs_local_this ||
+    (is_toplevel && List.exists ~f:(fun x -> x = "$this") decl_vars)
+  in
   let header = gather [
         begin_label;
-        emit_method_prolog ~pos ~params ~needs_local_this;
+        emit_method_prolog ~pos ~params ~should_emit_init_this;
         emit_deprecation_warning scope deprecation_info;
         generator_instr;
       ]

@@ -224,6 +224,8 @@ type state =
 
 let initialize_params: Initialize.params option ref = ref None
 
+let can_autostart_after_mismatch: bool ref = ref true
+
 type event =
   | Server_hello
   | Server_message of ServerCommandTypes.push
@@ -625,7 +627,9 @@ let respond_to_error (event: event option) (e: exn) (stack: string): unit =
   | Some (Client_message c)
     when c.Jsonrpc_queue.kind = Jsonrpc_queue.Request ->
     print_error e stack |> respond stdout c |> ignore
-  | _ -> ()
+  | _ ->
+    let (code, message, _original_data) = get_error_info e in
+    client_log Lsp.MessageType.ErrorMessage (Printf.sprintf "%s [%i]\n%s" message code stack)
 
 
 (* dismiss_indicators: dismisses all dialogs, progress- and action-required   *)
@@ -1316,8 +1320,9 @@ let connect_after_hello
   rpc server_conn (ServerCommandTypes.SUBSCRIBE_DIAGNOSTIC 0)
 
 
-let connect_client
+let rec connect_client
     (root: Path.t)
+    ~(autostart: bool)
   : server_conn =
   let open Exit_status in
   let open Lsp.Error in
@@ -1330,7 +1335,7 @@ let connect_client
   let env_connect =
     { ClientConnect.
       root;
-      autostart = false;
+      autostart;
       force_dormant_start = false;
       retries = Some 3; (* each retry takes up to 1 second *)
       expiry = None; (* we can limit retries by time as well as by count *)
@@ -1342,6 +1347,7 @@ let connect_client
     } in
   try
     let (ic, oc) = ClientConnect.connect env_connect in
+    can_autostart_after_mismatch := false;
     let pending_messages = Queue.create () in
     let hhconfig_version = read_hhconfig_version root in
     { ic; oc; hhconfig_version; pending_messages; }
@@ -1357,6 +1363,10 @@ let connect_client
     (* Raised when we couldn't complete the handshake up to handoff           *)
     (* within 3 attempts over 3 seconds. Unexpected.                          *)
     raise (ServerErrorStart ("server isn't responsive", { Lsp.Initialize.retry = true; }))
+  | Exit_with Build_id_mismatch when !can_autostart_after_mismatch ->
+    (* Raised when the server was running an old version. We'll retry once.   *)
+    can_autostart_after_mismatch := false;
+    connect_client root ~autostart:true
 
 
 let connect () : state =
@@ -1366,7 +1376,7 @@ let connect () : state =
     | Some root -> root
   in
   let tail_env = Tail.create_env (Sys_utils.readlink_no_fail (ServerFiles.log_link root)) in
-  let conn = connect_client root
+  let conn = connect_client root ~autostart:false
   in
   In_init { In_init_env.
     conn;
@@ -1551,26 +1561,6 @@ let do_lost_server (state: state) (p: Lost_env.params) : state =
     lost_state
 
 
-let connect_from_preinit_if_necessary (state: state) (event: event) : (state * exn option) =
-  match state, event with
-  | Pre_init, Client_message c when c.Jsonrpc_queue.method_ = "initialize" ->
-    begin try
-      let new_state = connect () in
-      (new_state, None)
-    with e ->
-      let (_code, message, _data) = Lsp_fmt.get_error_info e in
-      let new_state = do_lost_server state
-        { Lost_env.
-          message = "hh_server is stopped: " ^ message;
-          restart_on_click = true;
-          trigger_on_lock_file = true;
-          trigger_on_lsp = false;
-        } in
-      (new_state, Some e)
-    end
-  | _ -> (state, None)
-
-
 let dismiss_ready_dialog_if_necessary (state: state) (event: event) : state =
   (* We'll auto-dismiss the ready dialog if it was up, in response to user    *)
   (* actions like typing or hover, and in response to a lost server.          *)
@@ -1673,6 +1663,11 @@ let handle_event
     state := do_shutdown !state;
     print_shutdown () |> respond stdout c;
 
+  (* cancel notification *)
+  | _, Client_message c when c.method_ = "$/cancelRequest" ->
+    (* For now, we'll ignore it. *)
+    None
+
   (* exit notification *)
   | _, Client_message c when c.method_ = "exit" ->
     if !state = Post_shutdown then exit_ok () else exit_fail ()
@@ -1680,8 +1675,26 @@ let handle_event
   (* initialize request *)
   | Pre_init, Client_message c when c.method_ = "initialize" ->
     initialize_params := Some (parse_initialize c.params);
-    (* We always succeed in initialization and send a response here.          *)
-    (* The real work to establish a server connection happens in our caller.  *)
+    state := begin try
+      connect ()
+      (* This tries to open connection to the monitor. If it succeeds,  *)
+      (* it returns In_init state, waiting for a Hello from the server. *)
+    with e ->
+      (* If it failed to open a connection to the monitor then we'll    *)
+      (* report the problem and trasition to Lost_server state.         *)
+      let stack = Printexc.get_backtrace () in
+      let (code, message, _data) = Lsp_fmt.get_error_info e in
+      client_log Lsp.MessageType.ErrorMessage (Printf.sprintf "%s [%i]\n%s" message code stack);
+      do_lost_server !state
+        { Lost_env.
+          message = "hh_server is stopped: " ^ message;
+          restart_on_click = true;
+          trigger_on_lock_file = true;
+          trigger_on_lsp = false;
+        }
+    end;
+    (* But regardless of whether we went to In_init or Lost_server, we'll  *)
+    (* still report success to the LSP client for the "initialize" method. *)
     do_initialize () |> print_initialize |> respond stdout c
 
   (* any request/notification if we haven't yet initialized *)
@@ -1865,6 +1878,7 @@ let handle_event
 
   (* idle tick. No-op. *)
   | _, Tick ->
+    EventLogger.flush ();
     None
 
   (* client message when we've lost the server *)
@@ -1909,12 +1923,7 @@ let main (env: env) : 'a =
       (* this is the main handler for each message*)
       let response = handle_event ~env ~state ~client ~event in
       (* for LSP requests and notifications, we keep a log of what+when we responded *)
-      log_response_if_necessary event response start_handle_t;
-
-      (* if client send an initialize request, we'll switch to either In_init or Lost_server *)
-      let (new_state, exn) = connect_from_preinit_if_necessary !state event in
-      state := new_state;
-      Option.iter exn ~f:(fun e -> raise e);
+      log_response_if_necessary event response start_handle_t
     with
     | Server_fatal_connection_exception edata ->
       if !state <> Post_shutdown then begin
@@ -1961,6 +1970,5 @@ let main (env: env) : 'a =
       let stack = Printexc.get_backtrace () in
       respond_to_error !ref_event e stack;
       hack_log_error !ref_event message stack "from_lsp" start_handle_t;
-      client_log Lsp.MessageType.ErrorMessage (message ^ ", internal\n" ^ stack);
   done;
   failwith "unreachable"

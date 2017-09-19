@@ -19,6 +19,9 @@
 
 #include "hphp/runtime/base/datatype.h"
 #include "hphp/runtime/base/req-root.h"
+#include "hphp/runtime/base/type-array.h"
+#include "hphp/runtime/base/type-object.h"
+#include "hphp/runtime/base/type-string.h"
 #include "hphp/runtime/base/typed-value.h"
 
 namespace HPHP {
@@ -97,10 +100,16 @@ ALWAYS_INLINE bool tvCoerceParamInPlace(TypedValue* tv, DataType DType,
 /*
  * Non-in-place casts.
  */
+bool tvCastToBoolean(TypedValue tv);
+int64_t tvCastToInt64(TypedValue tv);
 double tvCastToDouble(TypedValue tv);
-StringData* tvCastToString(TypedValue tv);
-ArrayData* tvCastToArrayLike(TypedValue tv);
-ObjectData* tvCastToObject(TypedValue tv);
+String tvCastToString(TypedValue tv);
+Array tvCastToArrayLike(TypedValue tv);
+Object tvCastToObject(TypedValue tv);
+
+StringData* tvCastToStringData(TypedValue tv);
+ArrayData* tvCastToArrayLikeData(TypedValue tv);
+ObjectData* tvCastToObjectData(TypedValue tv);
 
 /*
  * Convert a cell to various raw data types, without changing the Cell.

@@ -154,10 +154,10 @@ void in(ISS& env, const bc::EntryNop&) { nothrow(env); }
 
 void in(ISS& env, const bc::Dup& /*op*/) {
   nothrow(env);
-  auto const topEquiv = topStkEquiv(env);
+  auto equiv = topStkEquiv(env);
   auto val = popC(env);
-  push(env, val, topEquiv);
-  push(env, std::move(val), topEquiv);
+  push(env, val, equiv);
+  push(env, std::move(val), StackDupId);
 }
 
 void in(ISS& env, const bc::AssertRATL& op) {
@@ -605,34 +605,157 @@ bool couldBeHackArr(Type t) {
   return t.couldBe(TVec) || t.couldBe(TDict) || t.couldBe(TKeyset);
 }
 
-}
+template<bool NSame>
+std::pair<Type,bool> resolveSame(ISS& env) {
+  auto const l1 = topStkEquiv(env, 0);
+  auto const t1 = topC(env, 0);
+  auto const l2 = topStkEquiv(env, 1);
+  auto const t2 = topC(env, 1);
 
-template<bool Negate>
-void sameImpl(ISS& env) {
-  auto const t1 = popC(env);
-  auto const t2 = popC(env);
-  auto const v1 = tv(t1);
-  auto const v2 = tv(t2);
-
-  auto const mightWarn = [&]{
+  auto const mightWarn = [&] {
     // EvalHackArrCompatNotices will notice on === and !== between PHP arrays
     // and Hack arrays.
     if (!RuntimeOption::EvalHackArrCompatNotices) return false;
     if (t1.couldBe(TArr) && couldBeHackArr(t2)) return true;
     if (couldBeHackArr(t1) && t2.couldBe(TArr)) return true;
     return false;
-  }();
-  if (!mightWarn) {
+  };
+
+  auto const result = [&] {
+    auto const v1 = tv(t1);
+    auto const v2 = tv(t2);
+
+    if (l1 == StackDupId ||
+        (l1 <= MaxLocalId && l2 <= MaxLocalId &&
+         (l1 == l2 || locsAreEquiv(env, l1, l2)))) {
+      if (!t1.couldBe(TDbl) || !t2.couldBe(TDbl) ||
+          (v1 && (v1->m_type != KindOfDouble || !std::isnan(v1->m_data.dbl))) ||
+          (v2 && (v2->m_type != KindOfDouble || !std::isnan(v2->m_data.dbl)))) {
+        return NSame ? TFalse : TTrue;
+      }
+    }
+
+    if (v1 && v2) {
+      if (auto r = eval_cell_value([&]{ return cellSame(*v2, *v1); })) {
+        return r != NSame ? TTrue : TFalse;
+      }
+    }
+
+    return NSame ? typeNSame(t1, t2) : typeSame(t1, t2);
+  };
+
+  return { result(), mightWarn() };
+}
+
+template<bool Negate>
+void sameImpl(ISS& env) {
+  auto pair = resolveSame<Negate>(env);
+  discard(env, 2);
+
+  if (!pair.second) {
     nothrow(env);
     constprop(env);
   }
 
-  if (v1 && v2) {
-    if (auto r = eval_cell_value([&]{ return cellSame(*v2, *v1); })) {
-      return push(env, r != Negate ? TTrue : TFalse);
-    }
+  push(env, std::move(pair.first));
+}
+
+}
+
+template<class Same, class JmpOp>
+void group(ISS& env, const Same& same, const JmpOp& jmp) {
+
+  auto bail = [&] { impl(env, same, jmp); };
+
+  constexpr auto NSame = Same::op == Op::NSame;
+
+  if (resolveSame<NSame>(env).first != TBool) return bail();
+
+  auto const loc0 = topStkEquiv(env, 0);
+  auto const loc1 = topStkEquiv(env, 1);
+  if (loc0 == NoLocalId && loc1 == NoLocalId) return bail();
+
+  auto const ty0 = topC(env, 0);
+  auto const ty1 = topC(env, 1);
+  auto const val0 = tv(ty0);
+  auto const val1 = tv(ty1);
+
+  if ((val0 && val1) ||
+      (loc0 == NoLocalId && !val0 && ty1.subtypeOf(ty0)) ||
+      (loc1 == NoLocalId && !val1 && ty0.subtypeOf(ty1))) {
+    return bail();
   }
-  push(env, Negate ? typeNSame(t1, t2) : typeSame(t1, t2));
+
+  auto isect = intersection_of(ty0, ty1);
+  discard(env, 2);
+
+  auto handle_same = [&] {
+    // Currently dce uses equivalency to prove that something isn't
+    // the last reference - so we can only assert equivalency here if
+    // we know that won't be affected. Its irrelevant for uncounted
+    // things, and for TObj and TRes, $x === $y iff $x and $y refer to
+    // the same thing.
+    if (loc0 <= MaxLocalId && loc1 <= MaxLocalId &&
+        (ty0.subtypeOfAny(TOptObj, TOptRes) ||
+         ty1.subtypeOfAny(TOptObj, TOptRes) ||
+         (ty0.subtypeOf(TUnc) && ty1.subtypeOf(TUnc)))) {
+      if (loc1 == StackDupId) {
+        setStkLocal(env, loc0);
+      } else {
+        assertx(loc0 != loc1 && !locsAreEquiv(env, loc0, loc1));
+        auto loc = loc0;
+        while (true) {
+          auto const other = findLocEquiv(env, loc);
+          if (other == NoLocalId) break;
+          killLocEquiv(env, loc);
+          addLocEquiv(env, loc, loc1);
+          loc = other;
+        }
+        addLocEquiv(env, loc, loc1);
+      }
+    }
+    refineLocation(env, loc1 != NoLocalId ? loc1 : loc0, [&] (Type ty) {
+      if (!ty.couldBe(TUninit) || !isect.couldBe(TNull)) {
+        auto ret = intersection_of(std::move(ty), isect);
+        return ty.subtypeOf(TUnc) ? ret : loosen_staticness(ret);
+      }
+
+      if (isect.subtypeOf(TNull)) {
+        return ty.couldBe(TInitNull) ? TNull : TUninit;
+      }
+
+      return ty;
+    });
+  };
+
+  auto handle_differ_side = [&] (LocalId location, const Type& ty) {
+    if (ty.subtypeOf(TInitNull) || ty.strictSubtypeOf(TBool)) {
+      refineLocation(env, location, [&] (Type t) {
+          if (ty.subtypeOf(TNull)) {
+            t = remove_uninit(std::move(t));
+            if (is_opt(t)) t = unopt(std::move(t));
+            return t;
+          } else if (ty.strictSubtypeOf(TBool) && t.subtypeOf(TBool)) {
+            return ty == TFalse ? TTrue : TFalse;
+          }
+          return t;
+        });
+    }
+  };
+
+  auto handle_differ = [&] {
+    if (loc0 != NoLocalId) handle_differ_side(loc0, ty1);
+    if (loc1 != NoLocalId) handle_differ_side(loc1, ty0);
+  };
+
+  auto const sameIsJmpTarget =
+    (Same::op == Op::Same) == (JmpOp::op == Op::JmpNZ);
+
+  auto save = env.state;
+  sameIsJmpTarget ? handle_same() : handle_differ();
+  env.propagate(jmp.target, &env.state);
+  env.state = std::move(save);
+  sameIsJmpTarget ? handle_differ() : handle_same();
 }
 
 void in(ISS& env, const bc::Same&)  { sameImpl<false>(env); }
@@ -671,9 +794,21 @@ void binOpInt64Impl(ISS& env, Fun fun) {
 }
 
 void in(ISS& env, const bc::Eq&) {
+  auto rs = resolveSame<false>(env);
+  if (rs.first == TTrue) {
+    if (!rs.second) constprop(env);
+    discard(env, 2);
+    return push(env, TTrue);
+  }
   binOpBoolImpl(env, [&] (Cell c1, Cell c2) { return cellEqual(c1, c2); });
 }
 void in(ISS& env, const bc::Neq&) {
+  auto rs = resolveSame<false>(env);
+  if (rs.first == TTrue) {
+    if (!rs.second) constprop(env);
+    discard(env, 2);
+    return push(env, TFalse);
+  }
   binOpBoolImpl(env, [&] (Cell c1, Cell c2) { return !cellEqual(c1, c2); });
 }
 void in(ISS& env, const bc::Lt&) {
@@ -826,7 +961,7 @@ void in(ISS& /*env*/, const bc::Jmp&) {
 template<bool Negate, class JmpOp>
 void jmpImpl(ISS& env, const JmpOp& op) {
   nothrow(env);
-  auto const locId = topStkEquiv(env);
+  auto const location = topStkEquiv(env);
   auto const e = emptiness(popC(env));
   if (e == (Negate ? Emptiness::NonEmpty : Emptiness::Empty)) {
     jmp_nofallthrough(env);
@@ -845,58 +980,82 @@ void jmpImpl(ISS& env, const JmpOp& op) {
     return;
   }
 
-  if (locId == NoLocalId) return env.propagate(op.target, &env.state);
+  if (location == NoLocalId) return env.propagate(op.target, &env.state);
 
-  auto loc = peekLocRaw(env, locId);
-  assertx(!loc.couldBe(TRef)); // we shouldn't have an equivLoc if it was
+  auto val = peekLocation(env, location);
+  assertx(!val.couldBe(TRef)); // we shouldn't have an equivLoc if it was
 
-  auto const converted_true = assert_nonemptiness(loc);
-  auto const converted_false = assert_emptiness(std::move(loc));
-
-  refineLoc(env, locId, Negate ? converted_true : converted_false);
-  env.propagate(op.target, &env.state);
-  refineLoc(env, locId, Negate ? converted_false : converted_true);
+  refineLocation(env, location,
+                 Negate ? assert_nonemptiness : assert_emptiness,
+                 op.target,
+                 Negate ? assert_emptiness : assert_nonemptiness);
 }
 
 void in(ISS& env, const bc::JmpNZ& op) { jmpImpl<true>(env, op); }
 void in(ISS& env, const bc::JmpZ& op)  { jmpImpl<false>(env, op); }
 
-template<class JmpOp>
-void group(ISS& env, const bc::IsTypeL& istype, const JmpOp& jmp) {
-  if (istype.subop2 == IsTypeOp::Scalar) return impl(env, istype, jmp);
+namespace {
 
-  auto const loc = derefLoc(env, istype.loc1);
-  auto const testTy = type_of_istype(istype.subop2);
-  if (loc.subtypeOf(testTy) || !loc.couldBe(testTy)) {
+template<class IsType, class JmpOp>
+void isTypeHelper(ISS& env,
+                  IsTypeOp typeOp, LocalId location,
+                  const IsType& istype, const JmpOp& jmp) {
+
+  if (typeOp == IsTypeOp::Scalar) return impl(env, istype, jmp);
+
+  auto const val = istype.op == Op::IsTypeC ?
+    topT(env) : locRaw(env, location);
+  auto const testTy = type_of_istype(typeOp);
+  if (!val.subtypeOf(TCell) || val.subtypeOf(testTy) || !val.couldBe(testTy)) {
     return impl(env, istype, jmp);
   }
 
-  if (!locCouldBeUninit(env, istype.loc1)) nothrow(env);
+  if (istype.op == Op::IsTypeC) {
+    nothrow(env);
+    popT(env);
+  } else if (!locCouldBeUninit(env, location)) {
+    nothrow(env);
+  }
 
   auto const negate = jmp.op == Op::JmpNZ;
-  auto const was_true = [&] {
-    if (is_opt(loc)) {
-      if (testTy.subtypeOf(TNull)) return TInitNull;
-      auto const unopted = unopt(loc);
+  auto const was_true = [&] (Type t) {
+    if (testTy.subtypeOf(TUninit)) {
+      return TUninit;
+    }
+    if (testTy.subtypeOf(TNull)) {
+      return t.couldBe(TUninit) ?
+        t.couldBe(TInitNull) ? TNull : TUninit : TInitNull;
+    }
+    if (is_opt(t)) {
+      auto const unopted = unopt(t);
       if (unopted.subtypeOf(testTy)) return unopted;
     }
     return testTy;
-  }();
-  auto const was_false = [&] {
-    if (is_opt(loc)) {
-      auto const unopted = unopt(loc);
-      if (testTy.subtypeOf(TNull))   return unopted;
-      if (unopted.subtypeOf(testTy)) return TInitNull;
+  };
+  auto const was_false = [&] (Type t) {
+    if (testTy.subtypeOf(TUninit)) {
+      return remove_uninit(t);
     }
-    return loc;
-  }();
+    if (testTy.subtypeOf(TNull)) {
+      t = remove_uninit(std::move(t));
+      return is_opt(t) ? unopt(t) : t;
+    }
+    if (is_opt(t)) {
+      if (unopt(t).subtypeOf(testTy)) return TInitNull;
+    }
+    return t;
+  };
 
-  refineLoc(env, istype.loc1, negate ? was_true : was_false);
-  env.propagate(jmp.target, &env.state);
-  refineLoc(env, istype.loc1, negate ? was_false : was_true);
+  auto const pre = [&] (Type t) {
+    return negate ? was_true(std::move(t)) : was_false(std::move(t));
+  };
+
+  auto const post = [&] (Type t) {
+    return negate ? was_false(std::move(t)) : was_true(std::move(t));
+  };
+
+  refineLocation(env, location, pre, jmp.target, post);
 }
-
-namespace {
 
 folly::Optional<Cell> staticLocHelper(ISS& env, LocalId l, Type init) {
   if (is_volatile_local(env.ctx.func, l)) return folly::none;
@@ -1027,39 +1186,19 @@ void group(ISS& env, const bc::StaticLocCheck& slc, const JmpOp& jmp) {
   }
 }
 
+template<class JmpOp>
+void group(ISS& env, const bc::IsTypeL& istype, const JmpOp& jmp) {
+  isTypeHelper(env, istype.subop2, istype.loc1, istype, jmp);
+}
+
 // If we duplicate a value, and then test its type and Jmp based on that result,
 // we can narrow the type of the top of the stack. Only do this for null checks
 // right now (because its useful in memoize wrappers).
 template<class JmpOp>
-void group(ISS& env, const bc::Dup& dup,
-           const bc::IsTypeC& istype, const JmpOp& jmp) {
-  if (istype.subop1 != IsTypeOp::Scalar) {
-    auto const testTy = type_of_istype(istype.subop1);
-    if (testTy.subtypeOf(TNull)) {
-      auto const valTy = popC(env);
-      typeTestPropagate(
-        env, valTy, TInitNull, is_opt(valTy) ? unopt(valTy) : valTy, jmp
-      );
-      return;
-    }
-  }
-  impl(env, dup, istype, jmp);
-}
-
-// If we duplicate a value, do an instanceof check and Jmp based on
-// that result, we can narrow the type of the top of the stack.
-template<class JmpOp>
-void group(ISS& env, const bc::Dup& dup,
-           const bc::InstanceOfD& inst, const JmpOp& jmp) {
-  auto bail = [&] { impl(env, dup, inst, jmp); };
-
-  if (interface_supports_non_objects(inst.str1)) return bail();
-  auto const rcls = env.index.resolve_class(env.ctx, inst.str1);
-  if (!rcls) return bail();
-
-  auto const instTy = subObj(*rcls);
-  auto const obj = popC(env);
-  typeTestPropagate(env, obj, instTy, obj, jmp);
+void group(ISS& env, const bc::IsTypeC& istype, const JmpOp& jmp) {
+  auto const location = topStkEquiv(env);
+  if (location == NoLocalId) return impl(env, istype, jmp);
+  isTypeHelper(env, istype.subop1, location, istype, jmp);
 }
 
 // If we do an IsUninit check and then Jmp based on the check, one branch will
@@ -1097,23 +1236,21 @@ void group(ISS& env,
   if (locId == NoLocalId || interface_supports_non_objects(inst.str1)) {
     return bail();
   }
-  auto const loc = peekLocRaw(env, locId);
-  assertx(!loc.couldBe(TRef)); // we shouldn't have an equivLoc if it was
+  auto const val = peekLocation(env, locId, 1);
+  assertx(!val.couldBe(TRef)); // we shouldn't have an equivLoc if it was
   auto const rcls = env.index.resolve_class(env.ctx, inst.str1);
   if (!rcls) return bail();
 
   auto const instTy = subObj(*rcls);
-  if (loc.subtypeOf(instTy) || !loc.couldBe(instTy)) {
+  if (val.subtypeOf(instTy) || !val.couldBe(instTy)) {
     return bail();
   }
 
   popC(env);
   auto const negate    = jmp.op == Op::JmpNZ;
-  auto const was_true  = instTy;
-  auto const was_false = loc;
-  refineLoc(env, locId, negate ? was_true : was_false);
-  env.propagate(jmp.target, &env.state);
-  refineLoc(env, locId, negate ? was_false : was_true);
+  auto const pre  = [&] (Type t) { return negate ? instTy : t; };
+  auto const post = [&] (Type t) { return negate ? t : instTy; };
+  refineLocation(env, locId, pre, jmp.target, post);
 }
 
 void in(ISS& env, const bc::Switch& op) {
@@ -1190,6 +1327,9 @@ void in(ISS& env, const bc::CUGetL& op) {
 }
 
 void in(ISS& env, const bc::PushL& op) {
+  if (auto val = tv(locRaw(env, op.loc1))) {
+    return reduce(env, gen_constant(*val), bc::UnsetL { op.loc1 });
+  }
   impl(env, bc::CGetL { op.loc1 }, bc::UnsetL { op.loc1 });
 }
 
@@ -1197,7 +1337,7 @@ void in(ISS& env, const bc::CGetL2& op) {
   // Can't constprop yet because of no INS_1 support in bc.h
   if (!locCouldBeUninit(env, op.loc1)) nothrow(env);
   auto loc = locAsCell(env, op.loc1);
-  auto topEquiv = topStkEquiv(env);
+  auto topEquiv = topStkLocal(env);
   auto top = popT(env);
   push(env, std::move(loc), op.loc1);
   push(env, std::move(top), topEquiv);
@@ -1650,11 +1790,11 @@ template <typename Op>
 folly::Optional<std::pair<Type, LocalId>> moveToLocImpl(ISS& env,
                                                         const Op& op) {
   nothrow(env);
-  auto equivLoc = topStkEquiv(env);
+  auto equivLoc = topStkLocal(env);
   // If the local could be a Ref, don't record equality because the stack
   // element and the local won't actually have the same type.
-  if (!locCouldBeRef(env, op.loc1) &&
-      !is_volatile_local(env.ctx.func, op.loc1)) {
+  if (!locCouldBeRef(env, op.loc1)) {
+    assertx(!is_volatile_local(env.ctx.func, op.loc1));
     if (equivLoc != NoLocalId) {
       if (equivLoc == op.loc1 ||
           locsAreEquiv(env, equivLoc, op.loc1)) {
@@ -2006,7 +2146,7 @@ void in(ISS& env, const bc::FPushFuncU& op) {
 }
 
 void in(ISS& env, const bc::FPushObjMethodD& op) {
-  auto loc = topStkEquiv(env);
+  auto location = topStkEquiv(env);
   auto t1 = popC(env);
   if (op.subop3 == ObjMethodOp::NullThrows) {
     if (!t1.couldBe(TObj)) {
@@ -2029,15 +2169,20 @@ void in(ISS& env, const bc::FPushObjMethodD& op) {
     rcls,
     env.index.resolve_method(env.ctx, clsTy, op.str2)
   });
-  if (loc != NoLocalId) {
-    auto locTy = peekLocRaw(env, loc);
-    if (locTy.subtypeOf(TCell)) {
-      if (!is_specialized_obj(locTy)) {
-        refineLoc(env, loc,
-                  op.subop3 == ObjMethodOp::NullThrows ? TObj : TOptObj);
-      } else if (is_opt(locTy) && op.subop3 == ObjMethodOp::NullThrows) {
-        refineLoc(env, loc, unopt(locTy));
-      }
+  if (location != NoLocalId) {
+    auto ty = peekLocation(env, location);
+    if (ty.subtypeOf(TCell)) {
+      refineLocation(env, location,
+                     [&] (Type t) {
+                       if (!is_specialized_obj(t)) {
+                         return op.subop3 == ObjMethodOp::NullThrows ?
+                           TObj : TOptObj;
+                       }
+                       if (is_opt(t) && op.subop3 == ObjMethodOp::NullThrows) {
+                         return unopt(t);
+                       }
+                       return t;
+                     });
     }
   }
 }
@@ -2474,6 +2619,16 @@ void in(ISS& env, const bc::FCall& op) {
 
 void in(ISS& env, const bc::FCallD& op) {
   auto const ar = fpiTop(env);
+  if ((ar.func && ar.func->name() != op.str3) ||
+      (ar.cls && ar.cls->name() != op.str2)) {
+    // We've found a more precise type for the call, so update it
+    return reduce(
+      env,
+      bc::FCallD {
+        op.arg1, ar.cls ? ar.cls->name() : s_empty.get(), ar.func->name()
+      }
+    );
+  }
   if (ar.kind == FPIKind::Builtin) {
     return finish_builtin(env, ar.func->exactFunc(), op.arg1, false);
   }
@@ -2484,6 +2639,17 @@ void in(ISS& env, const bc::FCallD& op) {
 }
 
 void in(ISS& env, const bc::FCallAwait& op) {
+  auto const ar = fpiTop(env);
+  if ((ar.func && ar.func->name() != op.str3) ||
+      (ar.cls && ar.cls->name() != op.str2)) {
+    // We've found a more precise type for the call, so update it
+    return reduce(
+      env,
+      bc::FCallAwait {
+        op.arg1, ar.cls ? ar.cls->name() : s_empty.get(), ar.func->name()
+      }
+    );
+  }
   impl(env,
        bc::FCallD { op.arg1, op.str2, op.str3 },
        bc::UnboxRNop {},
@@ -2931,7 +3097,9 @@ void in(ISS& env, const bc::OODeclExists& op) {
         constprop(env);
         return mayExist ? TTrue : TFalse;
       }
-      unit->persistent.store(false, std::memory_order_relaxed);
+      if (!env.collect.inlining) {
+        unit->persistent.store(false, std::memory_order_relaxed);
+      }
       // At this point, if it mayExist, we still don't know that it
       // *does* exist, but if not we know that it either doesn't
       // exist, or it doesn't have the right type.
@@ -2979,7 +3147,7 @@ void in(ISS& /*env*/, const bc::VerifyRetTypeV& /*op*/) {}
 
 void in(ISS& env, const bc::VerifyRetTypeC& /*op*/) {
   auto const constraint = env.ctx.func->retTypeConstraint;
-  auto const stackT = topC(env);
+  auto stackT = topC(env);
 
   // If there is no return type constraint, or if the return type
   // constraint is a typevar, or if the top of stack is the same
@@ -3004,16 +3172,6 @@ void in(ISS& env, const bc::VerifyRetTypeC& /*op*/) {
   auto tcT =
     remove_uninit(env.index.lookup_constraint(env.ctx, constraint));
 
-  if (tcT.subtypeOf(TBottom)) {
-    unreachable(env);
-    return;
-  }
-
-  // Below we compute retT, which is a rough conservative approximate of the
-  // intersection of stackT and tcT.
-  // TODO(4441939): We could do better if we had an intersect_of() function
-  // that provided a formal way to compute the intersection of two Types.
-
   // If tcT could be an interface or trait, we upcast it to TObj/TOptObj.
   // Why?  Because we want uphold the invariant that we only refine return
   // types and never widen them, and if we allow tcT to be an interface then
@@ -3027,15 +3185,13 @@ void in(ISS& env, const bc::VerifyRetTypeC& /*op*/) {
   if (is_specialized_obj(tcT) && dobj_of(tcT).cls.couldBeInterfaceOrTrait()) {
     tcT = is_opt(tcT) ? TOptObj : TObj;
   }
-  // If stackT is a subtype of tcT, use stackT.  Otherwise, if tc is an opt
-  // type and stackT cannot be InitNull, then we can safely use unopt(tcT).
-  // In all other cases, use tcT.
-  auto retT = stackT.subtypeOf(tcT) ? stackT :
-                    is_opt(tcT) && !stackT.couldBe(TInitNull) ? unopt(tcT) :
-                    tcT;
 
-  // Update the top of stack with the rough conservative approximate of the
-  // intersection of stackT and tcT
+  auto retT = intersection_of(std::move(tcT), std::move(stackT));
+  if (retT.subtypeOf(TBottom)) {
+    unreachable(env);
+    return;
+  }
+
   popC(env);
   push(env, std::move(retT));
 }
@@ -3287,26 +3443,12 @@ void interpStep(ISS& env, Iterator& it, Iterator stop) {
     default: break;
     }
     break;
-  case Op::Dup:
+  case Op::IsTypeC:
     switch (o2) {
-    case Op::IsTypeC:
-      switch (o3) {
-      case Op::JmpZ:
-        return group(env, it, it[0].Dup, it[1].IsTypeC, it[2].JmpZ);
-      case Op::JmpNZ:
-        return group(env, it, it[0].Dup, it[1].IsTypeC, it[2].JmpNZ);
-      default: break;
-      }
-      break;
-    case Op::InstanceOfD:
-      switch (o3) {
-      case Op::JmpZ:
-        return group(env, it, it[0].Dup, it[1].InstanceOfD, it[2].JmpZ);
-      case Op::JmpNZ:
-        return group(env, it, it[0].Dup, it[1].InstanceOfD, it[2].JmpNZ);
-      default: break;
-      }
-      break;
+    case Op::JmpZ:
+      return group(env, it, it[0].IsTypeC, it[1].JmpZ);
+    case Op::JmpNZ:
+      return group(env, it, it[0].IsTypeC, it[1].JmpNZ);
     default: break;
     }
     break;
@@ -3330,6 +3472,24 @@ void interpStep(ISS& env, Iterator& it, Iterator stop) {
       return group(env, it, it[0].StaticLocCheck, it[1].JmpZ);
     case Op::JmpNZ:
       return group(env, it, it[0].StaticLocCheck, it[1].JmpNZ);
+    default: break;
+    }
+    break;
+  case Op::Same:
+    switch (o2) {
+    case Op::JmpZ:
+      return group(env, it, it[0].Same, it[1].JmpZ);
+    case Op::JmpNZ:
+      return group(env, it, it[0].Same, it[1].JmpNZ);
+    default: break;
+    }
+    break;
+  case Op::NSame:
+    switch (o2) {
+    case Op::JmpZ:
+      return group(env, it, it[0].NSame, it[1].JmpZ);
+    case Op::JmpNZ:
+      return group(env, it, it[0].NSame, it[1].JmpNZ);
     default: break;
     }
     break;

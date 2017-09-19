@@ -48,8 +48,6 @@ TRACE_SET_MOD(hhbbc);
 const StaticString s_86cinit("86cinit");
 const StaticString s_86pinit("86pinit");
 const StaticString s_86sinit("86sinit");
-const StaticString s_AsyncGenerator("HH\\AsyncGenerator");
-const StaticString s_Generator("Generator");
 const StaticString s_Closure("Closure");
 
 //////////////////////////////////////////////////////////////////////
@@ -255,11 +253,11 @@ Context adjust_closure_context(Context ctx) {
 }
 
 FuncAnalysis do_analyze_collect(const Index& index,
-                                Context const inputCtx,
+                                Context const ctx,
                                 CollectedInfo& collect,
                                 ClassAnalysis* clsAnalysis,
                                 const std::vector<Type>* knownArgs) {
-  auto const ctx = adjust_closure_context(inputCtx);
+  assertx(ctx.cls == adjust_closure_context(ctx).cls);
   FuncAnalysis ai{ctx};
 
   auto const bump = trace_bump_for(ctx.cls, ctx.func);
@@ -395,19 +393,7 @@ FuncAnalysis do_analyze_collect(const Index& index,
   ai.mayUseVV = collect.mayUseVV;
   ai.effectFree = collect.effectFree;
 
-  if (ctx.func->isGenerator) {
-    if (ctx.func->isAsync) {
-      // Async generators always return AsyncGenerator object.
-      ai.inferredReturn = objExact(index.builtin_class(s_AsyncGenerator.get()));
-    } else {
-      // Non-async generators always return Generator object.
-      ai.inferredReturn = objExact(index.builtin_class(s_Generator.get()));
-    }
-  } else if (ctx.func->isAsync) {
-    // Async functions always return WaitH<T>, where T is the type returned
-    // internally.
-    ai.inferredReturn = wait_handle(index, ai.inferredReturn);
-  }
+  index.fixup_return_type(ctx.func, ai.inferredReturn);
 
   /*
    * If inferredReturn is TBottom, the callee didn't execute a return
@@ -451,12 +437,13 @@ FuncAnalysis do_analyze_collect(const Index& index,
 }
 
 FuncAnalysis do_analyze(const Index& index,
-                        Context const ctx,
+                        Context const inputCtx,
                         ClassAnalysis* clsAnalysis,
                         const std::vector<Type>* knownArgs,
                         bool trackConstantArrays) {
+  auto const ctx = adjust_closure_context(inputCtx);
   CollectedInfo collect {
-    index, ctx, clsAnalysis, nullptr, trackConstantArrays
+    index, ctx, clsAnalysis, nullptr, trackConstantArrays, knownArgs != nullptr
   };
 
   return do_analyze_collect(index, ctx, collect, clsAnalysis, knownArgs);
@@ -827,7 +814,7 @@ locally_propagated_states(const Index& index,
   std::vector<std::pair<State,StepFlags>> ret;
   ret.reserve(blk->hhbcs.size() + 1);
 
-  CollectedInfo collect { index, fa.ctx, nullptr, nullptr, true, &fa };
+  CollectedInfo collect { index, fa.ctx, nullptr, nullptr, true, false, &fa };
   auto interp = Interp { index, fa.ctx, collect, blk, state };
 
   for (auto& op : blk->hhbcs) {

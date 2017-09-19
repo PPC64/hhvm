@@ -20,6 +20,8 @@
 #include "hphp/runtime/base/heap-scan.h"
 #include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/base/heap-graph.h"
+#include "hphp/runtime/base/weakref-data.h"
+#include "hphp/runtime/ext/weakref/weakref-data-handle.h"
 #include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/util/alloc.h"
 #include "hphp/util/bloom-filter.h"
@@ -74,9 +76,12 @@ struct Marker {
   template<bool apcgc>
   void conservativeScan(const void* start, size_t len);
 
-  static bool marked(const HeapObject* h) { return h->marks() & GCBits::Mark; }
-  bool mark(const HeapObject*, GCBits = GCBits::Mark);
-  template<bool apcgc> void checkedEnqueue(const void* p, GCBits bits);
+  static bool marked(const HeapObject* h) {
+    return h->marks() != GCBits::Unmarked;
+  }
+  bool mark(const HeapObject*);
+  template<bool apcgc> void checkedEnqueue(const void* p);
+  void enqueueWeak(const WeakRefDataHandle* p);
   template<bool apcgc> void finish_typescan();
   HdrBlock find(const void*);
 
@@ -99,6 +104,7 @@ struct Marker {
   PtrMap<const HeapObject*> ptrs_;
   type_scan::Scanner type_scanner_;
   std::vector<const HeapObject*> work_;
+  std::vector<const WeakRefDataHandle*> weakRefs_;
   APCGCManager* const apcgc_;
 };
 
@@ -126,11 +132,11 @@ HdrBlock Marker::find(const void* ptr) {
 // Mark the object at h, return true if first time. For allocations that
 // contain prefix data followed by an ObjectData, h should point to the
 // start of the whole allocation, not the interior ObjectData.
-inline bool Marker::mark(const HeapObject* h, GCBits marks) {
+inline bool Marker::mark(const HeapObject* h) {
   assert(h->kind() <= HeaderKind::BigMalloc);
   assert(h->kind() != HeaderKind::AsyncFuncWH);
   assert(h->kind() != HeaderKind::Closure);
-  return h->mark(marks) == GCBits::Unmarked;
+  return h->mark() == GCBits::Unmarked;
 }
 
 DEBUG_ONLY bool checkEnqueuedKind(const HeapObject* h) {
@@ -188,14 +194,14 @@ DEBUG_ONLY bool checkEnqueuedKind(const HeapObject* h) {
 }
 
 template <bool apcgc>
-void Marker::checkedEnqueue(const void* p, GCBits bits) {
+void Marker::checkedEnqueue(const void* p) {
   auto r = find(p);
   if (auto h = r.ptr) {
     // enqueue h the first time. If it's an object with no pointers (eg String),
     // we'll skip it when we process the queue.
-    if (mark(h, bits)) {
+    if (mark(h)) {
       marked_ += r.size;
-      pinned_ += bits == GCBits::Pin ? r.size : 0;
+      pinned_ += r.size;
       enqueue(h);
       assert(checkEnqueuedKind(h));
     }
@@ -203,6 +209,11 @@ void Marker::checkedEnqueue(const void* p, GCBits bits) {
     // If p doesn't belong to any APC data, APCGCManager won't do anything
     apcgc_->mark(p);
   }
+}
+
+// Enqueue a weak pointer for possible clearing at the end of scanning.
+void Marker::enqueueWeak(const WeakRefDataHandle* weak) {
+  weakRefs_.emplace_back(weak);
 }
 
 // mark ambigous pointers in the range [start,start+len). If the start or
@@ -218,8 +229,7 @@ Marker::conservativeScan(const void* start, size_t len) {
     checkedEnqueue<apcgc>(
       // Mask off the upper 16-bits to handle things like
       // DiscriminatedPtr which stores things up there.
-      (void*)(uintptr_t(*s) & (-1ULL >> 16)),
-      GCBits::Pin
+      (void*)(uintptr_t(*s) & (-1ULL >> 16))
     );
   }
 }
@@ -266,7 +276,7 @@ NEVER_INLINE void Marker::init() {
         init(h, size);
         if (!type_scan::isKnownType(static_cast<MallocNode*>(h)->typeIndex())) {
           unknown_ += size;
-          h->mark(GCBits::Pin);
+          h->mark();
           enqueue(h);
         }
       }
@@ -292,7 +302,10 @@ void Marker::finish_typescan() {
     },
     [this](const void** addr) {
       xscanned_ += sizeof(*addr);
-      checkedEnqueue<apcgc>(*addr, GCBits::Mark);
+      checkedEnqueue<apcgc>(*addr);
+    },
+    [this](const void* weak) {
+      enqueueWeak(reinterpret_cast<const WeakRefDataHandle*>(weak));
     }
   );
 }
@@ -335,6 +348,24 @@ NEVER_INLINE void Marker::sweep() {
     sweep_ns_ = cpu_ns() - t0;
     assert(freed_bytes_ >= 0);
   };
+
+  // Clear weak references as needed.
+  while (!weakRefs_.empty()) {
+    auto wref = weakRefs_.back();
+    assert(wref->acquire_count == 0);
+    assert(wref->wr_data);
+    weakRefs_.pop_back();
+    auto type = wref->wr_data->pointee.m_type;
+    if (type == KindOfObject) {
+      auto r = find(wref->wr_data->pointee.m_data.pobj);
+      if (!marked(r.ptr)) {
+        WeakRefData::invalidateWeakRef(uintptr_t(r.ptr));
+        mm.reinitFree();
+      }
+      continue;
+    }
+    assert(type == KindOfNull || type == KindOfUninit);
+  }
 
   bool need_reinit_free = false;
   g_context->sweepDynPropTable([&](const ObjectData* obj) {

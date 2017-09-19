@@ -78,6 +78,19 @@ void add_func_breakpoint(int id, XDebugBreakpoint& bp, const Func* func) {
   }
 }
 
+void sendBreakpointResolvedNotify(int id, const XDebugBreakpoint& bp) {
+  auto server = XDEBUG_GLOBAL(Server);
+  if (server == nullptr || !server->m_supportsNotify) {
+    return;
+  }
+  auto notify = xdebug_xml_node_init("notify");
+  SCOPE_EXIT { xdebug_xml_node_dtor(notify); };
+
+  xdebug_xml_add_attribute(notify, "name", "breakpoint_resolved");
+  xdebug_xml_add_child(notify, breakpoint_xml_node(id, bp));
+  server->sendMessage(*notify);
+}
+
 // Helper that adds the given line breakpoint that has been matched to the given
 // unit as a breakpoint. The line number is assumed to be valid in the unit.
 void add_line_breakpoint(int id, XDebugBreakpoint& bp, const Unit* unit) {
@@ -85,6 +98,7 @@ void add_line_breakpoint(int id, XDebugBreakpoint& bp, const Unit* unit) {
   LINE_MAP[filepath].emplace(bp.line, id);
   bp.unit = unit;
   bp.resolved = true;
+  sendBreakpointResolvedNotify(id, bp);
 }
 
 // Helper used when looping through the unmatched breakpoints. Checks if the
@@ -444,6 +458,11 @@ static Variant get_breakpoint_message(const BreakInfo& bi) {
   return init_null();
 }
 
+static Variant get_breakpoint_exception_name(const BreakInfo& bi) {
+  if (auto eb = boost::get<ExnBreak>(&bi)) return VarNR(eb->name);
+  return init_null();
+}
+
 DebuggerHook* XDebugHook::GetInstance() {
   static DebuggerHook* instance = new XDebugHook();
   return instance;
@@ -475,7 +494,8 @@ void XDebugHook::onBreak(const BreakInfo& bi) {
 
       // Grab the breakpoint message and do the break.
       auto const msg = get_breakpoint_message(bi);
-      if (!XDEBUG_GLOBAL(Server)->breakpoint(bp, msg)) {
+      auto const exnName = get_breakpoint_exception_name(bi);
+      if (!XDEBUG_GLOBAL(Server)->breakpoint(bp, exnName, msg)) {
         // Kill the server if there's an error.
         XDebugServer::detach();
         return;
@@ -520,19 +540,6 @@ void XDebugHook::onFlowBreak(const Unit* unit, int line) {
   }
 }
 
-void sendBreakpointResolvedNotify(int id, const XDebugBreakpoint& bp) {
-  auto server = XDEBUG_GLOBAL(Server);
-  if (server == nullptr || !server->m_supportsNotify) {
-    return;
-  }
-  auto notify = xdebug_xml_node_init("notify");
-  SCOPE_EXIT { xdebug_xml_node_dtor(notify); };
-
-  xdebug_xml_add_attribute(notify, "name", "breakpoint_resolved");
-  xdebug_xml_add_child(notify, breakpoint_xml_node(id, bp));
-  server->sendMessage(*notify);
-}
-
 void XDebugHook::onFileLoad(Unit* unit) {
   // Translate the unit filename to match xdebug's internal format
   String unit_path(const_cast<StringData*>(unit->filepath()));
@@ -555,8 +562,6 @@ void XDebugHook::onFileLoad(Unit* unit) {
     // so we just cleanup
     if (phpAddBreakPointLine(unit, bp.line)) {
       add_line_breakpoint(id, bp, unit);
-      bp.resolved = true;
-      sendBreakpointResolvedNotify(id, bp);
       iter = UNMATCHED.erase(iter);
     } else {
       BREAKPOINT_MAP.erase(id);

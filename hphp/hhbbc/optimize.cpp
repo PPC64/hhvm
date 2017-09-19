@@ -102,7 +102,7 @@ void insert_assertions_step(ArrayTypeTable::Builder& arrTable,
                             const Bytecode& bcode,
                             const State& state,
                             std::bitset<kMaxTrackedLocals> mayReadLocalSet,
-                            bool lastStackOutputObvious,
+                            std::vector<uint8_t> obviousStackOutputs,
                             Gen gen) {
   if (state.unreachable) return;
 
@@ -123,8 +123,12 @@ void insert_assertions_step(ArrayTypeTable::Builder& arrTable,
 
   if (!options.InsertStackAssertions) return;
 
+  assert(obviousStackOutputs.size() == state.stack.size());
+
   auto const assert_stack = [&] (size_t idx) {
     assert(idx < state.stack.size());
+    if (obviousStackOutputs[state.stack.size() - idx - 1]) return;
+    if (ignoresStackInput(bcode.op)) return;
     auto const realT = state.stack[state.stack.size() - idx - 1].type;
     auto const flav  = stack_flav(realT);
 
@@ -142,23 +146,12 @@ void insert_assertions_step(ArrayTypeTable::Builder& arrTable,
     if (op) gen(*op);
   };
 
-  // Skip asserting the top of the stack if it just came immediately
-  // out of an 'obvious' instruction (see hasObviousStackOutput), or
-  // if this instruction ignoresStackInput.
-  assert(state.stack.size() >= bcode.numPop());
-  auto i = size_t{0};
-  if (options.FilterAssertions) {
-    if (lastStackOutputObvious || ignoresStackInput(bcode.op)) {
-      ++i;
-    }
-  }
-
   /*
    * This doesn't need to account for ActRecs on the fpiStack, because
    * no instruction in an FPI region can ever consume a stack value
    * from above the pre-live ActRec.
    */
-  for (; i < bcode.numPop(); ++i) assert_stack(i);
+  for (auto i = size_t{0}; i < bcode.numPop(); ++i) assert_stack(i);
 
   // The base instructions are special in that they don't pop anything, but do
   // read from the stack. We want type assertions on the stack slots they'll
@@ -200,6 +193,13 @@ void insert_assertions_step(ArrayTypeTable::Builder& arrTable,
  * subtypes and adding this to the opcode table.
  */
 bool hasObviousStackOutput(const Bytecode& op, const State& state) {
+  // Generally consider CGetL obvious because if we knew the type of the local,
+  // we'll assert that right before the CGetL.
+  auto cgetlObvious = [&] (LocalId l, int idx) {
+    return !state.locals[l].couldBe(TRef) ||
+      !state.stack[state.stack.size() - idx - 1].
+         type.strictSubtypeOf(TInitCell);
+  };
   switch (op.op) {
   case Op::Box:
   case Op::BoxR:
@@ -272,18 +272,17 @@ bool hasObviousStackOutput(const Bytecode& op, const State& state) {
   case Op::AliasCls:
     return true;
 
-  // Consider CGetL obvious because if we knew the type of the local,
-  // we'll assert that right before the CGetL.  Similarly, the output
-  // of SetL is obvious if you know what its input is (which we'll
-  // assert if we know).
   case Op::CGetL:
-    if (state.locals[op.CGetL.loc1].couldBe(TRef) &&
-        state.stack.back().type.strictSubtypeOf(TInitCell)) {
-      // In certain cases (local static, for example) we can have
-      // information about the unboxed value of the local which isn't
-      // obvious from the local itself (which will be TRef or TGen).
-      return false;
-    }
+    return cgetlObvious(op.CGetL.loc1, 0);
+  case Op::CGetQuietL:
+    return cgetlObvious(op.CGetQuietL.loc1, 0);
+  case Op::CUGetL:
+    return cgetlObvious(op.CUGetL.loc1, 0);
+  case Op::CGetL2:
+    return cgetlObvious(op.CGetL2.loc1, 1);
+
+    // The output of SetL is obvious if you know what its input is
+    // (which we'll assert if we know).
   case Op::SetL:
     return true;
 
@@ -302,9 +301,9 @@ void insert_assertions(const Index& index,
   auto& arrTable = *index.array_table_builder();
   auto const ctx = ainfo.ctx;
 
-  auto lastStackOutputObvious = false;
+  std::vector<uint8_t> obviousStackOutputs(state.stack.size(), false);
 
-  CollectedInfo collect { index, ctx, nullptr, nullptr, true, &ainfo };
+  CollectedInfo collect { index, ctx, nullptr, nullptr, true, false, &ainfo };
   auto interp = Interp { index, ctx, collect, blk, state };
   for (auto& op : blk->hhbcs) {
     FTRACE(2, "  == {}\n", show(ctx.func, op));
@@ -313,9 +312,6 @@ void insert_assertions(const Index& index,
       newBCs.push_back(newb);
       newBCs.back().srcLoc = op.srcLoc;
       FTRACE(2, "   + {}\n", show(ctx.func, newBCs.back()));
-
-      lastStackOutputObvious =
-        newb.numPush() != 0 && hasObviousStackOutput(newb, state);
     };
 
     auto const preState = state;
@@ -327,9 +323,21 @@ void insert_assertions(const Index& index,
       op,
       preState,
       flags.mayReadLocalSet,
-      lastStackOutputObvious,
+      obviousStackOutputs,
       gen
     );
+
+    if (op.op == Op::CGetL2) {
+      obviousStackOutputs.emplace(obviousStackOutputs.end() - 1,
+                                  hasObviousStackOutput(op, state));
+    } else {
+      for (int i = 0; i < op.numPop(); i++) {
+        obviousStackOutputs.pop_back();
+      }
+      for (auto i = op.numPush(); i--; ) {
+        obviousStackOutputs.emplace_back(hasObviousStackOutput(op, state));
+      }
+    }
 
     gen(op);
   }
@@ -507,7 +515,7 @@ void first_pass(const Index& index,
   std::vector<Bytecode> newBCs;
   newBCs.reserve(blk->hhbcs.size());
 
-  CollectedInfo collect { index, ctx, nullptr, nullptr, true, &ainfo };
+  CollectedInfo collect { index, ctx, nullptr, nullptr, true, false, &ainfo };
   auto interp = Interp { index, ctx, collect, blk, state };
 
   if (options.ConstantProp) collect.propagate_constants = propagate_constants;
@@ -750,7 +758,7 @@ void visit_blocks(const char* what,
 
 //////////////////////////////////////////////////////////////////////
 
-void do_optimize(const Index& index, FuncAnalysis&& ainfo) {
+void do_optimize(const Index& index, FuncAnalysis&& ainfo, bool isFinal) {
   FTRACE(2, "{:-^70} {}\n", "Optimize Func", ainfo.ctx.func->name);
 
   bool again;
@@ -785,9 +793,10 @@ void do_optimize(const Index& index, FuncAnalysis&& ainfo) {
     // If we merged blocks, there could be new optimization opportunities
   } while (again);
 
+  if (!isFinal) return;
+
   auto const func = ainfo.ctx.func;
-  if (index.frozen() &&
-      (func->name == s_86pinit.get() || func->name == s_86sinit.get())) {
+  if (func->name == s_86pinit.get() || func->name == s_86sinit.get()) {
     auto const& blk = *func->blocks[func->mainEntry];
     if (blk.hhbcs.size() == 2 &&
         blk.hhbcs[0].op == Op::Null &&
@@ -933,13 +942,13 @@ Bytecode gen_constant(const Cell& cell) {
   not_reached();
 }
 
-void optimize_func(const Index& index, FuncAnalysis&& ainfo) {
+void optimize_func(const Index& index, FuncAnalysis&& ainfo, bool isFinal) {
   auto const bump = trace_bump_for(ainfo.ctx.cls, ainfo.ctx.func);
 
   Trace::Bump bumper1{Trace::hhbbc, bump};
   Trace::Bump bumper2{Trace::hhbbc_cfg, bump};
   Trace::Bump bumper3{Trace::hhbbc_dce, bump};
-  do_optimize(index, std::move(ainfo));
+  do_optimize(index, std::move(ainfo), isFinal);
 }
 
 //////////////////////////////////////////////////////////////////////

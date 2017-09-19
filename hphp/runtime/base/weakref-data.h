@@ -29,9 +29,7 @@ struct Object;
 // object.
 struct WeakRefData {
   TypedValue pointee; // Object being weakly referenced.
-  // Currently this is a strong pointer to the GC.  This should be ignored
-  // after weakrefs are handled properly in the sweeping logic.
-  // TYPE_SCAN_IGNORE_FIELD(pointee);
+  TYPE_SCAN_IGNORE_FIELD(pointee);
 
   // Invalidate WeakRefData associated with a refcounted object.
   static void invalidateWeakRef(uintptr_t ptr);

@@ -21,6 +21,8 @@
 #include "hphp/php7/hhas.h"
 #include "hphp/util/embedded-data.h"
 
+#include "hphp/php7/zend/zend.h"
+
 #include <folly/Format.h>
 #include <folly/io/IOBuf.h>
 #include <folly/io/IOBufQueue.h>
@@ -111,6 +113,8 @@ std::string runCompiler(const std::string& filename, const folly::IOBuf& buf) {
     return dump_asm(*unit);
   } catch (const LanguageException& e) {
     return dump_asm(*makeFatalUnit(filename, e.what()));
+  } catch (const ParseException& e) {
+    return dump_asm(*makeFatalUnit(filename, e.what()));
   }
 }
 
@@ -146,7 +150,7 @@ int runDaemon() {
 
       auto hhas = runCompiler(filename, *buf);
       std::cout << hhas.length() << std::endl
-                << hhas << std::endl;
+                << hhas;
     } catch (const CompilerException& e) {
       std::cout << "ERROR: " << e.what() << std::endl;
     }

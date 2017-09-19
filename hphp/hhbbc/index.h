@@ -182,12 +182,11 @@ struct Class {
   SString name() const;
 
   /*
-   * Whether this class could possibly be an interface or a trait.
+   * Whether this class could possibly be an interface/interface or trait.
    *
-   * When returning false, it is known that this class is not an interface
-   * or a trait. When returning true, it's possible that this class is not
-   * an interface or trait but the system cannot tell.
+   * True means it might be, false means it is not.
    */
+  bool couldBeInterface() const;
   bool couldBeInterfaceOrTrait() const;
 
   /*
@@ -394,6 +393,7 @@ struct Index {
    */
   bool frozen() const;
   void freeze();
+  void thaw();
 
   /*
    * The Index contains a Builder for an ArrayTypeTable.
@@ -788,6 +788,14 @@ struct Index {
    * Return true if there are any interceptable functions
    */
   bool any_interceptable_functions() const;
+
+  /*
+   * Do any necessary fixups to a return type.
+   *
+   * Note that eg for an async function it will map Type to
+   * WaitH<Type>.
+   */
+  void fixup_return_type(borrowed_ptr<const php::Func>, Type&) const;
 private:
   Index(const Index&) = delete;
   Index& operator=(Index&&) = delete;
@@ -808,6 +816,8 @@ private:
   folly::Optional<Type> get_type_for_annotated_type(
     Context ctx, AnnotType annot, bool nullable,
     SString name, const Type& candidate) const;
+
+  void init_return_type(borrowed_ptr<const php::Func> func);
 
 private:
   std::unique_ptr<IndexData> const m_data;

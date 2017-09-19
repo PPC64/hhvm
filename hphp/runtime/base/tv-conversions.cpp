@@ -33,6 +33,8 @@
 #include "hphp/runtime/base/tv-refcount.h"
 #include "hphp/runtime/base/tv-variant.h"
 #include "hphp/runtime/base/type-array.h"
+#include "hphp/runtime/base/type-object.h"
+#include "hphp/runtime/base/type-string.h"
 #include "hphp/runtime/base/type-variant.h"
 #include "hphp/runtime/base/typed-value.h"
 
@@ -112,6 +114,14 @@ void tvCastToBooleanInPlace(TypedValue* tv) {
 
   tv->m_data.num = b;
   tv->m_type = KindOfBoolean;
+}
+
+bool tvCastToBoolean(TypedValue tv) {
+  assert(tvIsPlausible(tv));
+  if (tv.m_type == KindOfRef) {
+    tv = *tv.m_data.pref->tv();
+  }
+  return cellToBool(tv);
 }
 
 void tvCastToDoubleInPlace(TypedValue* tv) {
@@ -248,6 +258,14 @@ void tvCastToInt64InPlace(TypedValue* tv) {
   tv->m_type = KindOfInt64;
 }
 
+int64_t tvCastToInt64(TypedValue tv) {
+  assert(tvIsPlausible(tv));
+  if (tv.m_type == KindOfRef) {
+    tv = *tv.m_data.pref->tv();
+  }
+  return cellToInt(tv);
+}
+
 double tvCastToDouble(TypedValue tv) {
   assert(tvIsPlausible(tv));
   if (tv.m_type == KindOfRef) {
@@ -370,7 +388,7 @@ void tvCastToStringInPlace(TypedValue* tv) {
   not_reached();
 }
 
-StringData* tvCastToString(TypedValue tv) {
+StringData* tvCastToStringData(TypedValue tv) {
   assert(tvIsPlausible(tv));
   if (tv.m_type == KindOfRef) {
     tv = *tv.m_data.pref->tv();
@@ -431,7 +449,11 @@ StringData* tvCastToString(TypedValue tv) {
   not_reached();
 }
 
-ArrayData* tvCastToArrayLike(TypedValue tv) {
+String tvCastToString(TypedValue tv) {
+  return String::attach(tvCastToStringData(tv));
+}
+
+ArrayData* tvCastToArrayLikeData(TypedValue tv) {
   assert(tvIsPlausible(tv));
   if (tv.m_type == KindOfRef) {
     tv = *tv.m_data.pref->tv();
@@ -473,6 +495,10 @@ ArrayData* tvCastToArrayLike(TypedValue tv) {
       break;
   }
   not_reached();
+}
+
+Array tvCastToArrayLike(TypedValue tv) {
+  return Array::attach(tvCastToArrayLikeData(tv));
 }
 
 void tvCastToArrayInPlace(TypedValue* tv) {
@@ -1102,7 +1128,7 @@ void tvCastToDArrayInPlace(TypedValue* tv) {
   assert(cellIsPlausible(*tv));
 }
 
-ObjectData* tvCastToObject(TypedValue tv) {
+ObjectData* tvCastToObjectData(TypedValue tv) {
   assert(tvIsPlausible(tv));
   if (tv.m_type == KindOfRef) {
     tv = *tv.m_data.pref->tv();
@@ -1146,6 +1172,10 @@ ObjectData* tvCastToObject(TypedValue tv) {
       break;
   }
   not_reached();
+}
+
+Object tvCastToObject(TypedValue tv) {
+  return Object::attach(tvCastToObjectData(tv));
 }
 
 void tvCastToObjectInPlace(TypedValue* tv) {
