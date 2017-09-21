@@ -893,12 +893,18 @@ and bind_as_expr env ty aexpr =
     | _ -> (* TODO Probably impossible, should check that *)
       assert false
 
-and expr env e =
-  raw_expr ~in_cond:false env e
+and expr ?allow_uref env e =
+  raw_expr ~in_cond:false ?allow_uref env e
 
-and raw_expr ~in_cond ?lhs_of_null_coalesce ?valkind:(valkind=`other) env e =
+and raw_expr
+    ~in_cond
+    ?lhs_of_null_coalesce
+    ?allow_uref
+    ?valkind:(valkind=`other)
+    env e =
   debug_last_pos := fst e;
-  let env, te, ty = expr_ ~in_cond ?lhs_of_null_coalesce ~valkind env e in
+  let env, te, ty =
+    expr_ ~in_cond ?lhs_of_null_coalesce ?allow_uref ~valkind env e in
   let () = match !expr_hook with
     | Some f -> f e (Typing_expand.fully_expand env ty)
     | None -> () in
@@ -951,19 +957,20 @@ and eif env ~coalesce ~in_cond p c e1 e2 =
   let te = if coalesce then T.NullCoalesce(tc, te2) else T.Eif(tc, te1, te2) in
   env, T.make_typed_expr p ty te, ty
 
-and exprs env el =
+and exprs ?allow_uref env el =
   match el with
   | [] ->
     env, [], []
 
   | e::el ->
-    let env, te, ty = expr env e in
-    let env, tel, tyl = exprs env el in
+    let env, te, ty = expr ?allow_uref env e in
+    let env, tel, tyl = exprs ?allow_uref env el in
     env, te::tel, ty::tyl
 
 and expr_
   ~in_cond
   ?lhs_of_null_coalesce
+  ?allow_uref
   ~(valkind: [> `lvalue | `lvalue_subexpr | `other ])
   env (p, e) =
   let make_result env te ty =
@@ -1252,8 +1259,9 @@ and expr_
             let env =
               Phase.check_tparams_constraints ~ety_env env class_.tc_tparams in
             let env, local_obj_ty = Phase.localize ~ety_env env obj_type in
+            let local_obj_fp = TUtils.default_fun_param local_obj_ty in
             let fty = { fty with
-                        ft_params = (None, local_obj_ty) :: fty.ft_params } in
+                        ft_params = local_obj_fp :: fty.ft_params } in
             let fun_arity = match fty.ft_arity with
               | Fstandard (min, max) -> Fstandard (min + 1, max + 1)
               | Fvariadic (min, x) -> Fvariadic (min + 1, x)
@@ -1476,7 +1484,7 @@ and expr_
       make_result env (T.Pipe(e0, te1, te2)) ty2
   | Unop (uop, e) ->
       let env, te, ty = raw_expr in_cond env e in
-      unop p env uop te ty
+      unop ?allow_uref p env uop te ty
   | Eif (c, e1, e2) -> eif env ~coalesce:false ~in_cond p c e1 e2
   | NullCoalesce (e1, e2) -> eif env ~coalesce:true ~in_cond p e1 None e2
   | Typename sid ->
@@ -1653,7 +1661,7 @@ and expr_
         { (Phase.env_with_self env) with from_class = Some CIstatic } in
       let env, ft = Phase.localize_ft ~ety_env env ft in
       (* check for recursive function calls *)
-      let anon = anon_make env p f idl in
+      let anon = anon_make env p f ft idl in
       let env, anon_id = Env.add_anonymous env anon in
       let env, tefun, _ = Errors.try_with_error
         (fun () ->
@@ -1662,10 +1670,10 @@ and expr_
         (fun () ->
           (* If the anonymous function declaration has errors itself, silence
              them in any subsequent usages. *)
-          let anon env fun_params =
+          let anon_ign ?el:_ env fun_params =
             Errors.ignore_ (fun () -> (anon env fun_params)) in
-          let _, tefun, ty = anon env ft.ft_params in
-          let env = Env.set_anonymous env anon_id anon in
+          let _, tefun, ty = anon_ign env ft.ft_params in
+          let env = Env.set_anonymous env anon_id anon_ign in
           env, tefun, ty) in
       env, tefun, (Reason.Rwitness p, Tanon (ft.ft_arity, anon_id))
   | Xml (sid, attrl, el) ->
@@ -1807,11 +1815,11 @@ and anon_check_param env param =
       let env = Type.sub_type hint_pos Reason.URhint env paramty hty in
       env
 
-and anon_make tenv p f idl =
+and anon_make tenv p f ft idl =
   let anon_lenv = tenv.Env.lenv in
   let is_typing_self = ref false in
   let nb = Nast.assert_named_body f.f_body in
-  fun env (supplied_params: (string option * _) list) ->
+  fun ?el env supplied_params ->
     if !is_typing_self
     then begin
       Errors.anonymous_recursive p;
@@ -1822,7 +1830,7 @@ and anon_make tenv p f idl =
       Env.anon anon_lenv env begin fun env ->
         let params = ref f.f_params in
         let env, t_params = List.fold_left ~f:(anon_bind_param params) ~init:(env, [])
-          (List.map supplied_params snd) in
+          (List.map supplied_params (fun x -> x.fp_type)) in
         let env = List.fold_left ~f:anon_bind_opt_param ~init:env !params in
         let env = List.fold_left ~f:anon_check_param ~init:env f.f_params in
         let env, hret =
@@ -1846,6 +1854,11 @@ and anon_make tenv p f idl =
           then env
           else fun_implicit_return env p hret nb.fnb_nast f.f_fun_kind
         in
+        let env = begin match el with
+          | Some el -> wfold_left_default check_pass_by_ref (env, None)
+              ft.ft_params el
+          | _ -> env
+        end in
         is_typing_self := false;
         let tfun_ = {
           T.f_mode = f.f_mode;
@@ -2591,7 +2604,7 @@ and dispatch_call p env call_type (fpos, fun_expr as e) hl el uel =
               let tr = List.hd_exn trl in
               env, vars, tr
             in
-            let f = (None, (
+            let f = TUtils.default_fun_param (
               r_fty,
               Tfun {
                 ft_pos = fty.ft_pos;
@@ -2600,16 +2613,13 @@ and dispatch_call p env call_type (fpos, fun_expr as e) hl el uel =
                 ft_arity = Fstandard (arity, arity);
                 ft_tparams = [];
                 ft_where_constraints = [];
-                ft_params = List.map vars (fun x -> (None, x));
+                ft_params = List.map vars TUtils.default_fun_param;
                 ft_ret = tr;
               }
-            )) in
+            ) in
             let containers = List.map vars (fun var ->
-              (None,
-                (r_fty,
-                  Tclass ((fty.ft_pos, SN.Collections.cContainer), [var])
-                )
-              )
+              let tc = Tclass ((fty.ft_pos, SN.Collections.cContainer), [var]) in
+              TUtils.default_fun_param (r_fty, tc)
             ) in
             env, (r_fty, Tfun {fty with
                                ft_arity = Fstandard (arity+1, arity+1);
@@ -2715,19 +2725,22 @@ and dispatch_call p env call_type (fpos, fun_expr as e) hl el uel =
       Typing_hooks.dispatch_fun_id_hook (p, SN.FB.idx);
       (match Env.get_fun env (snd id) with
       | Some fty ->
-        let param1, (name2, (r2, _)), (name3, (r3, _)) =
+        let param1, param2, param3 =
           match fty.ft_params with
             | [param1; param2; param3] -> param1, param2, param3
             | _ -> assert false in
+        let { fp_type = (r2, _); _ } = param2 in
+        let { fp_type = (r3, _); _ } = param3 in
         let params, ret = match List.length el with
           | 2 ->
-            let param2 = (name2, (r2, Toption (r2, Tgeneric "Tk"))) in
+            let ty2 = (r2, Toption (r2, Tgeneric "Tk")) in
+            let param2 = { param2 with fp_type = ty2 } in
             let rret = fst fty.ft_ret in
             let ret = (rret, Toption (rret, Tgeneric "Tv")) in
             [param1; param2], ret
           | 3 ->
-            let param2 = (name2, (r2, Tgeneric "Tk")) in
-            let param3 = (name3, (r3, Tgeneric "Tv")) in
+            let param2 = { param2 with fp_type = (r2, Tgeneric "Tk") } in
+            let param3 = { param3 with fp_type = (r3, Tgeneric "Tv") } in
             let ret = (fst fty.ft_ret, Tgeneric "Tv") in
             [param1; param2; param3], ret
           | _ -> fty.ft_params, fty.ft_ret in
@@ -3900,13 +3913,30 @@ and unpack_exprl env e_tyl uel =
       (env, e_tyl, is_tuple || unpacked_tuple)
     end
 
+and check_pass_by_ref env { fp_pos; fp_is_ref; _ } (pos, e) =
+  let r = Reason.Rwitness fp_pos in
+  let () = match e with
+    | Unop (Ast.Uref, _) when fp_is_ref -> ()
+    | Unop (Ast.Uref, _) ->
+      Errors.pass_by_ref_annotation ~should_add:false pos
+        (Reason.to_string "Because this parameter is passed by value" r)
+    | _ when fp_is_ref ->
+      Errors.pass_by_ref_annotation ~should_add:true pos
+        (Reason.to_string "Because this parameter is passed by reference" r)
+    | _ -> ()
+  in
+  env
+
 and call_ pos env fty el uel =
+  let safe_pass_by_ref_enabled =
+    TypecheckerOptions.experimental_feature_enabled
+      (Env.get_options env) TypecheckerOptions.experimental_safe_pass_by_ref in
   let env, efty = Env.expand_type env fty in
   (match efty with
   | _, (Terr | Tany | Tunresolved []) ->
     let el = el @ uel in
     let env, tel = List.map_env env el begin fun env elt ->
-      let env, te, arg_ty = expr env elt in
+      let env, te, arg_ty = expr ~allow_uref:true env elt in
       let env, _arg_ty = check_valid_rvalue pos env arg_ty in
       env, te
     end in
@@ -3927,7 +3957,7 @@ and call_ pos env fty el uel =
     let pos_def = Reason.to_pos r2 in
     let env, var_param = variadic_param env ft in
     let env, e_te_tyl = List.map_env env el begin fun env e ->
-      let env, te, ty = expr env e in
+      let env, te, ty = expr ~allow_uref:true env e in
       env, (e, te, ty)
     end in
     let tel = List.map e_te_tyl (fun (_, b, _) -> b) in
@@ -3943,6 +3973,10 @@ and call_ pos env fty el uel =
      *)
     let () = check_arity ~check_min:(uel = [] || unpacked_tuple)
       pos pos_def arity ft.ft_arity in
+    let env = if safe_pass_by_ref_enabled
+      then wfold_left_default check_pass_by_ref (env, var_param)
+        ft.ft_params (List.map e_tyl fst)
+      else env in
     let todos = ref [] in
     let env = wfold_left_default (call_param todos) (env, var_param)
       ft.ft_params e_tyl in
@@ -3951,7 +3985,7 @@ and call_ pos env fty el uel =
       ft.ft_params (List.map (el @ uel) fst) env;
     env, tel, [], ft.ft_ret
   | r2, Tanon (arity, id) when uel = [] ->
-    let env, tel, tyl = exprs env el in
+    let env, tel, tyl = exprs ~allow_uref:true env el in
     let anon = Env.get_anonymous env id in
     let fpos = Reason.to_pos r2 in
     (match anon with
@@ -3960,8 +3994,10 @@ and call_ pos env fty el uel =
         env, tel, [], err_none
       | Some anon ->
         let () = check_arity pos fpos (List.length tyl) arity in
-        let tyl = List.map tyl (fun ty -> None, ty) in
-        let env, _, ty = anon env tyl in
+        let tyl = List.map tyl TUtils.default_fun_param in
+        let env, _, ty = if safe_pass_by_ref_enabled
+          then anon ~el env tyl
+          else anon env tyl in
         env, tel, [], ty)
   | _, Tarraykind _ when not (Env.is_strict env) ->
     (* Relaxing call_user_func to work with an array in partial mode *)
@@ -3971,7 +4007,8 @@ and call_ pos env fty el uel =
     env, [], [], err_none
   )
 
-and call_param todos env (name, x) ((pos, _ as e), arg_ty) =
+and call_param todos env param ((pos, _ as e), arg_ty) =
+  let { fp_name = name; fp_type = x; _ } = param in
   (match name with
   | None -> ()
   | Some name -> Typing_suggest.save_param name env x arg_ty
@@ -4007,7 +4044,7 @@ and call_param todos env (name, x) ((pos, _ as e), arg_ty) =
 and bad_call p ty =
   Errors.bad_call p (Typing_print.error ty)
 
-and unop p env uop te ty =
+and unop ?(allow_uref=false) p env uop te ty =
   let make_result env te result_ty =
     env, T.make_typed_expr p result_ty (T.Unop(uop, te)), result_ty in
   match uop with
@@ -4032,7 +4069,7 @@ and unop p env uop te ty =
       make_result env te ty
   | Ast.Uref ->
       (* We basically just ignore references in non-strict files *)
-      if Env.is_strict env then
+      if Env.is_strict env && not allow_uref then
         Errors.reference_expr p;
       make_result env te ty
   | Ast.Usplat ->

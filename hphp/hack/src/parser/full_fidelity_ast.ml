@@ -146,6 +146,7 @@ let mpYielding : ('a, ('a * bool)) metaparser = fun p node env ->
 
 type expr_location =
   | TopLevel
+  | MemberSelect
   | InString
 
 
@@ -466,7 +467,21 @@ let rec pHint : hint parser = fun node env ->
     | SimpleTypeSpecifier _
       -> Happly (pos_name node, [])
     | ShapeTypeSpecifier { shape_type_fields; shape_type_ellipsis; _ } ->
-      let si_allows_unknown_fields = not (is_missing shape_type_ellipsis) in
+      let si_allows_unknown_fields =
+        (**
+         * To maintain compatibility with open source, we always promote the
+         * definitions in Shapes.hhi.
+         *
+         * TODO(T21756986): Clean this up after OSS release of `...`
+         *)
+        let filename = Relative_path.to_absolute !(lowerer_state.filePath) in
+        not (is_missing shape_type_ellipsis) ||
+        String_utils.string_ends_with filename "Shapes.hhi" ||
+        not (TypecheckerOptions.experimental_feature_enabled
+          !(lowerer_state.popt)
+          TypecheckerOptions.experimental_promote_nullable_to_optional_in_shapes
+        )
+      in
       let si_shape_field_list =
         couldMap ~f:(mpShapeField pHint) shape_type_fields env in
       Hshape { si_allows_unknown_fields; si_shape_field_list }
@@ -785,7 +800,9 @@ and pExpr ?location:(location=TopLevel) : expr parser = fun node env ->
           | _ -> []
         end
       in
-      Call (pExpr recv env, hints, couldMap ~f:pExpr args env, [])
+      let recv = pExpr recv env in
+      let args = couldMap ~f:pExpr args env in
+      Call (recv, hints, args, [])
     | FunctionCallWithTypeArgumentsExpression
       { function_call_with_type_arguments_receiver = recv
       ; function_call_with_type_arguments_type_args = type_args
@@ -830,7 +847,11 @@ and pExpr ?location:(location=TopLevel) : expr parser = fun node env ->
       ; embedded_member_operator = op
       ; embedded_member_name     = name
       }
-      -> Obj_get (pExpr recv env, pExpr name env, pNullFlavor op env)
+      ->
+        let recv = pExpr recv env in
+        let name = pExpr ~location:MemberSelect name env in
+        let op = pNullFlavor op env in
+        Obj_get (recv, name, op)
 
     | PrefixUnaryExpression
       { prefix_unary_operator = operator
@@ -884,8 +905,13 @@ and pExpr ?location:(location=TopLevel) : expr parser = fun node env ->
           (pExpr binary_left_operand  env)
           (pExpr binary_right_operand env)
 
-    | Token _ when location = TopLevel -> Id (pos_name node)
-    | Token _ -> String (pos, unesc_dbl (text node))
+    | Token t ->
+      (match location with
+      | MemberSelect when Token.kind t = TK.Variable -> Lvar (pos_name node)
+      | InString -> String (pos, unesc_dbl (text node))
+      | MemberSelect
+      | TopLevel -> Id (pos_name node)
+      )
 
     | YieldExpression { yield_operand; _ } when text yield_operand = "break" ->
       env.saw_yield := true;
@@ -994,7 +1020,8 @@ and pExpr ?location:(location=TopLevel) : expr parser = fun node env ->
                                       |> String.concat "" in
         (* TODO(17796330): Get rid of linter functionality in the lowerer *)
         if s <> String.lowercase s then Lint.lowercase_constant pos s;
-        (match token_kind expr with
+        (if location = InString then String (pos, mkStr unesc_dbl s) else
+        match token_kind expr with
         | Some TK.DecimalLiteral
         | Some TK.OctalLiteral
         | Some TK.HexadecimalLiteral
@@ -1130,18 +1157,26 @@ and pExpr ?location:(location=TopLevel) : expr parser = fun node env ->
     (* FIXME; should this include Missing? ; "| Missing -> Null" *)
     | _ -> missing_syntax "expression" node env
   in
-  (* Since we need positions in XHP, regardless of the ignorePos flag, we
-   * parenthesise the call to pExpr_ so that the XHP expression case can flip
-   * the switch. The key part is that `get_pos node` happens before the old
-   * setting is restored.
-   *
-   * Evaluation order matters here!
-   *)
-  let local_ignore_pos = !(lowerer_state.ignorePos) in
-  let expr_ = pExpr_ node env in
-  let p = get_pos node in
-  lowerer_state.ignorePos := local_ignore_pos;
-  p, expr_
+  begin match syntax node with
+  | ParenthesizedExpression { parenthesized_expression_expression = expr; _ } ->
+    (* peel of parenthesised expresions:
+       if there is a XHP inside - we want XHP node to have its own positions,
+       not positions of enclosing parenthesised expression *)
+    pExpr ~location expr env
+  | _ ->
+    (* Since we need positions in XHP, regardless of the ignorePos flag, we
+     * parenthesise the call to pExpr_ so that the XHP expression case can flip
+     * the switch. The key part is that `get_pos node` happens before the old
+     * setting is restored.
+     *
+     * Evaluation order matters here!
+     *)
+    let local_ignore_pos = !(lowerer_state.ignorePos) in
+    let expr_ = pExpr_ node env in
+    let p = get_pos node in
+    lowerer_state.ignorePos := local_ignore_pos;
+    p, expr_
+  end
 and pBlock : block parser = fun node env ->
    match pStmt node env with
    | Block block -> List.filter ~f:(fun x -> x <> Noop) block

@@ -76,7 +76,7 @@ void impl_vec(ISS& env, bool reduce, std::vector<Bytecode>&& bcs) {
   if (!options.StrengthReduce) reduce = false;
 
   for (auto it = begin(bcs); it != end(bcs); ++it) {
-    assert(env.flags.jmpFlag == StepFlags::JmpFlags::Either &&
+    assert(env.flags.jmpDest == NoBlockId &&
            "you can't use impl with branching opcodes before last position");
 
     auto const wasPEI = env.flags.wasPEI;
@@ -394,7 +394,9 @@ void in(ISS& env, const bc::AddElemC& /*op*/) {
     unreachable(env);
   } else if (outTy->second == ThrowMode::None) {
     nothrow(env);
-    if (env.collect.trackConstantArrays) constprop(env);
+    if (any(env.collect.opts & CollectionOpts::TrackConstantArrays)) {
+      constprop(env);
+    }
   }
   push(env, std::move(outTy->first));
 }
@@ -426,7 +428,9 @@ void in(ISS& env, const bc::AddNewElemC&) {
   if (outTy->subtypeOf(TBottom)) {
     unreachable(env);
   } else {
-    if (env.collect.trackConstantArrays) constprop(env);
+    if (any(env.collect.opts & CollectionOpts::TrackConstantArrays)) {
+      constprop(env);
+    }
   }
   push(env, std::move(*outTy));
 }
@@ -964,7 +968,7 @@ void jmpImpl(ISS& env, const JmpOp& op) {
   auto const location = topStkEquiv(env);
   auto const e = emptiness(popC(env));
   if (e == (Negate ? Emptiness::NonEmpty : Emptiness::Empty)) {
-    jmp_nofallthrough(env);
+    jmp_setdest(env, op.target);
     env.propagate(op.target, &env.state);
     return;
   }
@@ -1129,7 +1133,7 @@ void typeTestPropagate(ISS& env, Type valTy, Type testTy,
   if (valTy.subtypeOf(testTy) || failTy.subtypeOf(TBottom)) {
     push(env, std::move(valTy));
     if (takenOnSuccess) {
-      jmp_nofallthrough(env);
+      jmp_setdest(env, jmp.target);
       env.propagate(jmp.target, &env.state);
     } else {
       jmp_nevertaken(env);
@@ -1141,7 +1145,7 @@ void typeTestPropagate(ISS& env, Type valTy, Type testTy,
     if (takenOnSuccess) {
       jmp_nevertaken(env);
     } else {
-      jmp_nofallthrough(env);
+      jmp_setdest(env, jmp.target);
       env.propagate(jmp.target, &env.state);
     }
     return;
@@ -1173,7 +1177,7 @@ void group(ISS& env, const bc::StaticLocCheck& slc, const JmpOp& jmp) {
       jmp_nevertaken(env);
     } else {
       env.propagate(jmp.target, &save);
-      jmp_nofallthrough(env);
+      jmp_setdest(env, jmp.target);
     }
     return;
   }
@@ -1254,14 +1258,61 @@ void group(ISS& env,
 }
 
 void in(ISS& env, const bc::Switch& op) {
-  popC(env);
+  auto v = tv(popC(env));
+
+  if (v) {
+    auto go = [&] (BlockId blk) {
+      effect_free(env);
+      env.propagate(blk, &env.state);
+      jmp_setdest(env, blk);
+    };
+    auto num_elems = op.targets.size();
+    if (op.subop1 == SwitchKind::Bounded) {
+      if (v->m_type == KindOfInt64 &&
+          v->m_data.num >= 0 && v->m_data.num < num_elems) {
+        return go(op.targets[v->m_data.num]);
+      }
+    } else {
+      assertx(num_elems > 2);
+      num_elems -= 2;
+      for (auto i = size_t{}; ; i++) {
+        if (i == num_elems) {
+          return go(op.targets.back());
+        }
+        auto match = eval_cell_value([&] {
+            return cellEqual(*v, static_cast<int64_t>(op.arg2 + i));
+        });
+        if (!match) break;
+        if (*match) {
+          return go(op.targets[i]);
+        }
+      }
+    }
+  }
+
   forEachTakenEdge(op, [&] (BlockId id) {
       env.propagate(id, &env.state);
   });
 }
 
 void in(ISS& env, const bc::SSwitch& op) {
-  popC(env);
+  auto v = tv(popC(env));
+
+  if (v) {
+    for (auto& kv : op.targets) {
+      auto match = eval_cell_value([&] {
+        return !kv.first || cellEqual(*v, kv.first);
+      });
+      if (!match) break;
+      if (*match) {
+        effect_free(env);
+        env.propagate(kv.second, &env.state);
+        jmp_setdest(env, kv.second);
+        return;
+      }
+    }
+  }
+
   forEachTakenEdge(op, [&] (BlockId id) {
       env.propagate(id, &env.state);
   });
@@ -2100,11 +2151,11 @@ void in(ISS& env, const bc::FPushFuncD& op) {
   auto const rfunc = env.index.resolve_func(env.ctx, op.str2);
   if (auto const func = rfunc.exactFunc()) {
     if (can_emit_builtin(func, op.arg1, op.has_unpack)) {
-      fpiPush(env, ActRec { FPIKind::Builtin, folly::none, rfunc });
+      fpiPush(env, ActRec { FPIKind::Builtin, folly::none, rfunc }, op.arg1);
       return reduce(env, bc::Nop {});
     }
   }
-  fpiPush(env, ActRec { FPIKind::Func, folly::none, rfunc });
+  fpiPush(env, ActRec { FPIKind::Func, folly::none, rfunc }, op.arg1);
 }
 
 void in(ISS& env, const bc::FPushFunc& op) {
@@ -2153,7 +2204,9 @@ void in(ISS& env, const bc::FPushObjMethodD& op) {
       fpiPush(env, ActRec { FPIKind::ObjMeth });
       return unreachable(env);
     }
-    if (is_opt(t1)) t1 = unopt(std::move(t1));
+    if (is_opt(t1)) {
+      t1 = unopt(std::move(t1));
+    }
   } else if (!t1.couldBe(TOptObj)) {
     fpiPush(env, ActRec { FPIKind::ObjMeth });
     return unreachable(env);
@@ -2164,11 +2217,15 @@ void in(ISS& env, const bc::FPushObjMethodD& op) {
     return folly::none;
   }();
 
-  fpiPush(env, ActRec {
-    FPIKind::ObjMeth,
-    rcls,
-    env.index.resolve_method(env.ctx, clsTy, op.str2)
-  });
+  fpiPush(
+    env,
+    ActRec {
+      FPIKind::ObjMeth,
+      rcls,
+      env.index.resolve_method(env.ctx, clsTy, op.str2)
+    },
+    op.arg1
+  );
   if (location != NoLocalId) {
     auto ty = peekLocation(env, location);
     if (ty.subtypeOf(TCell)) {
@@ -2209,7 +2266,7 @@ void in(ISS& env, const bc::FPushClsMethodD& op) {
     rcls ? clsExact(*rcls) : TCls,
     op.str2
   );
-  fpiPush(env, ActRec { FPIKind::ClsMeth, rcls, rfun });
+  fpiPush(env, ActRec { FPIKind::ClsMeth, rcls, rfun }, op.arg1);
 }
 
 void in(ISS& env, const bc::FPushClsMethod& op) {
@@ -2223,7 +2280,7 @@ void in(ISS& env, const bc::FPushClsMethod& op) {
   }
   folly::Optional<res::Class> rcls;
   if (is_specialized_cls(t1)) rcls = dcls_of(t1).cls;
-  fpiPush(env, ActRec { FPIKind::ClsMeth, rcls, rfunc });
+  fpiPush(env, ActRec { FPIKind::ClsMeth, rcls, rfunc }, op.arg1);
 }
 
 void in(ISS& env, const bc::FPushClsMethodF& op) {
@@ -2441,11 +2498,40 @@ void in(ISS& env, const bc::FPassVNop& op) {
 }
 
 void in(ISS& env, const bc::FPassC& op) {
-  if (fpiTop(env).kind == FPIKind::Builtin) {
+  auto& ar = fpiTop(env);
+  if (ar.kind == FPIKind::Builtin) {
     return reduceFPassBuiltin(env, prepKind(env, op.arg1), op.subop2, op.arg1,
                               bc::Nop {});
   }
-  if (op.subop2 != FPassHint::Ref) nothrow(env);
+  if (ar.foldable) {
+    auto const ok = [&] {
+      if (!is_scalar(topT(env))) return false;
+      auto const callee = ar.func->exactFunc();
+      if (op.arg1 >= callee->params.size() ||
+          (op.arg1 + 1 == callee->params.size() &&
+           callee->params.back().isVariadic)) {
+        return true;
+      }
+      auto const constraint = callee->params[op.arg1].typeConstraint;
+      if (!constraint.hasConstraint() ||
+          constraint.isTypeVar() ||
+          constraint.isTypeConstant()) {
+        return true;
+      }
+      return env.index.satisfies_constraint(
+        Context { callee->unit, const_cast<php::Func*>(callee), callee->cls },
+        topC(env), constraint);
+    }();
+    if (!ok) {
+      auto const func = ar.func->exactFunc();
+      assertx(func);
+      env.collect.unfoldableFuncs.emplace(func);
+      env.propagate(ar.pushBlk, nullptr);
+      ar.foldable = false;
+      FTRACE(2, "     fpi: not foldable\n");
+    }
+  }
+  if (op.subop2 != FPassHint::Ref) effect_free(env);
 }
 
 void fpassCXHelper(ISS& env, uint32_t param, bool error, FPassHint hint) {
@@ -2518,10 +2604,29 @@ void fcallKnownImpl(ISS& env, uint32_t numArgs) {
   auto const ar = fpiPop(env);
   always_assert(ar.func.hasValue());
 
-  if (options.ConstantFoldBuiltins && ar.func->isFoldable()) {
-    if (auto val = const_fold(env, numArgs, *ar.func)) {
-      return push(env, std::move(*val));
-    }
+  if (options.ConstantFoldBuiltins && ar.foldable) {
+    auto ty = [&] () -> folly::Optional<Type> {
+      if (ar.func->isFoldable()) {
+        return const_fold(env, numArgs, *ar.func);
+      }
+      auto const func = ar.func->exactFunc();
+      assertx(func);
+      std::vector<Type> args(numArgs);
+      for (auto i = uint32_t{0}; i < numArgs; ++i) {
+        args[numArgs - i - 1] = topT(env, i);
+      }
+
+      auto const ret = env.index.lookup_foldable_return_type(
+        env.ctx, func, std::move(args));
+      if (ret == TTop) {
+        env.collect.unfoldableFuncs.emplace(func);
+        env.propagate(ar.pushBlk, nullptr);
+        return folly::none;
+      }
+      discard(env, numArgs);
+      return ret;
+    }();
+    if (ty) return push(env, std::move(*ty));
   }
 
   specialFunctionEffects(env, ar);
@@ -2723,7 +2828,7 @@ void in(ISS& env, const bc::IterInit& op) {
     case IterTypes::Count::Empty:
       taken();
       mayReadLocal(env, op.loc3);
-      jmp_nofallthrough(env);
+      jmp_setdest(env, op.target);
       break;
     case IterTypes::Count::Single:
     case IterTypes::Count::NonEmpty:
@@ -2766,7 +2871,7 @@ void in(ISS& env, const bc::IterInitK& op) {
       taken();
       mayReadLocal(env, op.loc3);
       mayReadLocal(env, op.loc4);
-      jmp_nofallthrough(env);
+      jmp_setdest(env, op.target);
       break;
     case IterTypes::Count::Single:
     case IterTypes::Count::NonEmpty:
@@ -3097,7 +3202,7 @@ void in(ISS& env, const bc::OODeclExists& op) {
         constprop(env);
         return mayExist ? TTrue : TFalse;
       }
-      if (!env.collect.inlining) {
+      if (!any(env.collect.opts & CollectionOpts::Inlining)) {
         unit->persistent.store(false, std::memory_order_relaxed);
       }
       // At this point, if it mayExist, we still don't know that it
@@ -3578,6 +3683,10 @@ RunFlags run(Interp& interp, PropagateFn propagate) {
     auto const flags = interpOps(interp, iter, stop, propagate);
     if (interp.collect.effectFree && !flags.effectFree) {
       interp.collect.effectFree = false;
+      if (any(interp.collect.opts & CollectionOpts::EffectFreeOnly)) {
+        FTRACE(2, "  Bailing because not effect free\n");
+        return ret;
+      }
     }
 
     if (flags.usedLocalStatics) {
@@ -3595,14 +3704,12 @@ RunFlags run(Interp& interp, PropagateFn propagate) {
       return ret;
     }
 
-    switch (flags.jmpFlag) {
-    case StepFlags::JmpFlags::Taken:
+    if (flags.jmpDest != NoBlockId &&
+        flags.jmpDest != interp.blk->fallthrough) {
       FTRACE(2, "  <took branch; no fallthrough>\n");
       return ret;
-    case StepFlags::JmpFlags::Fallthrough:
-    case StepFlags::JmpFlags::Either:
-      break;
     }
+
     if (flags.returned) {
       FTRACE(2, "  returned {}\n", show(*flags.returned));
       always_assert(iter == stop);

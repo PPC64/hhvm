@@ -708,7 +708,7 @@ and emit_call_isset_expr env (_, expr_ as expr) =
   | A.Obj_get (expr, prop, nullflavor) ->
     emit_obj_get ~need_ref:false env None QueryOp.Isset expr prop nullflavor
   | A.Lvar ((_, name) as id)
-    when is_local_this env name && not (Emit_env.get_needs_local_this env)->
+    when is_local_this env name && not (Emit_env.get_needs_local_this env) ->
     gather [
       emit_local ~notice:NoNotice ~need_ref:false env id;
       instr_istypec OpNull;
@@ -1807,7 +1807,7 @@ and emit_call_lhs env (_, expr_ as expr) nargs =
 
   | A.Id (p, s as id)->
     let id =
-      match s with
+      match SU.strip_global_ns s with
       | "min" when nargs = 2 ->
         p, "__SystemLib\\min2"
       | "max" when nargs = 2 ->

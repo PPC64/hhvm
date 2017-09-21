@@ -280,10 +280,17 @@ bool hasObviousStackOutput(const Bytecode& op, const State& state) {
     return cgetlObvious(op.CUGetL.loc1, 0);
   case Op::CGetL2:
     return cgetlObvious(op.CGetL2.loc1, 1);
+  case Op::PushL:
+    return cgetlObvious(op.PushL.loc1, 0);
 
-    // The output of SetL is obvious if you know what its input is
-    // (which we'll assert if we know).
+  // The output of SetL is obvious if you know what its input is
+  // (which we'll assert if we know).
   case Op::SetL:
+    return true;
+
+  // The output of SetM isn't quite as obvious as SetL, but the jit
+  // can work it out from the input just as well as hhbbc (if not better).
+  case Op::SetM:
     return true;
 
   default:
@@ -303,7 +310,9 @@ void insert_assertions(const Index& index,
 
   std::vector<uint8_t> obviousStackOutputs(state.stack.size(), false);
 
-  CollectedInfo collect { index, ctx, nullptr, nullptr, true, false, &ainfo };
+  CollectedInfo collect {
+    index, ctx, nullptr, nullptr, CollectionOpts::TrackConstantArrays, &ainfo
+  };
   auto interp = Interp { index, ctx, collect, blk, state };
   for (auto& op : blk->hhbcs) {
     FTRACE(2, "  == {}\n", show(ctx.func, op));
@@ -515,7 +524,9 @@ void first_pass(const Index& index,
   std::vector<Bytecode> newBCs;
   newBCs.reserve(blk->hhbcs.size());
 
-  CollectedInfo collect { index, ctx, nullptr, nullptr, true, false, &ainfo };
+  CollectedInfo collect {
+    index, ctx, nullptr, nullptr, CollectionOpts::TrackConstantArrays, &ainfo
+  };
   auto interp = Interp { index, ctx, collect, blk, state };
 
   if (options.ConstantProp) collect.propagate_constants = propagate_constants;
@@ -591,8 +602,7 @@ void first_pass(const Index& index,
     }
 
     if (options.RemoveDeadBlocks) {
-      switch (flags.jmpFlag) {
-      case StepFlags::JmpFlags::Taken:
+      if (flags.jmpDest != NoBlockId) {
         switch (op.op) {
           /*
            * For jumps, we need to pop the cell that was on the stack for the
@@ -601,69 +611,46 @@ void first_pass(const Index& index,
            * have.  (Currently that is none.)
            */
         case Op::JmpNZ:
-          always_assert(!flags.wasPEI);
-          blk->fallthrough = op.JmpNZ.target;
-          gen(bc::PopC {});
-          continue;
         case Op::JmpZ:
+        case Op::SSwitch:
+        case Op::Switch:
           always_assert(!flags.wasPEI);
-          blk->fallthrough = op.JmpZ.target;
+          blk->fallthrough = flags.jmpDest;
           gen(bc::PopC {});
           continue;
         case Op::IterInit:
-          /*
-           * For iterators, if we'll always take the taken branch (which means
-           * there's nothing to iterate over), and the op cannot raise an
-           * exception, we can just pop the input and set the fall-through to
-           * the taken branch. If not, we have to keep the op, but we can make
-           * sure we'll fatal if we ever actually take the fall-through.
-           */
-          if (!flags.wasPEI) {
-            blk->fallthrough = op.IterInit.target;
-            gen(bc::PopC {});
-            continue;
-          } else {
-            blk->fallthrough = make_fatal_block(ainfo, blk, state)->id;
-            break;
-          }
         case Op::IterInitK:
-          if (!flags.wasPEI) {
-            blk->fallthrough = op.IterInitK.target;
-            gen(bc::PopC {});
-            continue;
-          } else {
+          if (flags.jmpDest != blk->fallthrough) {
+            /*
+             * For iterators, if we'll always take the taken branch (which means
+             * there's nothing to iterate over), and the op cannot raise an
+             * exception, we can just pop the input and set the fall-through to
+             * the taken branch. If not, we have to keep the op, but we can make
+             * sure we'll fatal if we ever actually take the fall-through.
+             */
+            if (!flags.wasPEI) {
+              blk->fallthrough = flags.jmpDest;
+              gen(bc::PopC {});
+              continue;
+            }
             blk->fallthrough = make_fatal_block(ainfo, blk, state)->id;
-            break;
+          } else {
+            /*
+             * We can't ever optimize away iteration initialization if we know
+             * we'll always fall-through (which means we enter the loop) because
+             * we need to initialize the iterator. We can ensure, however, that
+             * the taken branch is a fatal.
+             */
+            auto fatal = make_fatal_block(ainfo, blk, state)->id;
+            if (op.op == Op::IterInit) {
+              op.IterInit.target = fatal;
+            } else {
+              op.IterInitK.target = fatal;
+            }
           }
-        default:
-          // No support for switch, etc, right now.
-          always_assert(0 && "unsupported tookBranch case");
-        }
-        break;
-      case StepFlags::JmpFlags::Fallthrough:
-        switch (op.op) {
-        case Op::JmpNZ:
-        case Op::JmpZ:
-          /*
-           * Same as the taken case for jumps, except the fall-through is
-           * already set, so we can just turn them into pops.
-           */
-          always_assert(!flags.wasPEI);
-          gen(bc::PopC {});
-          continue;
-        case Op::IterInit:
-          /*
-           * We can't ever optimize away iteration initialization if we know
-           * we'll always fall-through (which means we enter the loop) because
-           * we need to initialize the iterator. We can ensure, however, that
-           * the taken branch is a fatal.
-           */
-          op.IterInit.target = make_fatal_block(ainfo, blk, state)->id;
-          break;
-        case Op::IterInitK:
-          op.IterInitK.target = make_fatal_block(ainfo, blk, state)->id;
           break;
         case Op::IterNext:
+          assertx(flags.jmpDest == blk->fallthrough);
           /*
            * If we're nexting an iterator and we know we'll always fall-through
            * (which means the iteration is over), and we can't raise an
@@ -679,6 +666,7 @@ void first_pass(const Index& index,
             break;
           }
         case Op::IterNextK:
+          assertx(flags.jmpDest == blk->fallthrough);
           if (!flags.wasPEI) {
             gen(bc::IterFree { op.IterNextK.iter1 });
             continue;
@@ -687,12 +675,8 @@ void first_pass(const Index& index,
             break;
           }
         default:
-          // No support for switch, etc, right now.
-          always_assert(0 && "unsupported fallthrough case");
+          always_assert(0 && "unsupported jmpDest");
         }
-        break;
-      case StepFlags::JmpFlags::Either:
-        break;
       }
     }
 
@@ -787,7 +771,9 @@ void do_optimize(const Index& index, FuncAnalysis&& ainfo, bool isFinal) {
        * We need to perform a final type analysis before we do
        * anything else.
        */
-      ainfo = analyze_func(index, ainfo.ctx, true);
+      ainfo = analyze_func(index,
+                           ainfo.ctx,
+                           CollectionOpts::TrackConstantArrays);
     }
 
     // If we merged blocks, there could be new optimization opportunities
