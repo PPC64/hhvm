@@ -64,10 +64,6 @@ StatementPtr InterfaceStatement::clone() {
   return stmt;
 }
 
-bool InterfaceStatement::hasImpl() const {
-  return true;
-}
-
 int InterfaceStatement::getRecursiveCount() const {
   return m_stmt ? m_stmt->getRecursiveCount() : 0;
 }
@@ -144,11 +140,6 @@ void InterfaceStatement::checkArgumentsToPromote(
 
 ///////////////////////////////////////////////////////////////////////////////
 // static analysis functions
-
-int InterfaceStatement::getLocalEffects() const {
-  ClassScopeRawPtr classScope = getClassScope();
-  return classScope->isVolatile() ? OtherEffect | CanThrow : NoEffect;
-}
 
 std::string InterfaceStatement::getName() const {
   return std::string("Interface ") + m_originalName;
@@ -228,13 +219,6 @@ void InterfaceStatement::setNthKid(int n, ConstructPtr cp) {
       assert(false);
       break;
   }
-}
-
-StatementPtr InterfaceStatement::preOptimize(AnalysisResultConstRawPtr ar) {
-  if (ar->getPhase() >= AnalysisResult::AnalyzeAll) {
-    checkVolatile(ar);
-  }
-  return StatementPtr();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

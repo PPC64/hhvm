@@ -111,7 +111,7 @@ int64_t VMTOC::getIndex(uint64_t elem) {
   if (pos != m_map.end()) {
     return pos->second;
   }
-  return 0x8000000000000000;
+  return LLONG_MIN;
 }
 
 void BranchParams::decodeInstr(const PPC64Instr* const pinstr) {
@@ -601,10 +601,11 @@ void Assembler::li64TOC (const Reg64& rt, int64_t imm64,
 void Assembler::limmediate(const Reg64& rt, int64_t imm64,
                            ImmType immt, bool immMayChange) {
   static_assert(
-       std::is_unsigned<
-         decltype(HPHP::RuntimeOption::EvalPPC64MinTOCImmSize)>::value,
+      std::is_unsigned<
+        decltype(HPHP::RuntimeOption::EvalPPC64MinTOCImmSize)>::value,
       "RuntimeOption::EvalPPC64MinTOCImmSize is expected to be unsigned.");
   always_assert(HPHP::RuntimeOption::EvalPPC64MinTOCImmSize <= 64);
+
   if (immt != ImmType::TocOnly) li64(rt, imm64, immt != ImmType::AnyCompact);
   else li64TOC (rt, imm64, immt, immMayChange);
 }

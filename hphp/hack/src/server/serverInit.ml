@@ -362,12 +362,16 @@ module ServerInitCommon = struct
     (* We need to type check all classes that have extend dependencies on the
      * classes that have changed
      *)
-    let deps =
+    let extend_deps =
       SSet.fold ~f:begin fun class_name acc ->
         let hash = Typing_deps.Dep.make (Dep.Class class_name) in
         Decl_compare.get_extend_deps hash acc
-      end n_classes ~init:deps
-    in
+        end n_classes ~init:DepSet.empty in
+    let deps = DepSet.union deps extend_deps in
+    let deps = DepSet.fold extend_deps ~init:deps ~f:begin fun dep acc ->
+    let deps = Typing_deps.get_ideps_from_hash dep in
+      DepSet.union deps acc
+    end in
     deps
 
   (* We start of with a list of files that have changed since the state was
@@ -771,6 +775,15 @@ let save_state env fn =
   Hh_logger.log "Saving deptable using sqlite took(seconds): %d" sqlite_save_t;
   ignore @@ Hh_logger.log_duration "Saving" t
 
+let gen_deps genv env t =
+  let files_list = Relative_path.Map.keys env.files_info in
+  let next = MultiWorker.next genv.workers files_list in
+  Dependency_service.go
+    genv.workers
+    ~get_next:next
+    env.popt;
+  Hh_logger.log_duration "Generating dependencies" t
+
 
 let get_lazy_level genv =
   let lazy_decl = Option.is_none (ServerArgs.ai_mode genv.options) in
@@ -781,6 +794,19 @@ let get_lazy_level genv =
   | true, true, false -> Parse
   | true, true, true -> Init
   | _ -> Off
+
+
+(* Initialize only to save a saved state *)
+let init_to_save_state genv =
+  let open ServerInitCommon in
+  let env = ServerEnvBuild.make_env genv.config in
+  let get_next, t = indexing genv in
+  (* We need full asts to generate dependencies *)
+  let env, t = parsing ~lazy_parse:false genv env ~get_next t in
+  let t = update_files genv env.files_info t in
+  let env, t = naming env t in
+  ignore(gen_deps genv env t);
+  env
 
 
 (* entry point *)

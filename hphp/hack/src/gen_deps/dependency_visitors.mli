@@ -8,3 +8,4 @@
  *
  *)
 val print_deps : ParserOptions.t -> Ast.program -> unit
+val gen_deps : ParserOptions.t -> Ast.program -> unit 

@@ -75,6 +75,10 @@ void impl_vec(ISS& env, bool reduce, std::vector<Bytecode>&& bcs) {
   std::vector<Bytecode> currentReduction;
   if (!options.StrengthReduce) reduce = false;
 
+  env.flags.wasPEI          = false;
+  env.flags.canConstProp    = true;
+  env.flags.effectFree      = true;
+
   for (auto it = begin(bcs); it != end(bcs); ++it) {
     assert(env.flags.jmpDest == NoBlockId &&
            "you can't use impl with branching opcodes before last position");
@@ -103,16 +107,34 @@ void impl_vec(ISS& env, bool reduce, std::vector<Bytecode>&& bcs) {
       if (instrFlags(it->op) & TF) {
         unreachable(env);
       }
-      if (reduce) {
-        if (env.flags.canConstProp &&
-            env.collect.propagate_constants &&
-            env.collect.propagate_constants(*it, env.state, currentReduction)) {
-          env.flags.canConstProp = false;
-          env.flags.wasPEI = false;
-          env.flags.effectFree = true;
-        } else {
-          currentReduction.push_back(std::move(*it));
+      auto applyConstProp = [&] {
+        if (env.flags.effectFree && !env.flags.wasPEI) return;
+        auto stk = env.state.stack.end();
+        for (auto i = it->numPush(); i--; ) {
+          --stk;
+          if (!is_scalar(stk->type)) return;
         }
+        env.flags.effectFree = true;
+        env.flags.wasPEI = false;
+      };
+      if (reduce) {
+        auto added = false;
+        if (env.flags.canConstProp) {
+          if (env.collect.propagate_constants) {
+            if (env.collect.propagate_constants(*it, env.state,
+                                                currentReduction)) {
+              added = true;
+              env.flags.canConstProp = false;
+              env.flags.wasPEI = false;
+              env.flags.effectFree = true;
+            }
+          } else {
+            applyConstProp();
+          }
+        }
+        if (!added) currentReduction.push_back(std::move(*it));
+      } else if (env.flags.canConstProp) {
+        applyConstProp();
       }
     }
 
@@ -133,14 +155,17 @@ void impl_vec(ISS& env, bool reduce, std::vector<Bytecode>&& bcs) {
 
 namespace interp_step {
 
-void in(ISS& env, const bc::Nop&)  { nothrow(env); }
+void in(ISS& env, const bc::Nop&)  { effect_free(env); }
 void in(ISS& env, const bc::DiscardClsRef& op) {
   nothrow(env);
   takeClsRefSlot(env, op.slot);
 }
-void in(ISS& env, const bc::PopC&) { nothrow(env); popC(env); }
+void in(ISS& env, const bc::PopC&) {
+  nothrow(env);
+  if (!could_run_destructor(popC(env))) effect_free(env);
+}
+void in(ISS& env, const bc::PopU&) { effect_free(env); popU(env); }
 void in(ISS& env, const bc::PopV&) { nothrow(env); popV(env); }
-void in(ISS& env, const bc::PopU&) { nothrow(env); popU(env); }
 void in(ISS& env, const bc::PopR&) {
   auto t = topT(env, 0);
   if (t.subtypeOf(TCell)) {
@@ -150,10 +175,10 @@ void in(ISS& env, const bc::PopR&) {
   popR(env);
 }
 
-void in(ISS& env, const bc::EntryNop&) { nothrow(env); }
+void in(ISS& env, const bc::EntryNop&) { effect_free(env); }
 
 void in(ISS& env, const bc::Dup& /*op*/) {
-  nothrow(env);
+  effect_free(env);
   auto equiv = topStkEquiv(env);
   auto val = popC(env);
   push(env, val, equiv);
@@ -162,23 +187,23 @@ void in(ISS& env, const bc::Dup& /*op*/) {
 
 void in(ISS& env, const bc::AssertRATL& op) {
   mayReadLocal(env, op.loc1);
-  nothrow(env);
+  effect_free(env);
 }
 
 void in(ISS& env, const bc::AssertRATStk&) {
-  nothrow(env);
+  effect_free(env);
 }
 
-void in(ISS& env, const bc::BreakTraceHint&) { nothrow(env); }
+void in(ISS& env, const bc::BreakTraceHint&) { effect_free(env); }
 
 void in(ISS& env, const bc::Box&) {
-  nothrow(env);
+  effect_free(env);
   popC(env);
   push(env, TRef);
 }
 
 void in(ISS& env, const bc::BoxR&) {
-  nothrow(env);
+  effect_free(env);
   if (topR(env).subtypeOf(TRef)) {
     return reduce(env, bc::BoxRNop {});
   }
@@ -187,7 +212,7 @@ void in(ISS& env, const bc::BoxR&) {
 }
 
 void in(ISS& env, const bc::Unbox&) {
-  nothrow(env);
+  effect_free(env);
   popV(env);
   push(env, TInitCell);
 }
@@ -200,22 +225,22 @@ void in(ISS& env, const bc::UnboxR&) {
   push(env, TInitCell);
 }
 
-void in(ISS& env, const bc::RGetCNop&) { nothrow(env); }
+void in(ISS& env, const bc::RGetCNop&) { effect_free(env); }
 
 void in(ISS& env, const bc::CGetCUNop&) {
-  nothrow(env);
+  effect_free(env);
   auto const t = popCU(env);
   push(env, remove_uninit(t));
 }
 
 void in(ISS& env, const bc::UGetCUNop&) {
-  nothrow(env);
+  effect_free(env);
   popCU(env);
   push(env, TUninit);
 }
 
 void in(ISS& env, const bc::UnboxRNop&) {
-  nothrow(env);
+  effect_free(env);
   constprop(env);
   auto t = popR(env);
   if (!t.subtypeOf(TInitCell)) t = TInitCell;
@@ -223,7 +248,7 @@ void in(ISS& env, const bc::UnboxRNop&) {
 }
 
 void in(ISS& env, const bc::BoxRNop&) {
-  nothrow(env);
+  effect_free(env);
   auto t = popR(env);
   if (!t.subtypeOf(TRef)) t = TRef;
   push(env, std::move(t));
@@ -418,6 +443,12 @@ void in(ISS& env, const bc::AddNewElemC&) {
     if (ty.subtypeOf(TArr)) {
       return array_newelem(std::move(ty), std::move(v)).first;
     }
+    if (ty.subtypeOf(TVec)) {
+      return vec_newelem(std::move(ty), std::move(v)).first;
+    }
+    if (ty.subtypeOf(TKeyset)) {
+      return keyset_newelem(std::move(ty), std::move(v)).first;
+    }
     return folly::none;
   }(popC(env));
 
@@ -509,9 +540,9 @@ void in(ISS& env, const bc::ClsCnsD& op) {
   push(env, TInitCell);
 }
 
-void in(ISS& env, const bc::File&)   { nothrow(env); push(env, TSStr); }
-void in(ISS& env, const bc::Dir&)    { nothrow(env); push(env, TSStr); }
-void in(ISS& env, const bc::Method&) { nothrow(env); push(env, TSStr); }
+void in(ISS& env, const bc::File&)   { effect_free(env); push(env, TSStr); }
+void in(ISS& env, const bc::Dir&)    { effect_free(env); push(env, TSStr); }
+void in(ISS& env, const bc::Method&) { effect_free(env); push(env, TSStr); }
 
 void in(ISS& env, const bc::ClsRefName& op) {
   nothrow(env);
@@ -1386,7 +1417,7 @@ void in(ISS& env, const bc::PushL& op) {
 
 void in(ISS& env, const bc::CGetL2& op) {
   // Can't constprop yet because of no INS_1 support in bc.h
-  if (!locCouldBeUninit(env, op.loc1)) nothrow(env);
+  if (!locCouldBeUninit(env, op.loc1)) effect_free(env);
   auto loc = locAsCell(env, op.loc1);
   auto topEquiv = topStkLocal(env);
   auto top = popT(env);
@@ -2269,24 +2300,45 @@ void in(ISS& env, const bc::FPushClsMethodD& op) {
   fpiPush(env, ActRec { FPIKind::ClsMeth, rcls, rfun }, op.arg1);
 }
 
-void in(ISS& env, const bc::FPushClsMethod& op) {
-  auto const t1 = takeClsRefSlot(env, op.slot);
-  auto const t2 = popC(env);
+template<typename PushOp>
+void pushClsHelper(ISS& env, const PushOp& op) {
+  auto const t1 = peekClsRefSlot(env, op.slot);
+  auto const t2 = topC(env);
   auto const v2 = tv(t2);
 
+  folly::Optional<res::Class> rcls;
+  auto exactCls = false;
+  if (is_specialized_cls(t1)) {
+    auto dcls = dcls_of(t1);
+    rcls = dcls.cls;
+    exactCls = dcls.type == DCls::Exact;
+  }
   folly::Optional<res::Func> rfunc;
   if (v2 && v2->m_type == KindOfPersistentString) {
+    if (std::is_same<PushOp, bc::FPushClsMethod>::value &&
+        exactCls && rcls) {
+      return reduce(
+        env,
+        bc::DiscardClsRef { op.slot },
+        bc::PopC {},
+        bc::FPushClsMethodD {
+          op.arg1, v2->m_data.pstr, rcls->name(), op.has_unpack
+        }
+      );
+    }
     rfunc = env.index.resolve_method(env.ctx, t1, v2->m_data.pstr);
   }
-  folly::Optional<res::Class> rcls;
-  if (is_specialized_cls(t1)) rcls = dcls_of(t1).cls;
   fpiPush(env, ActRec { FPIKind::ClsMeth, rcls, rfunc }, op.arg1);
+  takeClsRefSlot(env, op.slot);
+  popC(env);
+}
+
+void in(ISS& env, const bc::FPushClsMethod& op) {
+  pushClsHelper(env, op);
 }
 
 void in(ISS& env, const bc::FPushClsMethodF& op) {
-  // The difference with FPushClsMethod is what ends up on the
-  // ActRec (late-bound class), which we currently aren't tracking.
-  impl(env, bc::FPushClsMethod { op.arg1, op.slot, op.has_unpack });
+  pushClsHelper(env, op);
 }
 
 void ctorHelper(ISS& env, SString name) {
@@ -3220,7 +3272,16 @@ void in(ISS& env, const bc::VerifyParamType& op) {
     return reduce(env, bc::Nop {});
   }
 
-  locAsCell(env, op.loc1);
+  // Generally we won't know anything about the params, but
+  // analyze_func_inline does - and this can help with effect-free analysis
+  auto const constraint = env.ctx.func->params[op.loc1].typeConstraint;
+  if (env.index.satisfies_constraint(env.ctx,
+                                     locAsCell(env, op.loc1),
+                                     constraint)) {
+    reduce(env, bc::Nop {});
+    return;
+  }
+
   if (!RuntimeOption::EvalHardTypeHints) return;
 
   /*
@@ -3235,7 +3296,6 @@ void in(ISS& env, const bc::VerifyParamType& op) {
    * references if it re-enters, even if Option::HardTypeHints is
    * on.
    */
-  auto const constraint = env.ctx.func->params[op.loc1].typeConstraint;
   if (!RuntimeOption::EvalCheckThisTypeHints && constraint.isThis()) {
     return;
   }

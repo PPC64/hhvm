@@ -242,6 +242,10 @@ module type S = sig
   val await_in_sync_function : Pos.t -> unit
   val await_not_allowed : Pos.t -> unit
   val async_in_interface : Pos.t -> unit
+  val await_in_coroutine : Pos.t -> unit
+  val yield_in_coroutine : Pos.t -> unit
+  val suspend_outside_of_coroutine : Pos.t -> unit
+  val suspend_in_finally : Pos.t -> unit
   val magic : Pos.t * string -> unit
   val non_interface : Pos.t -> string -> string -> unit
   val toString_returns_string : Pos.t -> unit
@@ -375,4 +379,9 @@ module type S = sig
   val varray_or_darray_not_supported : Pos.t -> unit
   val unknown_field_disallowed_in_shape : Pos.t -> Pos.t -> string -> unit
   val nullable_cast : Pos.t -> string -> Pos.t -> unit
+  val non_call_argument_in_suspend : Pos.t -> (Pos.t * string) list -> unit
+  val non_coroutine_call_in_suspend : Pos.t -> (Pos.t * string) list -> unit
+  val coroutine_call_outside_of_suspend : Pos.t -> unit
+  val function_is_not_coroutine : Pos.t -> string -> unit
+  val coroutinness_mismatch : bool -> Pos.t -> Pos.t -> unit
 end

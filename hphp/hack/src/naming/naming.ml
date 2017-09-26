@@ -792,8 +792,8 @@ module Make (GetLocals : GetLocals) = struct
     | Hsoft h ->
       let h = hint ~allow_retonly env h
       in snd h
-    | Hfun (hl, opt, h) ->
-      N.Hfun (List.map hl (hint env), opt,
+    | Hfun (is_coroutine, hl, opt, h) ->
+      N.Hfun (is_coroutine, List.map hl (hint env), opt,
               hint ~allow_retonly:true env h)
     | Happly ((p, _x) as id, hl) ->
       let hint_id =
@@ -2199,6 +2199,7 @@ module Make (GetLocals : GetLocals) = struct
     | Yield_break -> N.Yield_break
     | Yield e -> N.Yield (afield env e)
     | Await e -> N.Await (expr env e)
+    | Suspend e -> N.Suspend (expr env e)
     | List el -> N.List (exprl env el)
     | Expr_list el -> N.Expr_list (exprl env el)
     | Cast (ty, e2) ->
@@ -2590,6 +2591,7 @@ module Make (GetLocals : GetLocals) = struct
       cst_name = cst.cst_name;
       cst_type = hint;
       cst_value = e;
+      cst_is_define = (cst.cst_kind = Ast.Cst_define);
     }
 
   (* Uses a default empty environment to extract the use list

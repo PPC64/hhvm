@@ -82,7 +82,6 @@ public:
     return m_classes;
   }
   void getClassesFlattened(std::vector<ClassScopePtr>& classes) const;
-  void getScopesSet(BlockScopeRawPtrQueue &v);
 
   int getFunctionCount() const;
   int getClassCount() const { return m_classes.size();}
@@ -92,12 +91,6 @@ public:
   int popAttribute();
 
   void serialize(JSON::DocTarget::OutputStream& out) const override;
-
-  /**
-   * Whether this file has top level non-declaration statements that
-   * have CPP implementation.
-   */
-  ExpressionPtr getEffectiveImpl(AnalysisResultConstRawPtr ar) const;
 
   /**
    * Parser functions. Parser only deals with a FileScope object, and these

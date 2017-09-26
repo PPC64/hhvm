@@ -68,6 +68,10 @@ let tco_experimental_stronger_shape_idx_ret =
 let tco_experimental_unresolved_fix =
   "unresolved_fix"
 
+(* Whether we use contextual type information to type lambdas etc *)
+let tco_experimental_contextual_inference =
+  "contextual_inference"
+
 (**
  * Allows parsing type hints for function calls, such as foo<int>(args);.
  *)
@@ -114,6 +118,12 @@ let tco_experimental_forbid_nullable_cast = "forbid_nullable_cast"
  *)
 let tco_experimental_safe_pass_by_ref = "safe_pass_by_ref"
 
+ (*
+ * Allows parsing of coroutine functions/suspend operator
+ *)
+let tco_experimental_coroutines =
+  "coroutines"
+
 let tco_experimental_all =
  SSet.empty |> List.fold_right SSet.add
    [
@@ -128,10 +138,12 @@ let tco_experimental_all =
      tco_experimental_stronger_shape_idx_ret;
      tco_experimental_annotate_function_calls;
      tco_experimental_unresolved_fix;
+     tco_experimental_contextual_inference;
      tco_experimental_generics_arity;
      tco_experimental_unknown_fields_shape_is_not_subtype_of_known_fields_shape;
      tco_experimental_forbid_nullable_cast;
      tco_experimental_safe_pass_by_ref;
+     tco_experimental_coroutines;
    ]
 
 let tco_migration_flags_all =

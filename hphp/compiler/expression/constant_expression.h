@@ -35,10 +35,8 @@ struct ConstantExpression : Expression, private IParseHandler {
   DECLARE_BASE_EXPRESSION_VIRTUAL_FUNCTIONS;
   void analyzeProgram(AnalysisResultConstRawPtr ar) override;
   void onParse(AnalysisResultConstRawPtr ar, FileScopePtr scope) override;
-  ExpressionPtr preOptimize(AnalysisResultConstRawPtr ar) override;
   bool isScalar() const override;
   bool isLiteralNull() const override;
-  int getLocalEffects() const override { return NoEffect; }
   bool getScalarValue(Variant &value) override;
 
   const std::string &getName() const { return m_name;}

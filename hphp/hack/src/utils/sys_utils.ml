@@ -10,8 +10,6 @@
 
 open Core
 
-exception NotADirectory of string
-
 external realpath: string -> string option = "hh_realpath"
 external is_nfs: string -> bool = "hh_is_nfs"
 
@@ -140,27 +138,7 @@ let rec collect_paths path_predicate path =
   else
     Utils.singleton_if (path_predicate path) path
 
-(** Deletes the file given by "path". If it is a directory, recursively
- * deletes all its contents then removes the directory itself. *)
-let rec rm_dir_tree path =
-  try begin
-    let stats = Unix.lstat path in
-    match stats.Unix.st_kind with
-    | Unix.S_DIR ->
-      let contents = Sys.readdir path in
-      List.iter (Array.to_list contents) ~f:(fun name ->
-        let name = Filename.concat path name in
-        rm_dir_tree name);
-      Unix.rmdir path
-    | Unix.S_LNK | Unix.S_REG | Unix.S_CHR | Unix.S_BLK | Unix.S_FIFO
-    | Unix.S_SOCK ->
-      Unix.unlink path
-  end with
-  (** Path has been deleted out from under us - can ignore it. *)
-  | Sys_error(s) when s = Printf.sprintf "%s: No such file or directory" path ->
-    ()
-  | Unix.Unix_error(Unix.ENOENT, _, _) ->
-    ()
+let rm_dir_tree = Disk.rm_dir_tree
 
 let restart () =
   let cmd = Sys.argv.(0) in
@@ -335,13 +313,7 @@ let try_touch ~follow_symlinks file =
   with _ ->
     ()
 
-let rec mkdir_p = function
-  | "" -> failwith "Unexpected empty directory, should never happen"
-  | d when not (Sys.file_exists d) ->
-    mkdir_p (Filename.dirname d);
-    Unix.mkdir d 0o770;
-  | d when Sys.is_directory d -> ()
-  | d -> raise (NotADirectory d)
+let mkdir_p = Disk.mkdir_p
 
 (* Emulate "mkdir -p", i.e., no error if already exists. *)
 let mkdir_no_fail dir =

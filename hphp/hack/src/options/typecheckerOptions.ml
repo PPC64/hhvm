@@ -41,6 +41,8 @@ let experimental_annotate_function_calls =
   GlobalOptions.tco_experimental_annotate_function_calls
 let experimental_unresolved_fix =
   GlobalOptions.tco_experimental_unresolved_fix
+let experimental_contextual_inference =
+  GlobalOptions.tco_experimental_contextual_inference
 let experimental_generics_arity =
   GlobalOptions.tco_experimental_generics_arity
 let experimental_unknown_fields_shape_is_not_subtype_of_known_fields_shape =
@@ -50,5 +52,8 @@ let experimental_forbid_nullable_cast =
   GlobalOptions.tco_experimental_forbid_nullable_cast
 let experimental_safe_pass_by_ref =
   GlobalOptions.tco_experimental_safe_pass_by_ref
+let experimental_coroutines =
+  GlobalOptions.tco_experimental_coroutines
+
 let experimental_all = GlobalOptions.tco_experimental_all
 let migration_flags_all = GlobalOptions.tco_migration_flags_all

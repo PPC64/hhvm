@@ -77,19 +77,10 @@ void ExpStatement::setNthKid(int n, ConstructPtr cp) {
   }
 }
 
-StatementPtr ExpStatement::preOptimize(AnalysisResultConstRawPtr ar) {
-  assert (ar->getPhase() > AnalysisResult::AnalyzeAll);
-  return StatementPtr();
-}
-
 ///////////////////////////////////////////////////////////////////////////////
 // code generation functions
 
 void ExpStatement::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
   m_exp->outputPHP(cg, ar);
   cg_printf(";\n");
-}
-
-bool ExpStatement::shouldEmitStatement() const {
-  return hasEffect() || Option::KeepStatementsWithNoEffect;
 }

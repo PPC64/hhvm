@@ -755,15 +755,18 @@ let do_definition (conn: server_conn) (params: Definition.params)
   (* and a derived class "C" without a constructor, and click on "new C()", then  *)
   (* both Hack and Typescript will take you to the constructor of B. As desired!  *)
   (* Conclusion: given a class+method, we'll return only the method.              *)
-  let result_is (kind: SymbolDefinition.kind) (result: IdentifySymbolService.single_result): bool =
+  let result_is_method (result: IdentifySymbolService.single_result): bool =
     match result with
-    | (_, None) -> false
-    | (_, Some definition) -> definition.SymbolDefinition.kind = kind
-  in
-  let has_class = List.exists results ~f:(result_is SymbolDefinition.Class) in
-  let has_method = List.exists results ~f:(result_is SymbolDefinition.Method) in
+    | { SymbolOccurrence.type_ = SymbolOccurrence.Method _; _ }, _ -> true
+    | _ -> false in
+  let result_is_class (result: IdentifySymbolService.single_result): bool =
+    match result with
+    | { SymbolOccurrence.type_ = SymbolOccurrence.Class; _ }, _ -> true
+    | _ -> false in
+  let has_class = List.exists results ~f:result_is_class in
+  let has_method = List.exists results ~f:result_is_method in
   let filtered_results = if has_class && has_method then
-    List.filter results ~f:(result_is SymbolDefinition.Method)
+    List.filter results ~f:result_is_method
   else
     results
   in
@@ -782,7 +785,7 @@ let make_ide_completion_response (result:AutocompleteTypes.ide_result) =
   (* We use snippets to provide parentheses+arguments when autocompleting     *)
   (* method calls e.g. "$c->|" ==> "$c->foo($arg1)". But we'll only do this   *)
   (* there's nothing after the caret: no "$c->|(1)" -> "$c->foo($arg1)(1)"    *)
-  let is_caret_followed_by_whitespace = result.char_at_pos = ' ' || result.char_at_pos = '\n' in
+  let is_caret_followed_by_lparen = result.char_at_pos = '(' in
   let client_supports_snippets = Option.value_map !initialize_params
       ~default:false ~f:(fun params ->
       params.client_capabilities.textDocument.completion.completionItem.snippetSupport) in
@@ -843,7 +846,7 @@ let make_ide_completion_response (result:AutocompleteTypes.ide_result) =
       Printf.sprintf "(%s)" params
   and hack_to_insert (completion: complete_autocomplete_result) : (string * insertTextFormat) =
     match completion.func_details with
-    | Some details when is_caret_followed_by_whitespace && client_supports_snippets ->
+    | Some details when client_supports_snippets && not is_caret_followed_by_lparen ->
       (* "method(${1:arg1}, ...)" but for args we just use param names. *)
       let f i param = Printf.sprintf "${%i:%s}" (i + 1) param.param_name in
       let params = String.concat ", " (List.mapi details.params ~f) in

@@ -130,8 +130,6 @@ let string_of_lit_const instruction =
     | Method -> "Method"
     | NameA -> "NameA"
     | NewArray n -> sep ["NewArray"; string_of_int n]
-    | NewMIArray n -> sep ["NewMIArray"; string_of_int n]
-    | NewMSArray n -> sep ["NewMSArray"; string_of_int n]
     | NewLikeArrayL (id, n) ->
       sep ["NewLikeArrayL"; string_of_local_id id; string_of_int n]
     | Cns cnsid -> sep ["Cns"; string_of_const_id cnsid]
@@ -1017,12 +1015,15 @@ and string_of_param_default_value ?(use_single_quote=false) expr =
   | A.Collection ((_, name), afl) when
     name = "vec" || name = "dict" || name = "keyset" ->
     name ^ "[" ^ string_of_afield_list afl ^ "]"
-  | A.Collection ((_, name), afl) when
-    name = "Set" || name = "Pair" || name = "Vector" || name = "Map" ||
-    name = "ImmSet" || name = "ImmVector" || name = "ImmMap" ->
-    "HH\\\\" ^ name ^ " {" ^ string_of_afield_list afl ^ "}"
-  | A.Collection ((_, name), _) ->
-    nyi ^ " - Default value for an unknown collection - " ^ name
+  | A.Collection ((_, name), afl) ->
+    let name = SU.Types.fix_casing @@ SU.strip_ns name in
+    begin match name with
+    | "Set" | "Pair" | "Vector" | "Map"
+    | "ImmSet" | "ImmVector" | "ImmMap" ->
+      "HH\\\\" ^ name ^ " {" ^ string_of_afield_list afl ^ "}"
+    | _ ->
+      nyi ^ " - Default value for an unknown collection - " ^ name
+    end
   | A.Shape fl ->
     let fl =
       List.map
@@ -1124,6 +1125,7 @@ and string_of_param_default_value ?(use_single_quote=false) expr =
   | A.Yield_break
   | A.Yield_from _
   | A.Await _
+  | A.Suspend _
   | A.List _
   | A.Omitted
   | A.Expr_list _ -> failwith "illegal default value"

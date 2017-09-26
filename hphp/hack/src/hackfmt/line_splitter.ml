@@ -51,14 +51,38 @@ let find_best_state env init_state =
   in
   aux 0 init_state
 
-let solve_chunk_group env source_text chunk_group =
-  let rbm = Chunk_group.get_initial_rule_bindings chunk_group in
+let solve_chunk_group env ?range source_text chunk_group =
+  let rbm =
+    match range with
+    | Some range
+      when Interval.intervals_overlap range
+             (Chunk_group.get_char_range chunk_group)
+      ->
+      let source_rbm = Solve_state.rbm_from_source source_text chunk_group in
+      List.fold chunk_group.Chunk_group.chunks
+        ~init:(Chunk_group.get_always_rule_bindings chunk_group)
+        ~f:begin fun rbm chunk ->
+          let rule = chunk.Chunk.rule in
+          if Interval.intervals_overlap range (Chunk.get_range chunk)
+          then rbm
+          else
+            match IMap.get rule source_rbm with
+            | Some true -> IMap.add rule true rbm
+            | _ -> rbm
+        end
+    | _ -> Chunk_group.get_initial_rule_bindings chunk_group
+  in
   let init_state = Solve_state.make env chunk_group rbm in
   match find_best_state env init_state with
   | Some state -> state
   | None -> Solve_state.from_source env source_text chunk_group
 
-let find_solve_states env ?range source_text chunk_groups =
+let find_solve_states
+    (env: Env.t)
+    ?(range: Interval.t option)
+    (source_text: string)
+    (chunk_groups: Chunk_group.t list)
+    : Solve_state.t list =
   let chunk_groups = match range with
     | None -> chunk_groups
     | Some range ->
@@ -67,14 +91,35 @@ let find_solve_states env ?range source_text chunk_groups =
         Interval.intervals_overlap range group_range
       )
   in
-  chunk_groups |> List.map ~f:(solve_chunk_group env source_text)
+  chunk_groups |> List.map ~f:(solve_chunk_group ?range env source_text)
 
-let print env ?range solve_states =
+let print
+    (env: Env.t)
+    ?(range: Interval.t option)
+    ?(include_surrounding_whitespace=true)
+    (solve_states: Solve_state.t list)
+    : string =
+  let filter_to_range subchunks =
+    match range with
+    | None -> subchunks
+    | Some range ->
+      Subchunk.subchunks_in_range
+        ~include_surrounding_whitespace
+        subchunks
+        range
+  in
   solve_states
-  |> List.map ~f:(State_printer.print_state env ?range)
-  |> String.concat ""
+  |> List.concat_map ~f:Subchunk.subchunks_of_solve_state
+  |> filter_to_range
+  |> Subchunk.string_of_subchunks env
 
-let solve env ?range source_text chunk_groups =
+let solve
+    (env: Env.t)
+    ?(range: Interval.t option)
+    ?(include_surrounding_whitespace=true)
+    (source_text: string)
+    (chunk_groups: Chunk_group.t list)
+    : string =
   chunk_groups
   |> find_solve_states env ?range source_text
-  |> print env ?range
+  |> print env ?range ~include_surrounding_whitespace

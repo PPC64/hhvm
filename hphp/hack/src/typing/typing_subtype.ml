@@ -286,8 +286,8 @@ let add_constraint_with_fail env ck ty_sub ty_super fail =
  * constraint becomes C<string> as C<int>)
  *)
 let add_constraint p env ck ty_sub ty_super =
-  Typing_log.log_types p env
-    [Typing_log.Log_sub ("add_constraint",
+  Typing_log.log_types 2 p env
+    [Typing_log.Log_sub ("Typing_subtype.add_constraint",
        [Typing_log.Log_type ("ty_sub", ty_sub);
         Typing_log.Log_type ("ty_super", ty_super)])];
   add_constraint_with_fail env ck ty_sub ty_super (fun env -> env)
@@ -362,6 +362,8 @@ and subtype_funs_generic ~check_return ~contravariant_arguments env
     r_sub ft_sub r_super ft_super =
   let p_sub = Reason.to_pos r_sub in
   let p_super = Reason.to_pos r_super in
+  if ft_sub.ft_is_coroutine <> ft_super.ft_is_coroutine
+  then Errors.coroutinness_mismatch ft_super.ft_is_coroutine p_super p_sub;
   if (arity_min ft_sub.ft_arity) > (arity_min ft_super.ft_arity)
   then Errors.fun_too_many_args p_sub p_super;
   (match ft_sub.ft_arity, ft_super.ft_arity with
@@ -546,9 +548,9 @@ and sub_type env ty_sub ty_super =
  *      sub_type env int string => error
 *)
 and sub_type_with_uenv env (uenv_sub, ty_sub) (uenv_super, ty_super) =
-  Typing_log.log_types (Reason.to_pos (fst ty_sub)) env
+  Typing_log.log_types 2 (Reason.to_pos (fst ty_sub)) env
     [Typing_log.Log_sub (Printf.sprintf
-        "sub_type_with_uenv uenv_sub.unwrappedToption=%b uenv_super.unwrappedToption=%b"
+        "Typing_subtype.sub_type_with_uenv uenv_sub.unwrappedToption=%b uenv_super.unwrappedToption=%b"
         uenv_sub.TUEnv.unwrappedToption uenv_super.TUEnv.unwrappedToption,
       [Typing_log.Log_type ("ty_sub", ty_sub);
        Typing_log.Log_type ("ty_super", ty_super)])];
@@ -626,6 +628,11 @@ and sub_type_with_uenv env (uenv_sub, ty_sub) (uenv_super, ty_super) =
       else
         let outer_pos = env.Env.outer_pos in
         let outer_reason = env.Env.outer_reason in
+        Typing_log.log_types 2 outer_pos env
+        [Typing_log.Log_sub
+          ("Typing_subtype.add_todo",
+           [Typing_log.Log_type ("ty_sub", ty_sub);
+           Typing_log.Log_type ("ty_super", ty_super)])];
         Env.add_todo env begin fun env' ->
           Errors.try_add_err outer_pos (Reason.string_of_ureason outer_reason)
           (fun () ->
@@ -903,9 +910,11 @@ and sub_type_with_uenv env (uenv_sub, ty_sub) (uenv_super, ty_super) =
       | None ->
           Errors.anonymous_recursive_call (Reason.to_pos r_sub);
           env
-      | Some anon ->
+      | Some (is_coroutine, anon) ->
           let p_super = Reason.to_pos r_super in
           let p_sub = Reason.to_pos r_sub in
+          if is_coroutine <> ft.ft_is_coroutine
+          then Errors.coroutinness_mismatch ft.ft_is_coroutine p_super p_sub;
           if not (Unify.unify_arities
                     ~ellipsis_is_variadic:true anon_arity ft.ft_arity)
           then Errors.fun_arity_mismatch p_super p_sub;
@@ -1032,8 +1041,8 @@ and sub_type_with_uenv env (uenv_sub, ty_sub) (uenv_super, ty_super) =
     ) -> fst (Unify.unify env ty_super ty_sub)
 
 and sub_generic_params seen env (uenv_sub, ty_sub) (uenv_super, ty_super) =
-  Typing_log.log_types (Reason.to_pos (fst ty_sub)) env
-    [Typing_log.Log_sub ("sub_generic_params",
+  Typing_log.log_types 2 (Reason.to_pos (fst ty_sub)) env
+    [Typing_log.Log_sub ("Typing_subtype.sub_generic_params",
       [Typing_log.Log_type ("ty_sub", ty_sub);
        Typing_log.Log_type ("ty_super", ty_super)])];
   let env, ety_super = Env.expand_type env ty_super in

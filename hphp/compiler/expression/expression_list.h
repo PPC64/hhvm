@@ -42,7 +42,6 @@ struct ExpressionList : Expression {
                           ListKind kind = ListKindParam);
 
   DECLARE_EXPRESSION_VIRTUAL_FUNCTIONS;
-  ExpressionPtr preOptimize(AnalysisResultConstRawPtr ar) override;
 
   void setContext(Context context) override;
   void setListKind(ListKind kind) { m_kind = kind; }
@@ -50,7 +49,6 @@ struct ExpressionList : Expression {
   void addElement(ExpressionPtr exp) override;
   void insertElement(ExpressionPtr exp, int index = 0) override;
   bool isScalar() const override;
-  int getLocalEffects() const override { return NoEffect; }
   bool isNoObjectInvolved() const;
   void removeElement(int index);
   void clearElements();
@@ -88,7 +86,6 @@ struct ExpressionList : Expression {
 
   template <typename F> bool getListScalars(F) const;
 private:
-  void optimize(AnalysisResultConstRawPtr ar);
   unsigned int checkLitstrKeys() const;
   enum class ElemsKind: uint8_t { None, ArrayPairs, Collection };
 

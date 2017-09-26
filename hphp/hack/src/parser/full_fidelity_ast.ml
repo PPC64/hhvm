@@ -477,7 +477,7 @@ let rec pHint : hint parser = fun node env ->
         let filename = Relative_path.to_absolute !(lowerer_state.filePath) in
         not (is_missing shape_type_ellipsis) ||
         String_utils.string_ends_with filename "Shapes.hhi" ||
-        not (TypecheckerOptions.experimental_feature_enabled
+        (TypecheckerOptions.experimental_feature_enabled
           !(lowerer_state.popt)
           TypecheckerOptions.experimental_promote_nullable_to_optional_in_shapes
         )
@@ -517,7 +517,7 @@ let rec pHint : hint parser = fun node env ->
       ; _ } ->
         Happly
         ( pos_name kw
-        , List.map ~f:(fun x -> pHint x env) [ key; value ]
+        , pHint key env :: couldMap ~f:pHint value env
         )
     | DictionaryTypeSpecifier
       { dictionary_type_keyword = kw
@@ -535,14 +535,19 @@ let rec pHint : hint parser = fun node env ->
       Hoption (pHint nullable_type env)
     | SoftTypeSpecifier { soft_type; _ } ->
       Hsoft (pHint soft_type env)
-    | ClosureTypeSpecifier { closure_parameter_types; closure_return_type; _} ->
+    | ClosureTypeSpecifier {
+        closure_parameter_types;
+        closure_return_type;
+        closure_coroutine; _} ->
       let param_types =
         List.map ~f:(fun x -> pHint x env)
           (as_list closure_parameter_types)
       in
+      let is_coroutine = not (is_missing closure_coroutine) in
       let is_variadic_param x = snd x = Htuple [] in
       Hfun
-      ( List.filter ~f:(fun x -> not (is_variadic_param x)) param_types
+      ( is_coroutine
+      , List.filter ~f:(fun x -> not (is_variadic_param x)) param_types
       , List.exists ~f:is_variadic_param param_types
       , pHint closure_return_type env
       )
@@ -887,6 +892,7 @@ and pExpr ?location:(location=TopLevel) : expr parser = fun node env ->
         | Some TK.DotDotDot               -> Unop (Usplat, expr)
         | Some TK.At                      -> Unop (Usilence, expr)
         | Some TK.Await                   -> Await expr
+        | Some TK.Suspend                 -> Suspend expr
         | Some TK.Clone                   -> Clone expr
         | Some TK.Print                   ->
           Call ((pos, Id (pos, "echo")), [], [expr], [])
@@ -1581,13 +1587,23 @@ and pClassElt : class_elt list parser = fun node env ->
           | Some (pos_end, _) -> Pos.btw p pos_end
           | None -> p
         in
+        (* Add array type for variadic params *)
+        let hint = if not param.param_is_variadic then param.param_hint else
+          begin
+            let hint_list = match param.param_hint with
+              | None -> []
+              | Some h -> [h]
+            in
+            Some (Pos.none, Happly ((Pos.none, "array"), hint_list))
+          end
+        in
         ( Expr (p, Binop (Eq None,
             (p, Obj_get((p, Lvar (p, "$this")), (p, Id cvname), OG_nullthrows)),
             (p, Lvar param.param_id)
           ))
         , ClassVars
           ( Option.to_list param.param_modifier
-          , param.param_hint
+          , hint
           , [span, cvname, None]
           , None
           )

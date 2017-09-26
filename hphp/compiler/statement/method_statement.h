@@ -50,8 +50,6 @@ public:
                       attr, docComment, attrList, method) {}
 
   DECLARE_STATEMENT_VIRTUAL_FUNCTIONS;
-  bool hasDecl() const override { return true; }
-  bool hasImpl() const override { return false; }
   int getRecursiveCount() const override;
   // implementing IParseHandler
   void onParseRecur(AnalysisResultConstRawPtr ar, FileScopeRawPtr fs,
@@ -76,8 +74,6 @@ public:
   StatementListPtr getStmts() { return m_stmt;}
   bool isRef(int index = -1) const;
   bool isSystem() const;
-
-  int getLocalEffects() const override;
 
   ModifierExpressionPtr getModifiers() {
     return m_modifiers;

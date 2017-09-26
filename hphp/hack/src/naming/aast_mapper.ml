@@ -68,6 +68,7 @@ struct
     | S.String2 el -> T.String2 (map_exprl f el)
     | S.Yield af -> T.Yield (map_afield af)
     | S.Await e -> T.Await (map_expr f e)
+    | S.Suspend e -> T.Suspend (map_expr f e)
     | S.List el -> T.List (map_exprl f el)
     | S.Pair (e1, e2) -> T.Pair (map_expr f e1, map_expr f e2)
     | S.Expr_list el -> T.Expr_list (map_exprl f el)
@@ -257,6 +258,7 @@ struct
     T.cst_name = c.S.cst_name;
     T.cst_type = c.S.cst_type;
     T.cst_value = Option.map c.S.cst_value (map_expr f);
+    T.cst_is_define = c.S.cst_is_define;
   }
 
   let map_def f d =

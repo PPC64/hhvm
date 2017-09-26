@@ -1071,7 +1071,7 @@ public:
                        bool isUnpack);
   void emitClosureUseVar(Emitter& e, ExpressionPtr exp, int paramId,
                          bool byRef);
-  bool emitScalarValue(Emitter& e, const Variant& value);
+  bool emitScalarValue(Emitter& e, Variant&& value);
   void emitLambdaCaptureArg(Emitter& e, ExpressionPtr exp);
   Id emitClass(Emitter& e, ClassScopePtr cNode, bool topLevel);
   Id emitTypedef(Emitter& e, TypedefStatementPtr);
@@ -3900,7 +3900,7 @@ void EmitterVisitor::visit(FileScopePtr file) {
             if (v.isString()) {
               v = String(makeStaticString(v.asCStrRef().get()));
             } else if (v.isArray()) {
-              v = Array(ArrayData::GetScalarArray(v.asCArrRef().get()));
+              v = Array(ArrayData::GetScalarArray(std::move(v)));
             } else {
               assert(v.isInitialized());
               assert(!isRefcountedType(v.getType()));
@@ -4035,15 +4035,15 @@ void EmitterVisitor::visitKids(ConstructPtr c) {
   }
 }
 
-template<uint32_t MaxMakeSize, class Fun>
-bool checkKeys(ExpressionPtr init_expr, bool check_size, Fun fun) {
+template<class Fun>
+bool checkKeys(ExpressionPtr init_expr, int max_size, Fun fun) {
   if (init_expr->getKindOf() != Expression::KindOfExpressionList) {
     return false;
   }
 
   auto el = static_pointer_cast<ExpressionList>(init_expr);
   int n = el->getCount();
-  if (n < 1 || (check_size && n > MaxMakeSize)) {
+  if (n < 1 || (max_size > 0 && n > max_size)) {
     return false;
   }
 
@@ -4062,15 +4062,10 @@ bool checkKeys(ExpressionPtr init_expr, bool check_size, Fun fun) {
 /*
  * isPackedInit() returns true if this expression list looks like an
  * array with no keys and no ref values; e.g. array(x,y,z).
- *
- * In this case we can NewPackedArray to create the array. The elements are
- * pushed on the stack, so we arbitrarily limit this to a small multiple of
- * MixedArray::SmallSize (12).
  */
-bool isPackedInit(ExpressionPtr init_expr, int* size,
-                  bool check_size = true, bool hack_arr_compat = true) {
-  *size = 0;
-  return checkKeys<MixedArray::MaxMakeSize>(init_expr, check_size,
+bool isPackedInit(ExpressionPtr init_expr, bool hack_arr_compat = true) {
+  int size = 0;
+  return checkKeys(init_expr, 0,
     [&](ArrayPairExpressionPtr ap) {
       Variant key;
 
@@ -4081,12 +4076,12 @@ bool isPackedInit(ExpressionPtr init_expr, int* size,
 
         if (key.isInteger()) {
           // If it's an integer key, check if it's the next packed index.
-          if (key.asInt64Val() != *size) return false;
+          if (key.asInt64Val() != size) return false;
         } else if (key.isBoolean()) {
           // Bool to Int conversion
           if (hack_arr_compat &&
               RuntimeOption::EvalHackArrCompatNotices) return false;
-          if (static_cast<int>(key.asBooleanVal()) != *size) return false;
+          if (static_cast<int>(key.asBooleanVal()) != size) return false;
         } else {
           // Give up if it's not a string.
           if (!key.isString()) return false;
@@ -4098,11 +4093,11 @@ bool isPackedInit(ExpressionPtr init_expr, int* size,
           auto numtype = key.getStringData()->isNumericWithVal(i, d, false);
 
           // If it's a string of the next packed index,
-          if (numtype != KindOfInt64 || i != *size) return false;
+          if (numtype != KindOfInt64 || i != size) return false;
         }
       }
 
-      (*size)++;
+      ++size;
       return true;
     });
 }
@@ -4112,7 +4107,9 @@ bool isPackedInit(ExpressionPtr init_expr, int* size,
  * all static strings with no duplicates.
  */
 bool isStructInit(ExpressionPtr init_expr, std::vector<std::string>& keys) {
-  return checkKeys<MixedArray::MaxStructMakeSize>(init_expr, true,
+  return checkKeys(
+    init_expr,
+    ArrayData::MaxElemsOnStack,
     [&](ArrayPairExpressionPtr ap) {
       auto key = ap->getName();
       if (key == nullptr || !key->isLiteralString()) return false;
@@ -4124,7 +4121,8 @@ bool isStructInit(ExpressionPtr init_expr, std::vector<std::string>& keys) {
       if (std::find(keys.begin(), keys.end(), name) != keys.end()) return false;
       keys.push_back(name);
       return true;
-    });
+    }
+  );
 }
 
 void EmitterVisitor::emitCall(Emitter& e,
@@ -5918,7 +5916,7 @@ bool EmitterVisitor::visit(ConstructPtr node) {
     auto ex = static_pointer_cast<Expression>(node);
     Variant v;
     ex->getScalarValue(v);
-    auto const emitted = emitScalarValue(e, v);
+    auto const emitted = emitScalarValue(e, std::move(v));
     always_assert(emitted);
     return true;
   }
@@ -6247,7 +6245,7 @@ bool EmitterVisitor::visit(ConstructPtr node) {
   not_reached();
 }
 
-bool EmitterVisitor::emitScalarValue(Emitter& e, const Variant& v) {
+bool EmitterVisitor::emitScalarValue(Emitter& e, Variant&& v) {
   switch (v.getRawType()) {
     case KindOfUninit:
       e.NullUninit();
@@ -6277,25 +6275,25 @@ bool EmitterVisitor::emitScalarValue(Emitter& e, const Variant& v) {
     case KindOfPersistentVec:
     case KindOfVec:
       assert(v.isVecArray());
-      e.Vec(ArrayData::GetScalarArray(v.getArrayData()));
+      e.Vec(ArrayData::GetScalarArray(std::move(v)));
       return true;
 
     case KindOfPersistentDict:
     case KindOfDict:
       assert(v.isDict());
-      e.Dict(ArrayData::GetScalarArray(v.getArrayData()));
+      e.Dict(ArrayData::GetScalarArray(std::move(v)));
       return true;
 
     case KindOfPersistentKeyset:
     case KindOfKeyset:
       assert(v.isKeyset());
-      e.Keyset(ArrayData::GetScalarArray(v.getArrayData()));
+      e.Keyset(ArrayData::GetScalarArray(std::move(v)));
       return true;
 
     case KindOfPersistentArray:
     case KindOfArray:
       assert(v.isPHPArray());
-      e.Array(ArrayData::GetScalarArray(v.getArrayData()));
+      e.Array(ArrayData::GetScalarArray(std::move(v)));
       return true;
 
     case KindOfObject:
@@ -8555,8 +8553,8 @@ void EmitterVisitor::emitDeprecationWarning(Emitter& e,
         e.Concat();
       } else {
         e.String(makeStaticString(
-                   clsScope->getScopeName() + "::" + funcName
-                   + ": " + deprMessage));
+                   clsScope->getUnmangledScopeName() +
+                   "::" + funcName + ": " + deprMessage));
       }
     } else {
       e.String(makeStaticString(funcName + ": " + deprMessage));
@@ -10480,7 +10478,7 @@ void EmitterVisitor::initScalar(TypedValue& tvVal, ExpressionPtr val,
     m_staticColType.push_back(k);
     visit(el);
     tvVal = make_array_like_tv(
-      ArrayData::GetScalarArray(m_staticArrays.back().get())
+      ArrayData::GetScalarArray(std::move(m_staticArrays.back()))
     );
     m_staticArrays.pop_back();
     m_staticColType.pop_back();
@@ -10616,17 +10614,50 @@ void EmitterVisitor::emitArrayInit(Emitter& e, ExpressionListPtr el,
     return;
   }
 
-  if (isVec || isKeyset) {
-    auto const count = el->getCount();
-    for (int i = 0; i < count; i++) {
-      auto expr = static_pointer_cast<Expression>((*el)[i]);
-      visit(expr);
+  if (!kind && isPackedInit(el)) {
+    auto const total = el->getCount();
+    size_t count = 0;
+    while (count < std::min<size_t>(total, ArrayData::MaxElemsOnStack)) {
+      auto pair = static_pointer_cast<ArrayPairExpression>((*el)[count]);
+      visit(pair->getValue());
+      LocationGuard loc{e, pair->getValue()->getRange()};
       emitConvertToCell(e);
+      ++count;
+    }
+    e.NewPackedArray(count);
+    while (count < total) {
+      auto pair = static_pointer_cast<ArrayPairExpression>((*el)[count]);
+      visit(pair->getValue());
+      LocationGuard loc{e, pair->getValue()->getRange()};
+      emitConvertToCell(e);
+      e.AddNewElemC();
+      ++count;
+    }
+    return;
+  }
+
+  if (isVec || isKeyset) {
+    auto const total = el->getCount();
+    size_t count = 0;
+    while (count < std::min<size_t>(total, ArrayData::MaxElemsOnStack)) {
+      auto expr = static_pointer_cast<Expression>((*el)[count]);
+      visit(expr);
+      LocationGuard loc{e, expr->getRange()};
+      emitConvertToCell(e);
+      ++count;
     }
     if (isVec) {
       e.NewVecArray(count);
     } else {
       e.NewKeysetArray(count);
+    }
+    while (count < total) {
+      auto expr = static_pointer_cast<Expression>((*el)[count]);
+      visit(expr);
+      LocationGuard loc{e, expr->getRange()};
+      emitConvertToCell(e);
+      e.AddNewElemC();
+      ++count;
     }
     return;
   }
@@ -10641,6 +10672,7 @@ void EmitterVisitor::emitArrayInit(Emitter& e, ExpressionListPtr el,
     for (int i = 0; i < count; i++) {
       auto ap = static_pointer_cast<ArrayPairExpression>((*el)[i]);
       visit(ap->getValue());
+      LocationGuard loc{e, ap->getValue()->getRange()};
       emitConvertToCell(e);
       e.Dup();
       e.AddElemC();
@@ -10657,31 +10689,19 @@ void EmitterVisitor::emitArrayInit(Emitter& e, ExpressionListPtr el,
   // from here on, we're dealing with PHP arrays only
   assertx(!kind);
 
-  int nElms;
-  if (isPackedInit(el, &nElms)) {
-    for (int i = 0; i < nElms; ++i) {
-      auto ap = static_pointer_cast<ArrayPairExpression>((*el)[i]);
-      visit(ap->getValue());
-      emitConvertToCell(e);
-    }
-    e.NewPackedArray(nElms);
-    return;
-  }
-
   std::vector<std::string> keys;
   if (isStructInit(el, keys)) {
     for (int i = 0, n = keys.size(); i < n; i++) {
       auto ap = static_pointer_cast<ArrayPairExpression>((*el)[i]);
       visit(ap->getValue());
+      LocationGuard loc{e, ap->getValue()->getRange()};
       emitConvertToCell(e);
     }
     e.NewStructArray(keys);
     return;
   }
 
-  if (isPackedInit(el, &nElms,
-                   false /* ignore size */,
-                   false /* hack arr compat */)) {
+  if (isPackedInit(el, false /* hack arr compat */)) {
     e.NewArray(capacityHint);
   } else {
     e.NewMixedArray(capacityHint);
@@ -10866,7 +10886,6 @@ static ConstructPtr doOptimize(ConstructPtr c, AnalysisResultConstRawPtr ar) {
       case Expression::KindOfBinaryOpExpression:
       case Expression::KindOfUnaryOpExpression:
       case Expression::KindOfIncludeExpression:
-      case Expression::KindOfSimpleFunctionCall:
         return e->preOptimize(ar);
       case Expression::KindOfClosureExpression: {
         auto cl = static_pointer_cast<ClosureExpression>(e);
