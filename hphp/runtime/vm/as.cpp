@@ -1840,7 +1840,7 @@ void parse_user_attribute(AsmState& as,
 
   as.in.expectWs(')');
 
-  if (!var.isArray()) {
+  if (!var.isPHPArray()) {
     as.error("user attribute values must be arrays");
   }
 
@@ -1980,6 +1980,8 @@ void parse_parameter_list(AsmState& as) {
     if (seenVariadic) {
       as.error("functions can only have one variadic argument");
     }
+
+    parse_attribute_list(as, AttrContext::Parameter, &param.userAttributes);
 
     if (ch == '.') {
       as.in.getc();

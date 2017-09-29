@@ -36,6 +36,11 @@ TRACE_SET_MOD(hhbbc);
 
 const StaticString s_assert("assert");
 const StaticString s_set_frame_metadata("HH\\set_frame_metadata");
+const StaticString s_86metadata("86metadata");
+const StaticString s_func_num_args("func_num_args");
+const StaticString s_func_get_args("func_get_args");
+const StaticString s_func_get_arg("func_get_arg");
+const StaticString s_func_slice_args("__SystemLib\\func_slice_args");
 
 //////////////////////////////////////////////////////////////////////
 
@@ -169,6 +174,13 @@ void jmp_nevertaken(ISS& env) {
   jmp_setdest(env, env.blk.fallthrough);
 }
 
+void readUnknownParams(ISS& env) {
+  for (LocalId p = 0; p < env.ctx.func->params.size(); p++) {
+    if (p == env.flags.mayReadLocalSet.size()) break;
+    env.flags.mayReadLocalSet.set(p);
+  }
+}
+
 void readUnknownLocals(ISS& env) { env.flags.mayReadLocalSet.set(); }
 void readAllLocals(ISS& env)     { env.flags.mayReadLocalSet.set(); }
 
@@ -245,93 +257,6 @@ void doRet(ISS& env, Type t, bool hasEffects) {
 
 void mayUseVV(ISS& env) {
   env.collect.mayUseVV = true;
-}
-
-void specialFunctionEffects(ISS& env, const res::Func& func) {
-  if (func.name()->isame(s_set_frame_metadata.get())) {
-    /*
-     * HH\set_frame_metadata can write to the caller's frame, but does not
-     * require a VV.
-     */
-    readUnknownLocals(env);
-    killLocals(env);
-    return;
-  }
-
-  if (func.name()->isame(s_assert.get())) {
-    /*
-     * Assert is somewhat special. In the most general case, it can read and
-     * write to the caller's frame (and is marked as such). The first parameter,
-     * if a string, will be evaled and can have arbitrary effects. Luckily this
-     * is forbidden in RepoAuthoritative mode, so we can ignore that here. If
-     * the assert fails, it may execute an arbitrary pre-registered callback
-     * which still might try to write to the assert caller's frame. This can't
-     * happen if calling such frame accessing functions dynamically is
-     * forbidden.
-     */
-    if (RuntimeOption::DisallowDynamicVarEnvFuncs == HackStrictOption::ON) {
-      return;
-    }
-  }
-
-  /*
-   * Skip-frame functions won't write or read to the caller's frame, but they
-   * might dynamically call a function which can. So, skip-frame functions kill
-   * our locals unless they can't call such functions.
-   */
-  if (func.mightWriteCallerFrame() ||
-      (RuntimeOption::DisallowDynamicVarEnvFuncs != HackStrictOption::ON &&
-       func.mightBeSkipFrame())) {
-    readUnknownLocals(env);
-    killLocals(env);
-    mayUseVV(env);
-    return;
-  }
-
-  if (func.mightReadCallerFrame()) {
-    readUnknownLocals(env);
-    mayUseVV(env);
-    return;
-  }
-}
-
-void specialFunctionEffects(ISS& env, ActRec ar) {
-  switch (ar.kind) {
-  case FPIKind::Unknown:
-    // fallthrough
-  case FPIKind::Func:
-    if (!ar.func) {
-      if (RuntimeOption::DisallowDynamicVarEnvFuncs != HackStrictOption::ON) {
-        readUnknownLocals(env);
-        killLocals(env);
-        mayUseVV(env);
-      }
-      return;
-    }
-  case FPIKind::Builtin:
-    specialFunctionEffects(env, *ar.func);
-    if (ar.fallbackFunc) specialFunctionEffects(env, *ar.fallbackFunc);
-    break;
-  case FPIKind::Ctor:
-  case FPIKind::ObjMeth:
-  case FPIKind::ClsMeth:
-  case FPIKind::ObjInvoke:
-  case FPIKind::CallableArr:
-    /*
-     * Methods cannot read or write to the caller's frame, but they can be
-     * skip-frame (if they're a builtin). So, its possible they'll dynamically
-     * call a function which reads or writes to the caller's frame. If we don't
-     * forbid this, we have to be pessimistic. Imagine something like
-     * Vector::map calling assert.
-     */
-    if (RuntimeOption::DisallowDynamicVarEnvFuncs != HackStrictOption::ON &&
-        (!ar.func || ar.func->mightBeSkipFrame())) {
-      readUnknownLocals(env);
-      killLocals(env);
-      mayUseVV(env);
-    }
-    break;
-  }
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -424,35 +349,46 @@ void push(ISS& env, Type t, LocalId l) {
  * to the call, or -1 for unknown. We only need the number of args
  * when we know the exact function being called, in order to determine
  * eligibility for folding.
+ *
+ * returns the foldable flag as a convenience.
  */
-void fpiPush(ISS& env, ActRec ar, int32_t nArgs = -1) {
-  if (nArgs >= 0 &&
-      ar.kind != FPIKind::Ctor &&
-      ar.kind != FPIKind::Builtin &&
-      ar.func && !ar.fallbackFunc) {
-    ar.foldable = [&] {
-      auto const func = ar.func->exactFunc();
-      if (!func) return false;
-      if (env.collect.unfoldableFuncs.count(func)) return false;
-      // Foldable builtins are always worth trying
-      if (ar.func->isFoldable()) return true;
-      // Any native functions at this point are known to be
-      // non-foldable, but other builtins might be, even if they
-      // don't have the __Foldable attribute.
-      if (func->nativeInfo) return false;
-      if (func->params.size()) {
-        // Not worth trying if we're going to warn due to missing args
-        return check_nargs_in_range(func, nArgs);
-      }
-      // If the function has no args, we can simply check that its effect free
-      // and returns a literal.
-      return env.index.is_effect_free(*ar.func) &&
-             is_scalar(env.index.lookup_return_type_raw(func));
-    }();
-  }
-  FTRACE(2, "    fpi+: {}\n", show(ar));
+bool fpiPush(ISS& env, ActRec ar, int32_t nArgs) {
+  auto foldable = [&] {
+    if (nArgs < 0 ||
+        ar.kind == FPIKind::Ctor ||
+        ar.kind == FPIKind::Builtin ||
+        !ar.func || ar.fallbackFunc) {
+      return false;
+    }
+    auto const func = ar.func->exactFunc();
+    if (!func) return false;
+    if (env.collect.unfoldableFuncs.count(func)) return false;
+    // Foldable builtins are always worth trying
+    if (ar.func->isFoldable()) return true;
+    // Any native functions at this point are known to be
+    // non-foldable, but other builtins might be, even if they
+    // don't have the __Foldable attribute.
+    if (func->nativeInfo) return false;
+    if (func->params.size()) {
+      // Not worth trying if we're going to warn due to missing args
+      return check_nargs_in_range(func, nArgs);
+    }
+    // If the function has no args, we can simply check that its effect free
+    // and returns a literal.
+    return env.index.is_effect_free(*ar.func) &&
+    is_scalar(env.index.lookup_return_type_raw(func));
+  }();
+  if (foldable) effect_free(env);
+  ar.foldable = foldable;
   ar.pushBlk = env.blk.id;
+
+  FTRACE(2, "    fpi+: {}\n", show(ar));
   env.state.fpiStack.push_back(std::move(ar));
+  return foldable;
+}
+
+void fpiPush(ISS& env, ActRec ar) {
+  fpiPush(env, std::move(ar), -1);
 }
 
 ActRec fpiPop(ISS& env) {
@@ -468,17 +404,32 @@ ActRec& fpiTop(ISS& env) {
   return env.state.fpiStack.back();
 }
 
+void fpiNotFoldable(ISS& env) {
+  // By the time we're optimizing, we should know up front which funcs
+  // are foldable (the analyze phase iterates to convergence, the
+  // optimize phase does not - so its too late to fix now).
+  assertx(!any(env.collect.opts & CollectionOpts::Optimizing));
+
+  auto& ar = fpiTop(env);
+  assertx(ar.func && ar.foldable);
+  auto const func = ar.func->exactFunc();
+  assertx(func);
+  env.collect.unfoldableFuncs.emplace(func);
+  env.propagate(ar.pushBlk, nullptr);
+  ar.foldable = false;
+  // we're going to reprocess the whole fpi region; any results we've
+  // got so far are bogus, so stop prevent further useless work by
+  // marking the next bytecode unreachable
+  unreachable(env);
+  FTRACE(2, "     fpi: not foldable\n");
+}
+
 PrepKind prepKind(ISS& env, uint32_t paramId) {
   auto& ar = fpiTop(env);
   if (ar.func && !ar.fallbackFunc) {
     auto const ret = env.index.lookup_param_prep(env.ctx, *ar.func, paramId);
     if (ar.foldable && ret != PrepKind::Val) {
-      auto const func = ar.func->exactFunc();
-      assertx(func);
-      env.collect.unfoldableFuncs.emplace(func);
-      env.propagate(ar.pushBlk, nullptr);
-      ar.foldable = false;
-      FTRACE(2, "     fpi: not foldable\n");
+      fpiNotFoldable(env);
     }
     if (ret != PrepKind::Unknown) {
       return ret;
@@ -489,15 +440,17 @@ PrepKind prepKind(ISS& env, uint32_t paramId) {
 }
 
 template<class... Bytecodes>
-void reduceFPassBuiltin(ISS& env, PrepKind kind, FPassHint hint, uint32_t arg,
-                        Bytecodes&&... bcs) {
+void killFPass(ISS& env, PrepKind kind, FPassHint hint, uint32_t arg,
+               Bytecodes&&... bcs) {
   assert(kind != PrepKind::Unknown);
 
-  // Since PrepKind is never Unknown for FCallBuiltins we should know statically
-  // if we will throw or not at runtime (PrepKind and FPassHint don't match).
+  // Since PrepKind is never Unknown for buildins or foldables we
+  // should know statically if we will throw or not at runtime
+  // (PrepKind and FPassHint don't match).
   if (fpassCanThrow(env, kind, hint)) {
-    auto ar = fpiTop(env);
-    assert(ar.kind == FPIKind::Builtin && ar.func && !ar.fallbackFunc);
+    auto& ar = fpiTop(env);
+    assertx(ar.foldable || ar.kind == FPIKind::Builtin);
+    assertx(ar.func && !ar.fallbackFunc);
     return reduce(
       env,
       std::forward<Bytecodes>(bcs)...,
@@ -505,6 +458,37 @@ void reduceFPassBuiltin(ISS& env, PrepKind kind, FPassHint hint, uint32_t arg,
     );
   }
   return reduce(env, std::forward<Bytecodes>(bcs)...);
+}
+
+bool shouldKillFPass(ISS& env, FPassHint hint, uint32_t param) {
+  auto& ar = fpiTop(env);
+  if (ar.kind == FPIKind::Builtin) return true;
+  if (!ar.foldable) return false;
+  prepKind(env, param);
+  if (!ar.foldable) return false;
+  auto const ok = [&] {
+    if (hint == FPassHint::Ref) return false;
+    auto const &t = topT(env);
+    if (!is_scalar(t)) return false;
+    auto const callee = ar.func->exactFunc();
+    if (param >= callee->params.size() ||
+        (param + 1 == callee->params.size() &&
+         callee->params.back().isVariadic)) {
+      return true;
+    }
+    auto const constraint = callee->params[param].typeConstraint;
+    if (!constraint.hasConstraint() ||
+        constraint.isTypeVar() ||
+        constraint.isTypeConstant()) {
+      return true;
+    }
+    return env.index.satisfies_constraint(
+      Context { callee->unit, const_cast<php::Func*>(callee), callee->cls },
+      t, constraint);
+  }();
+  if (ok) return true;
+  fpiNotFoldable(env);
+  return false;
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -819,6 +803,103 @@ void unsetUnknownLocal(ISS& env) {
   killAllLocEquiv(env);
   killAllStkEquiv(env);
   unbindLocalStatic(env, NoLocalId);
+}
+
+//////////////////////////////////////////////////////////////////////
+// Special functions
+
+void specialFunctionEffects(ISS& env, const res::Func& func) {
+  if (func.name()->isame(s_set_frame_metadata.get())) {
+    /*
+     * HH\set_frame_metadata can write to the local named 86metadata,
+     * but doesn't require a VV.
+     */
+    auto const l = findLocal(env, s_86metadata.get());
+    if (l != NoLocalId) setLoc(env, l, TInitCell);
+    return;
+  }
+
+  if (func.name()->isame(s_assert.get())) {
+    /*
+     * Assert is somewhat special. In the most general case, it can read and
+     * write to the caller's frame (and is marked as such). The first parameter,
+     * if a string, will be evaled and can have arbitrary effects. Luckily this
+     * is forbidden in RepoAuthoritative mode, so we can ignore that here. If
+     * the assert fails, it may execute an arbitrary pre-registered callback
+     * which still might try to write to the assert caller's frame. This can't
+     * happen if calling such frame accessing functions dynamically is
+     * forbidden.
+     */
+    if (RuntimeOption::DisallowDynamicVarEnvFuncs == HackStrictOption::ON) {
+      return;
+    }
+  }
+
+  /*
+   * Skip-frame functions won't write or read to the caller's frame, but they
+   * might dynamically call a function which can. So, skip-frame functions kill
+   * our locals unless they can't call such functions.
+   */
+  if (func.mightWriteCallerFrame() ||
+      (RuntimeOption::DisallowDynamicVarEnvFuncs != HackStrictOption::ON &&
+       func.mightBeSkipFrame())) {
+    readUnknownLocals(env);
+    killLocals(env);
+    mayUseVV(env);
+    return;
+  }
+
+  if (func.mightReadCallerFrame()) {
+    if (func.name()->isame(s_func_num_args.get())) return;
+    if (func.name()->isame(s_func_get_args.get()) ||
+        func.name()->isame(s_func_get_arg.get()) ||
+        func.name()->isame(s_func_slice_args.get())) {
+      readUnknownParams(env);
+    } else {
+      readUnknownLocals(env);
+    }
+    mayUseVV(env);
+    return;
+  }
+}
+
+void specialFunctionEffects(ISS& env, ActRec ar) {
+  switch (ar.kind) {
+  case FPIKind::Unknown:
+    // fallthrough
+  case FPIKind::Func:
+    if (!ar.func) {
+      if (RuntimeOption::DisallowDynamicVarEnvFuncs != HackStrictOption::ON) {
+        readUnknownLocals(env);
+        killLocals(env);
+        mayUseVV(env);
+      }
+      return;
+    }
+  case FPIKind::Builtin:
+    specialFunctionEffects(env, *ar.func);
+    if (ar.fallbackFunc) specialFunctionEffects(env, *ar.fallbackFunc);
+    break;
+  case FPIKind::Ctor:
+  case FPIKind::ObjMeth:
+  case FPIKind::ClsMeth:
+  case FPIKind::ObjInvoke:
+  case FPIKind::CallableArr:
+    /*
+     * Methods cannot read or write to the caller's frame, but they can be
+     * skip-frame (if they're a builtin). So, its possible they'll dynamically
+     * call a function which reads or writes to the caller's frame. If we don't
+     * forbid this, we have to be pessimistic. Imagine something like
+     * Vector::map calling assert.
+     */
+    if (RuntimeOption::DisallowDynamicVarEnvFuncs != HackStrictOption::ON &&
+        (!ar.func || ar.func->mightBeSkipFrame())) {
+      readUnknownLocals(env);
+      killLocals(env);
+      mayUseVV(env);
+    }
+    break;
+  }
 }
 
 //////////////////////////////////////////////////////////////////////

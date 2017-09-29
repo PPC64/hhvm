@@ -6333,16 +6333,17 @@ bool EmitterVisitor::emitInlineGenva(
 ) {
   assert(call->isCallToFunction("genva"));
   const auto params = call->getParams();
-  if (!params) {
+  const auto num_params = params ? params->getCount() : 0;
+  if (!num_params) {
     e.Array(staticEmptyArray());
     return true;
   }
   if (params->containsUnpack()) {
     throw IncludeTimeFatalException(params, "do not use ...$args with genva()");
   }
-  const auto num_params = params->getCount();
-  assertx(num_params > 0);
-
+  if (num_params > ArrayData::MaxElemsOnStack) {
+    return false;
+  }
   for (auto i = int{0}; i < num_params; i++) {
     Label gwh, have_wh;
 
@@ -9268,7 +9269,6 @@ void EmitterVisitor::emitVirtualClassBase(Emitter& e, Expr* node) {
   prepareEvalStack();
 
   m_evalStack.push(StackSym::K);
-  auto const func = node->getFunctionScope();
 
   if (node->isStatic()) {
     m_evalStack.setClsBaseType(SymbolicStack::CLS_LATE_BOUND);
@@ -9297,12 +9297,7 @@ void EmitterVisitor::emitVirtualClassBase(Emitter& e, Expr* node) {
       m_evalStack.setUnnamedLocal(clsBaseIdx, unnamedLoc, m_ue.bcPos());
       emitPop(e);
     }
-  } else if (!node->getClassScope() ||
-             node->getClassScope()->isTrait() ||
-             (func && func->isClosure())) {
-    // In a trait, a potentially rebound closure or psuedo-main, we can't
-    // resolve self:: or parent:: yet, so we emit special instructions that do
-    // those lookups.
+  } else {
     if (node->isParent()) {
       m_evalStack.setClsBaseType(SymbolicStack::CLS_PARENT);
     } else if (node->isSelf()) {
@@ -9312,15 +9307,6 @@ void EmitterVisitor::emitVirtualClassBase(Emitter& e, Expr* node) {
       m_evalStack.setString(
         makeStaticString(node->getOriginalClassName()));
     }
-  } else if (node->isParent() &&
-             node->getClassScope()->getOriginalParent().empty()) {
-    // parent:: in a class without a parent.  We'll emit a Parent
-    // opcode because it can handle this error case.
-    m_evalStack.setClsBaseType(SymbolicStack::CLS_PARENT);
-  } else {
-    m_evalStack.setClsBaseType(SymbolicStack::CLS_STRING_NAME);
-    m_evalStack.setString(
-      makeStaticString(node->getOriginalClassName()));
   }
 }
 

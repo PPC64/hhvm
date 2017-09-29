@@ -259,7 +259,8 @@ and emit_local ~notice ~need_ref env ((_, str) as id) =
 and emit_first_expr env (_, e as expr) =
   match e with
   | A.Lvar ((_, name) as id)
-    when not (is_local_this env name || SN.Superglobals.is_superglobal name) ->
+    when not ((is_local_this env name && not (Emit_env.get_needs_local_this env))
+      || SN.Superglobals.is_superglobal name) ->
     instr_cgetl2 (get_local env id), true
   | _ ->
     emit_expr_and_unbox_if_necessary ~need_ref:false env expr, false
@@ -343,7 +344,7 @@ and emit_maybe_classname env (p,name) with_string with_instr =
     | Some c when c.A.c_kind = A.Ctrait ->
       let get_cls =
         if name = SN.Classes.cSelf then instr_self else instr_parent in
-      with_instr get_cls
+      with_instr (gather [get_cls; instr_clsrefname])
     | Some c when name = SN.Classes.cSelf -> from_str (snd c.A.c_name)
     | Some c ->
         begin match c.A.c_extends with

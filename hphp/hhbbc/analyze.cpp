@@ -333,6 +333,7 @@ FuncAnalysis do_analyze_collect(const Index& index,
 
       auto propagate = [&] (BlockId target, const State* st) {
         if (!st) {
+          FTRACE(2, "     Force reprocess: {}\n", target);
           incompleteQ.push(rpoId(ai, target));
           return;
         }
@@ -822,6 +823,7 @@ ClassAnalysis analyze_class(const Index& index, Context const ctx) {
 std::vector<std::pair<State,StepFlags>>
 locally_propagated_states(const Index& index,
                           const FuncAnalysis& fa,
+                          CollectedInfo& collect,
                           borrowed_ptr<const php::Block> blk,
                           State state) {
   Trace::Bump bumper{Trace::hhbbc, 10};
@@ -829,9 +831,6 @@ locally_propagated_states(const Index& index,
   std::vector<std::pair<State,StepFlags>> ret;
   ret.reserve(blk->hhbcs.size() + 1);
 
-  CollectedInfo collect {
-    index, fa.ctx, nullptr, nullptr, CollectionOpts::TrackConstantArrays, &fa
-  };
   auto interp = Interp { index, fa.ctx, collect, blk, state };
 
   for (auto& op : blk->hhbcs) {

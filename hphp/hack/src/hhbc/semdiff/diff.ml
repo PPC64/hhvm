@@ -307,7 +307,8 @@ let function_is_generator_comparer = wrap Hhas_function.is_generator
                                   (fun _f s -> s) (flag_comparer "isGenerator")
 let function_is_pair_generator_comparer = wrap Hhas_function.is_pair_generator
                               (fun _f s -> s) (flag_comparer "isPairGenerator")
-
+let method_is_abstract_comparer = wrap Hhas_method.is_abstract
+                              (fun _f s -> s) (flag_comparer "isAbstract")
 let method_is_protected_comparer = wrap Hhas_method.is_protected
                               (fun _f s -> s) (flag_comparer "isProtected")
 let method_is_public_comparer = wrap Hhas_method.is_public
@@ -326,6 +327,8 @@ let method_is_pair_generator_comparer = wrap Hhas_method.is_pair_generator
                               (fun _f s -> s) (flag_comparer "isPairGenerator")
 let method_is_closure_body_comparer = wrap Hhas_method.is_closure_body
                               (fun _f s -> s) (flag_comparer "isClosureBody")
+let method_no_injection_comparer = wrap Hhas_method.no_injection
+                              (fun _f s -> s) (flag_comparer "noInjection")
 
 (* Could have used fold earlier here *)
 let method_flags_comparer =
@@ -333,7 +336,8 @@ List.fold_left (join (fun s1 s2 -> s1 ^ s2)) method_is_protected_comparer
 [method_is_public_comparer; method_is_private_comparer;
  method_is_static_comparer; method_is_final_comparer; method_is_async_comparer;
  method_is_generator_comparer; method_is_pair_generator_comparer;
- method_is_closure_body_comparer]
+ method_is_closure_body_comparer; method_is_abstract_comparer;
+ method_no_injection_comparer]
 
 let function_flags_comparer =
  join (fun s1 s2 -> s1 ^ " " ^ s2)
@@ -382,12 +386,27 @@ let type_info_type_constraint_comparer = wrap Hhas_type_info.type_constraint
 let type_info_comparer = join (fun s1 s2 -> "<" ^ s1 ^ " " ^s2 ^ ">")
                               type_info_user_type_comparer
                               type_info_type_constraint_comparer
+
+let attribute_comparer =
+  join (fun s1 s2 -> s1 ^ "(" ^ s2 ^ ")")
+       (wrap Hhas_attribute.name (fun _a s -> s) string_comparer)
+       (wrap Hhas_attribute.arguments (fun _l s -> s)
+                                      (list_comparer typed_value_comparer " "))
+
+let param_attributes_comparer =
+  wrap Hhas_param.user_attributes (fun _ s -> s)
+    (list_comparer attribute_comparer " ")
+
 let param_type_info_comparer = wrap Hhas_param.type_info
                                     (fun _p s -> s)
                                     (option_comparer type_info_comparer)
+
+let param_user_attributes_is_variadic_comparer =
+  join (^) param_attributes_comparer param_is_variadic_comparer
+
 let param_variadic_type_info_comparer =
   join (fun s1 s2 -> s1 ^ s2)
-  param_is_variadic_comparer
+  param_user_attributes_is_variadic_comparer
   param_type_info_comparer
 let param_name_reference_comparer =
   join (fun s1 s2 -> s1 ^ s2)
@@ -435,11 +454,6 @@ let method_return_type_comparer =
   wrap Hhas_method.return_type (fun _f s -> s)
                                (option_comparer type_info_comparer)
 
-let attribute_comparer =
-  join (fun s1 s2 -> s1 ^ "(" ^ s2 ^ ")")
-       (wrap Hhas_attribute.name (fun _a s -> s) string_comparer)
-       (wrap Hhas_attribute.arguments (fun _l s -> s)
-                                      (list_comparer typed_value_comparer " "))
 
 let function_attributes_comparer =
  wrap Hhas_function.attributes (fun _ s -> s)
@@ -452,6 +466,22 @@ let method_attributes_comparer =
 let class_attributes_comparer =
   wrap Hhas_class.attributes (fun _ s -> s)
     (list_comparer attribute_comparer " ")
+
+let type_constants_alist c = List.map
+  (fun f -> (Hhas_type_constant.name f, Hhas_type_constant.initializer_t f))
+  (Hhas_class.type_constants c)
+
+let class_constants_alist c = List.map
+  (fun f -> (Hhas_constant.name f, Hhas_constant.value f))
+  (Hhas_class.constants c)
+
+let class_constants_comparer =
+  wrap class_constants_alist (fun _ s -> s)
+    (alist_comparer (option_comparer typed_value_comparer) (fun cname -> cname))
+
+let class_type_constants_comparer =
+  wrap type_constants_alist (fun _ s -> s)
+    (alist_comparer (option_comparer typed_value_comparer) (fun cname -> cname))
 
 let unmangled_name_comparer =
  wrap Hhbc_string_utils.Closures.unmangle_closure
@@ -483,6 +513,8 @@ let class_is_abstract_comparer =
   wrap Hhas_class.is_abstract (fun _f s -> s) (flag_comparer "abstract")
 let class_is_interface_comparer =
   wrap Hhas_class.is_interface (fun _f s -> s) (flag_comparer "interface")
+let class_is_top_comparer =
+  wrap Hhas_class.is_top (fun _f s -> s) (flag_comparer "top")
 let class_is_trait_comparer =
   wrap Hhas_class.is_trait (fun _f s -> s) (flag_comparer "trait")
 let class_is_xhp_comparer =
@@ -499,7 +531,7 @@ let class_flags_comparer =
  List.fold_left (fun c1 c2 -> join (fun s1 s2 -> s1 ^ " " ^ s2) c1 c2)
   class_is_final_comparer
   [class_is_abstract_comparer; class_is_interface_comparer;
-   class_is_trait_comparer; class_is_xhp_comparer]
+   class_is_top_comparer; class_is_trait_comparer; class_is_xhp_comparer]
 
 let class_attributes_flags_comparer =
  join (fun s1 s2 -> "[" ^ s1 ^ " " ^ s2 ^ "]")
@@ -511,10 +543,24 @@ let class_header_comparer =
   class_attributes_flags_comparer
   class_name_base_implements_comparer
 
-(* TODO: actually plumb in the following:
-    class_uses_comparer
-   class_enum_type_comparer
-*)
+let class_use_alias_string (a, b, c, d) =
+  let a' = match a with
+  | None -> ""
+  | Some a -> a ^ "::" in
+   let c' = match c with
+   | None -> ""
+   | Some c -> " as " ^ c in
+   let d' = match d with
+   | None -> ""
+   | Some d -> Ast_defs.string_of_kind d in
+    a' ^ b ^ c' ^ d'
+
+let class_use_alias_comparer =
+  wrap class_use_alias_string (fun _ s -> s) string_comparer
+
+let class_use_aliases_comparer =
+  wrap Hhas_class.class_use_aliases (fun _f s -> s)
+    (list_comparer class_use_alias_comparer " ")
 
 let property_is_private_comparer =
   wrap Hhas_property.is_private (fun _f s -> s) (flag_comparer "private")
@@ -526,6 +572,8 @@ let property_is_static_comparer =
   wrap Hhas_property.is_static (fun _f s -> s) (flag_comparer "static")
 let property_is_deep_init_comparer =
   wrap Hhas_property.is_deep_init (fun _f s -> s) (flag_comparer "deep_init")
+let property_no_serialize_comparer =
+  wrap Hhas_property.no_serialize (fun _f s -> s) (flag_comparer "no_serialize")
 let prop_comparer =
   wrap Hhbc_id.Prop.to_raw_string (fun _ s -> s) string_comparer
 
@@ -534,6 +582,8 @@ let property_name_comparer =
 let property_initial_value_comparer =
  wrap Hhas_property.initial_value (fun _ s -> s)
      (option_comparer typed_value_comparer)
+let property_type_info_comparer =
+ wrap Hhas_property.type_info (fun _ s -> s) (type_info_comparer)
 
 (* TODO: format these much more sensibly *)
 let property_comparer =
@@ -541,7 +591,8 @@ let property_comparer =
   property_is_private_comparer
   [property_is_protected_comparer; property_is_public_comparer;
   property_is_static_comparer; property_is_deep_init_comparer;
-  property_name_comparer; property_initial_value_comparer]
+  property_name_comparer; property_initial_value_comparer;
+  property_no_serialize_comparer; property_type_info_comparer]
 
 (* apply a permutation to the trailing elements of a list
    used to reorder the properties of one closure class to
@@ -706,10 +757,22 @@ let body_instrs_comparer = {
                  (Instruction_sequence.instr_seq_to_list (Hhas_body.instrs b)));
 }
 
-let body_comparer perm =
+let body_static_inits_comparer =
+  wrap Hhas_body.static_inits (fun _f s -> s)
+    (primitive_set_comparer (fun s -> s))
+
+let body_is_memoize_wrapper_comparer =
+  wrap Hhas_body.is_memoize_wrapper (fun _f s -> s) (flag_comparer "memoize")
+
+let body_iters_cls_ref_slots_decl_vars_instrs_comparer perm =
  join (fun s1 s2 -> s1 ^ "\n" ^ s2)
       (body_iters_cls_ref_slots_decl_vars_comparer perm)
       body_instrs_comparer
+
+let body_comparer perm =
+ List.fold_left (join (fun s1 s2 -> s1 ^ s2)) body_is_memoize_wrapper_comparer
+  [body_static_inits_comparer;
+   body_iters_cls_ref_slots_decl_vars_instrs_comparer perm]
 
 let function_body_comparer =
   wrap Hhas_function.body (fun _ s -> s) (body_comparer [])
@@ -734,6 +797,7 @@ let functions_alist_comparer =
 let methods_alist_comparer perm =
  alist_comparer (method_header_body_comparer perm) (fun mname -> mname)
 
+
 let class_methods_comparer perm = wrap methods_alist_of_class
                            (fun _c s -> s) (methods_alist_comparer perm)
 
@@ -742,15 +806,26 @@ let class_properties_methods_comparer perm =
       (class_properties_comparer perm)
       (class_methods_comparer perm)
 
+let class_properties_methods_use_aliases_comparer perm =
+ join (fun s1 s2 -> s1 ^ s2)
+      (class_properties_methods_comparer perm)
+      class_use_aliases_comparer
+
+let class_constants_type_constants_comparer =
+ join (fun s1 s2 -> s1 ^ s2)
+      class_constants_comparer
+      class_type_constants_comparer
+
 let class_header_properties_methods_comparer perm =
  join (fun s1 s2 -> s1 ^ "{\n" ^ s2 ^ "}")
    class_header_comparer
-   (class_properties_methods_comparer perm)
-
-
+   (class_properties_methods_use_aliases_comparer perm)
 
 (* TODO: add all the other bits to classes *)
-let class_comparer perm = class_header_properties_methods_comparer perm
+let class_comparer perm =
+ join (fun s1 s2 -> s1 ^ s2)
+   class_constants_type_constants_comparer
+   (class_header_properties_methods_comparer perm)
 
 let program_top_functions_comparer = wrap top_functions_alist_of_program
                            (fun _p s -> s) functions_alist_comparer

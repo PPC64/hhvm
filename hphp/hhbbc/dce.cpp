@@ -355,13 +355,6 @@ struct DceState {
   std::vector<UseInfo> stack;
 
   /*
-   * Similar to stack, but for ActRecs. If entry is Use::Not then all
-   * parameters must be passed via FPassC, and we're going to kill
-   * each FPassC and the corresponding cell on the stack, and the FPush/FCall.
-   */
-  std::vector<UseInfo> fpiStack;
-
-  /*
    * Locals known to be live at a point in a DCE walk.  This is used
    * when we're actually acting on information we discovered during
    * liveness analysis.
@@ -1659,47 +1652,6 @@ void dce(Env& env, const bc::BindM& op)      { minstr_final(env, op, op.arg1); }
 void dce(Env& env, const bc::UnsetM& op)     { minstr_final(env, op, op.arg1); }
 void dce(Env& env, const bc::FPassM& op)     { minstr_final(env, op, op.arg2); }
 
-void dce(Env& env, const bc::FCallD& op) {
-  auto const& ar = env.stateBefore.fpiStack.back();
-  if (ar.foldable) {
-    auto const& ui = env.dceState.stack.back();
-    if (!isLinked(ui)) {
-      auto const val = tv(env.stateAfter.stack.back().type);
-      if (val) {
-        auto& fui = env.dceState.fpiStack.back();
-        fui.usage = Use::Not;
-        if (allUnused(ui)) {
-          fui.actions = ui.actions;
-          fui.actions[env.id] = DceAction::PopInputs;
-        } else {
-          fui.actions[env.id] = DceAction::PopAndReplace;
-          CompactVector<Bytecode> bcs { gen_constant(*val), bc::RGetCNop {} };
-          auto const& hhbcs =
-            env.dceState.ainfo.ctx.func->blocks[env.id.blk]->hhbcs;
-          if (hhbcs.size() > env.id.idx + 1) {
-            auto const& nextOp = hhbcs[env.id.idx + 1];
-            if (nextOp.op == Op::UnboxRNop) {
-              bcs.pop_back();
-              fui.actions[{env.id.blk, env.id.idx + 1}] = DceAction::Kill;
-            }
-          }
-          env.dceState.replaceMap.emplace(env.id, std::move(bcs));
-        }
-        env.dceState.stack.pop_back();
-        ignoreInputs(env, false, {{ env.id, DceAction::Kill }});
-        return;
-      }
-    }
-  }
-  stack_ops(env);
-}
-
-void dce(Env& env, const bc::FPassC& op) {
-  auto& fui = env.dceState.fpiStack.back();
-  if (fui.usage == Use::Not) return markDead(env);
-  stack_ops(env);
-}
-
 void dispatch_dce(Env& env, const Bytecode& op) {
 #define O(opcode, ...) case Op::opcode: dce(env, op.opcode); return;
   switch (op.op) { OPCODES }
@@ -1797,11 +1749,6 @@ struct DceOutState {
   folly::Optional<std::vector<UseInfo>>      dceStack;
 
   /*
-   * The union of the dceFpiStacks from the start of the normal successors.
-   */
-  folly::Optional<std::vector<UseInfo>>      dceFpiStack;
-
-  /*
    * The union of the slotUsage from the start of the normal
    * successors.
    */
@@ -1816,6 +1763,7 @@ struct DceOutState {
 folly::Optional<DceState>
 dce_visit(const Index& index,
           const FuncAnalysis& fa,
+          CollectedInfo& collect,
           borrowed_ptr<const php::Block> const blk,
           const State& stateIn,
           const DceOutState& dceOutState) {
@@ -1832,7 +1780,8 @@ dce_visit(const Index& index,
     return folly::none;
   }
 
-  auto const states = locally_propagated_states(index, fa, blk, stateIn);
+  auto const states = locally_propagated_states(index, fa, collect,
+                                                blk, stateIn);
 
   auto dceState = DceState{ index, fa };
   dceState.liveLocals = dceOutState.locLive;
@@ -1842,16 +1791,11 @@ dce_visit(const Index& index,
   dceState.isLocal    = dceOutState.isLocal;
 
   if (dceOutState.dceStack) {
-    assertx(dceOutState.dceFpiStack);
     dceState.stack = *dceOutState.dceStack;
     assert(dceState.stack.size() == states.back().first.stack.size());
-    dceState.fpiStack = *dceOutState.dceFpiStack;
-    assert(dceState.fpiStack.size() == states.back().first.fpiStack.size());
   } else {
     dceState.stack.resize(states.back().first.stack.size(),
                           UseInfo { Use::Used });
-    dceState.fpiStack.resize(states.back().first.fpiStack.size(),
-                             UseInfo { Use::Used });
   }
 
   if (dceOutState.slotUsage) {
@@ -1911,19 +1855,6 @@ dce_visit(const Index& index,
           dceState.minstrUI.clear();
           return true;
         }
-      }
-      if (isFPush(op.op)) {
-        auto ui = std::move(dceState.fpiStack.back());
-        dceState.fpiStack.pop_back();
-        if (ui.usage == Use::Not) {
-          ui.actions[visit_env.id] = DceAction::PopInputs;
-          ignoreInputs(visit_env, false, {{ visit_env.id, DceAction::Kill }});
-          commitActions(visit_env, false, ui.actions);
-          return true;
-        }
-      }
-      if (isFCallStar(op.op)) {
-        dceState.fpiStack.emplace_back(Use::Used);
       }
       return false;
     }();
@@ -1994,22 +1925,22 @@ struct DceAnalysis {
   std::bitset<kMaxTrackedLocals>      locLiveIn;
   std::bitset<kMaxTrackedClsRefSlots> slotLiveIn;
   std::vector<UseInfo>                stack;
-  std::vector<UseInfo>                fpiStack;
   std::vector<UseInfo>                slotUsage;
   std::set<LocationId>                forcedLiveLocations;
 };
 
 DceAnalysis analyze_dce(const Index& index,
                         const FuncAnalysis& fa,
+                        CollectedInfo& collect,
                         borrowed_ptr<php::Block> const blk,
                         const State& stateIn,
                         const DceOutState& dceOutState) {
-  if (auto dceState = dce_visit(index, fa, blk, stateIn, dceOutState)) {
+  if (auto dceState = dce_visit(index, fa, collect,
+                                blk, stateIn, dceOutState)) {
     return DceAnalysis {
       dceState->liveLocals,
       dceState->liveSlots,
       dceState->stack,
-      dceState->fpiStack,
       dceState->slotUsage,
       dceState->forcedLiveLocations
     };
@@ -2116,10 +2047,11 @@ struct DceOptResult {
 DceOptResult
 optimize_dce(const Index& index,
              const FuncAnalysis& fa,
+             CollectedInfo& collect,
              borrowed_ptr<php::Block> const blk,
              const State& stateIn,
              const DceOutState& dceOutState) {
-  auto dceState = dce_visit(index, fa, blk, stateIn, dceOutState);
+  auto dceState = dce_visit(index, fa, collect, blk, stateIn, dceOutState);
 
   if (!dceState) {
     return {std::bitset<kMaxTrackedLocals>{},
@@ -2251,11 +2183,12 @@ void remove_unused_clsref_slots(Context const ctx,
 
 void local_dce(const Index& index,
                const FuncAnalysis& ainfo,
+               CollectedInfo& collect,
                borrowed_ptr<php::Block> const blk,
                const State& stateIn) {
   // For local DCE, we have to assume all variables are in the
   // live-out set for the block.
-  auto const ret = optimize_dce(index, ainfo, blk, stateIn,
+  auto const ret = optimize_dce(index, ainfo, collect, blk, stateIn,
                                 DceOutState{DceOutState::Local{}});
 
   dce_perform(*ainfo.ctx.func, ret.actionMap, ret.replaceMap);
@@ -2266,6 +2199,11 @@ void local_dce(const Index& index,
 void global_dce(const Index& index, const FuncAnalysis& ai) {
   auto rpoId = [&] (BlockId blk) {
     return ai.bdata[blk].rpoId;
+  };
+
+  auto collect = CollectedInfo {
+    index, ai.ctx, nullptr, nullptr,
+    CollectionOpts::TrackConstantArrays, &ai
   };
 
   FTRACE(1, "|---- global DCE analyze ({})\n", show(ai.ctx));
@@ -2372,26 +2310,6 @@ void global_dce(const Index& index, const FuncAnalysis& ai) {
     return ret;
   };
 
-  auto mergeFpiStacks = [&] (folly::Optional<std::vector<UseInfo>>& stkOut,
-                             const std::vector<UseInfo>& stkIn) {
-    if (!stkOut) {
-      stkOut = stkIn;
-      return true;
-    }
-    assert(stkOut->size() == stkIn.size());
-    if (debug) {
-      for (uint32_t i = 0; i < stkIn.size(); i++) {
-        DEBUG_ONLY auto const &in = stkIn[i];
-        DEBUG_ONLY auto const &out = (*stkOut)[i];
-        assertx(in.usage == out.usage);
-        if (in.usage == Use::Not) {
-          assertx(in.actions == out.actions);
-        }
-      }
-    }
-    return false;
-  };
-
   auto mergeUIVecs = [&] (folly::Optional<std::vector<UseInfo>>& stkOut,
                           const std::vector<UseInfo>& stkIn,
                           BlockId blk, bool isSlot) {
@@ -2451,6 +2369,7 @@ void global_dce(const Index& index, const FuncAnalysis& ai) {
     auto const result = analyze_dce(
       index,
       ai,
+      collect,
       blk,
       ai.bdata[blk->id].stateIn,
       blockState
@@ -2485,9 +2404,6 @@ void global_dce(const Index& index, const FuncAnalysis& ai) {
         pbs.locLive != oldPredLocLive ||
         pbs.slotLive != oldPredSlotLive;
       if (mergeUIVecs(pbs.slotUsage, result.slotUsage, blk->id, true)) {
-        changed = true;
-      }
-      if (mergeFpiStacks(pbs.dceFpiStack, result.fpiStack)) {
         changed = true;
       }
       if (mergeUIVecs(pbs.dceStack, result.stack, blk->id, false)) {
@@ -2534,6 +2450,7 @@ void global_dce(const Index& index, const FuncAnalysis& ai) {
     auto ret = optimize_dce(
       index,
       ai,
+      collect,
       b,
       ai.bdata[b->id].stateIn,
       blockStates[b->id]

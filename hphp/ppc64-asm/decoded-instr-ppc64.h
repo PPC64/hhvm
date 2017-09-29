@@ -58,7 +58,9 @@ struct DecodedInstruction {
     decode();
   }
 
-  explicit DecodedInstruction(PPC64Instr* ip, PPC64Instr* base, uint8_t max_size = 0)
+  explicit DecodedInstruction(PPC64Instr* ip,
+                              PPC64Instr* base,
+                              uint8_t max_size = 0)
     : m_ip(reinterpret_cast<uint8_t*>(ip))
     , m_base(reinterpret_cast<uint8_t*>(base))
     , m_imm(0)
@@ -69,7 +71,9 @@ struct DecodedInstruction {
     decode();
   }
 
-  explicit DecodedInstruction(uint8_t* ip, uint8_t* base, uint8_t max_size = 0)
+  explicit DecodedInstruction(uint8_t* ip,
+                             uint8_t* base,
+                             uint8_t max_size = 0)
     : m_ip(ip)
     , m_base(base)
     , m_imm(0)

@@ -164,11 +164,15 @@ let emit_class : A.class_ * bool -> Hhas_class.t =
   let class_id, _ =
     Hhbc_id.Class.elaborate_id namespace ast_class.Ast.c_name in
   let class_is_trait = ast_class.A.c_kind = Ast.Ctrait in
+  let class_is_interface = ast_is_interface ast_class in
   let class_uses =
     List.filter_map
       ast_class.A.c_body
       (function
-        | A.ClassUse (_, (A.Happly ((_, name), _))) -> Some name
+        | A.ClassUse (pos, (A.Happly ((_, name), _))) ->
+          if class_is_interface
+          then Emit_fatal.raise_fatal_parse pos "Interfaces cannot use traits"
+          else Some name
         | _ -> None)
   in
   let class_use_aliases =
@@ -225,7 +229,6 @@ let emit_class : A.class_ * bool -> Hhas_class.t =
         | A.XhpCategory sl -> Some sl
         | _ -> None)
   in
-  let class_is_interface = ast_is_interface ast_class in
   let class_is_abstract = ast_class.A.c_kind = Ast.Cabstract in
   let class_is_final =
     ast_class.A.c_final || class_is_trait || (class_enum_type <> None) in
@@ -255,16 +258,19 @@ let emit_class : A.class_ * bool -> Hhas_class.t =
   (* TODO: communicate this without looking at the name *)
   let is_closure_class =
     String_utils.string_starts_with (snd ast_class.A.c_name) "Closure$" in
-  let has_constructor_or_invoke = List.exists class_body
+  let has_constructor_or_invoke =
+    let cls_name =
+      String.lowercase_ascii (Hhbc_id.Class.to_raw_string class_id) in
+    List.exists class_body
     (fun elt ->
       match elt with
       | A.Method m ->
-        let method_name = snd m.A.m_name in
+        let method_name = String.lowercase_ascii (snd m.A.m_name) in
         (* HasConstructor in HHVM *)
         method_name = SN.Members.__construct ||
         (* ClassNameConstructor in HHVM *)
-        not class_is_trait
-          && method_name = Hhbc_id.Class.to_raw_string class_id ||
+        not (class_is_trait || class_is_interface)
+          && method_name = cls_name ||
         is_closure_class
           && method_name = "__invoke"
       | _ -> false)
@@ -374,7 +380,7 @@ let emit_class : A.class_ * bool -> Hhas_class.t =
               make_cinit_instrs cs;
             ] in
       let instrs = make_cinit_instrs initialized_class_constants in
-      let params = [Hhas_param.make "$constName" false false None None] in
+      let params = [Hhas_param.make "$constName" false false [] None None] in
       [make_86method
         ~name:"86cinit"
         ~params

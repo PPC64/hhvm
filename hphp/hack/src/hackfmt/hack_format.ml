@@ -638,6 +638,44 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
           ]
         | _ -> handle_possible_compound_statement x.else_statement
       ]
+      | IfEndIfStatement x ->
+        let (kw, left_p, condition, right_p, colon, if_body,
+          elseif_clauses, else_clause, endif_kw, semicolon) =
+          get_if_endif_statement_children x in
+        Concat [
+          t kw;
+          Space;
+          transform_condition left_p condition right_p;
+          t colon;
+          handle_possible_compound_statement if_body;
+          handle_possible_list elseif_clauses;
+          t else_clause;
+          t endif_kw;
+          t semicolon;
+          Newline;
+        ]
+      | ElseifColonClause x ->
+        let (kw, left_p, condition, right_p, colon, body) =
+          get_elseif_colon_clause_children x
+        in
+        Concat [
+          t kw;
+          Space;
+          transform_condition left_p condition right_p;
+          t colon;
+          handle_possible_compound_statement body;
+        ]
+      | ElseColonClause x ->
+        Concat [
+          t x.else_colon_keyword;
+          match syntax x.else_colon_statement with
+          | IfStatement _ -> Concat [
+              Space;
+              t x.else_colon_statement;
+              Space;
+            ]
+          | _ -> handle_possible_compound_statement x.else_colon_statement
+        ]
     | TryStatement x ->
       (* TODO: revisit *)
       let (kw, body, catch_clauses, finally_clause) =
@@ -1527,14 +1565,16 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
   and delimited_nest
       ?(spaces=false)
       ?(split_when_children_split=true)
+      ?(force_newlines=false)
       left_delim
       right_delim
       nodes
     =
     let rule =
-      if split_when_children_split
-      then Rule.Parental
-      else Rule.Simple Cost.Base
+      match () with
+      | _ when force_newlines -> Rule.Always
+      | _ when split_when_children_split -> Rule.Parental
+      | _ -> Rule.Simple Cost.Base
     in
     Span [
       t left_delim;
@@ -1564,13 +1604,10 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
       t right_delim;
     ]
 
-  and after_each_argument ?(force_newlines=false) is_last =
-    if force_newlines
-    then Newline
-    else
-      if is_last
-      then Split
-      else space_split ()
+  and after_each_argument is_last =
+    if is_last
+    then Split
+    else space_split ()
 
   and handle_lambda_body node =
     match syntax node with
@@ -1893,9 +1930,13 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
         )
       | _ -> true
     in
-    delimited_nest ~spaces ~split_when_children_split left_p right_p [
-      transform_arg_list ~allow_trailing ~force_newlines arg_list
-    ]
+    delimited_nest
+      ~spaces
+      ~split_when_children_split
+      ~force_newlines
+      left_p
+      right_p
+      [transform_arg_list ~allow_trailing arg_list]
 
   and transform_braced_item left_p item right_p =
     delimited_nest left_p right_p [t item]
@@ -1906,25 +1947,20 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
      * account for where PHP's parser permits trailing commas, we just never add
      * them in PHP files. *)
     let allow_trailing = allow_trailing && (Env.add_trailing_commas env) in
-    let item, item_trailing = remove_trailing_trivia item in
     match syntax comma with
     | Token tok ->
       Concat [
-        Concat [
-          t item;
-          if allow_trailing then TrailingComma else Nothing;
-          transform_trailing_trivia item_trailing;
-        ];
-        Concat [
-          transform_leading_trivia (leading tok);
-          Ignore (text tok, width tok);
-          transform_trailing_trivia (trailing tok);
-        ]
+        t item;
+        transform_leading_trivia (leading tok);
+        if allow_trailing then TrailingComma true else Nothing;
+        Ignore (text tok, width tok);
+        transform_trailing_trivia (trailing tok);
       ]
     | Missing ->
+      let item, item_trailing = remove_trailing_trivia item in
       Concat [
         t item;
-        if allow_trailing then TrailingComma else Nothing;
+        if allow_trailing then TrailingComma false else Nothing;
         transform_trailing_trivia item_trailing;
       ]
     | _ -> failwith "Expected Token"
@@ -1935,9 +1971,9 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
          trailing commas in all these places reach end-of-life. *)
       [transform_trailing_comma ~allow_trailing:false item comma]
 
-  and transform_arg_list ?(allow_trailing=true) ?(force_newlines=false) items =
+  and transform_arg_list ?(allow_trailing=true) items =
     handle_possible_list items
-      ~after_each:(after_each_argument ~force_newlines)
+      ~after_each:after_each_argument
       ~handle_last:(transform_last_arg ~allow_trailing)
 
   and transform_possible_comma_list ?(allow_trailing=true) ?(spaces=false)
@@ -2256,7 +2292,7 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
         make_comment ();
         last_comment := Some (Concat [
           if !currently_leading then Newline else Space;
-          Comment ((Trivia.text triv), (Trivia.width triv));
+          SingleLineComment ((Trivia.text triv), (Trivia.width triv));
         ]);
         last_comment_was_delimited := false;
         currently_leading := false;
