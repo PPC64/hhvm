@@ -615,6 +615,9 @@ void Assembler::limmediate(const Reg64& rt, int64_t imm64,
 //////////////////////////////////////////////////////////////////////
 
 Label::~Label() {
+  if (!m_toPatch.empty()) {
+    assert(m_a && m_address && "Label had jumps but was never set");
+  }
   for (auto& ji : m_toPatch) {
     assert(ji.a->contains(ji.addr));
     ji.a->patchBranch(ji.a->toDestAddress(ji.addr), m_address);
