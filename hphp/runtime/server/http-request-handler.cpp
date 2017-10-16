@@ -115,8 +115,7 @@ void setProxyOriginPercentage(const std::string& origin, int percentage) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-IMPLEMENT_THREAD_LOCAL(AccessLog::ThreadData,
-                       HttpRequestHandler::s_accessLogThreadData);
+THREAD_LOCAL(AccessLog::ThreadData, HttpRequestHandler::s_accessLogThreadData);
 
 AccessLog HttpRequestHandler::s_accessLog(
   &(HttpRequestHandler::getAccessLogThreadData));
@@ -207,7 +206,7 @@ void HttpRequestHandler::setupRequest(Transport* transport) {
 }
 
 void HttpRequestHandler::teardownRequest(Transport* transport) noexcept {
-  SCOPE_EXIT { always_assert(MM().empty()); };
+  SCOPE_EXIT { always_assert(tl_heap->empty()); };
 
   const VirtualHost *vhost = VirtualHost::GetCurrent();
   GetAccessLog().log(transport, vhost);

@@ -376,8 +376,12 @@ class virtual ['self] iter =
     method on_Expr = self#on_expr
     method on_Omitted env = ()
     method on_Block = self#on_block
-    method on_Break env pos level_opt = self#on_Pos_t env pos
-    method on_Continue env pos level_opt = self#on_Pos_t env pos
+    method on_Break env pos level_opt =
+      self#on_Pos_t env pos;
+      self#on_option self#on_expr env level_opt
+    method on_Continue env pos level_opt =
+      self#on_Pos_t env pos;
+      self#on_option self#on_expr env level_opt
     method on_Throw = self#on_expr
     method on_Return env c0 c1 =
       self#on_Pos_t env c0;
@@ -684,7 +688,6 @@ class virtual ['self] iter =
     method on_Upincr env = ()
     method on_Updecr env = ()
     method on_Uref env = ()
-    method on_Usplat env = ()
     method on_Usilence env = ()
     method on_uop env = function
       | Utild -> self#on_Utild env
@@ -696,7 +699,6 @@ class virtual ['self] iter =
       | Upincr -> self#on_Upincr env
       | Updecr -> self#on_Updecr env
       | Uref -> self#on_Uref env
-      | Usplat -> self#on_Usplat env
       | Usilence -> self#on_Usilence env
     method on_Default = self#on_block
     method on_Case env c0 c1 =

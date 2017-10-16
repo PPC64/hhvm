@@ -327,6 +327,7 @@ struct ConstInfo {
  */
 struct FuncFamily {
   bool containsInterceptables = false;
+  bool isCtor = false;
   std::vector<borrowed_ptr<FuncInfo>> possibleFuncs;
 };
 
@@ -642,7 +643,8 @@ SString Func::name() const {
     [&] (FuncName s) { return s.name; },
     [&] (MethodName s) { return s.name; },
     [&] (borrowed_ptr<FuncInfo> fi) { return fi->first->name; },
-    [&] (borrowed_ptr<FuncFamily> fa) {
+    [&] (borrowed_ptr<FuncFamily> fa) -> SString {
+      if (fa->isCtor) return s_construct.get();
       auto const name = fa->possibleFuncs.front()->first->name;
       if (debug) {
         for (DEBUG_ONLY auto& f : fa->possibleFuncs) {
@@ -757,6 +759,7 @@ struct IndexData {
   ~IndexData() = default;
 
   bool frozen{false};
+  bool ever_frozen{false};
   bool any_interceptable_functions{false};
 
   std::unique_ptr<ArrayTypeTable::Builder> arrTableBuilder;
@@ -847,6 +850,13 @@ struct IndexData {
    * bytecode could be modified while we do so.
    */
   ContextRetTyMap foldableReturnTypeMap;
+
+  /*
+   * Vector of class aliases that need to be added to the index when
+   * its safe to do so (see update_class_aliases).
+   */
+  std::vector<std::pair<SString, SString>> pending_class_aliases;
+  std::mutex pending_class_aliases_mutex;
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -896,48 +906,17 @@ void find_deps(IndexData& data,
 
 bool build_cls_info_rec(borrowed_ptr<ClassInfo> rleaf,
                         borrowed_ptr<const ClassInfo> rparent,
-                        bool directIface) {
+                        bool fromTrait) {
   if (!rparent) return true;
 
   auto const isIface = rparent->cls->attrs & AttrInterface;
 
-  /*
-   * Make a table of all the constants on this class.
-   *
-   * Duplicate class constants override parent class constants, but
-   * its an error for two different interfaces to define the same
-   * constant, or for a class to override a constant thats defined in
-   * one of its declared interfaces.
-   *
-   */
-  for (auto& c : rparent->cls->constants) {
-    auto& cptr = rleaf->clsConstants[c.name];
-    if (!cptr) {
-      cptr = &c;
-      continue;
-    }
-
-    if (isIface &&
-        cptr->val.hasValue() &&
-        c.val.hasValue() &&
-        cptr->cls != rparent->cls) {
-      if ((cptr->cls->attrs & AttrInterface) || directIface) {
-        ITRACE(2,
-               "build_cls_info_rec failed for `{}' because "
-               "`{}' was defined by both `{}' and `{}'",
-               rleaf->cls->name, c.name,
-               rparent->cls->name, cptr->cls->name);
-        return false;
-      }
-    }
-  }
-
   if (!build_cls_info_rec(rleaf, rparent->parent, false)) return false;
   for (auto const iface : rparent->declInterfaces) {
-    if (!build_cls_info_rec(rleaf, iface, rparent == rleaf)) return false;
+    if (!build_cls_info_rec(rleaf, iface, fromTrait)) return false;
   }
   for (auto const trait : rparent->usedTraits) {
-    if (!build_cls_info_rec(rleaf, trait, false)) return false;
+    if (!build_cls_info_rec(rleaf, trait, true)) return false;
   }
 
   /*
@@ -945,6 +924,47 @@ bool build_cls_info_rec(borrowed_ptr<ClassInfo> rleaf,
    */
   if (isIface) {
     rleaf->implInterfaces[rparent->cls->name] = rparent;
+  }
+
+  for (auto& c : rparent->cls->constants) {
+    auto& cptr = rleaf->clsConstants[c.name];
+    if (!cptr) {
+      cptr = &c;
+      continue;
+    }
+
+    // Same constant (from an interface via two different paths) is ok
+    if (cptr->cls == rparent->cls) continue;
+
+    if (cptr->isTypeconst != c.isTypeconst) {
+      ITRACE(2,
+             "build_cls_info_rec failed for `{}' because `{}' was defined by "
+             "`{}' as a {}constant and by `{}' as a {}constant\n",
+             rleaf->cls->name, c.name,
+             rparent->cls->name, c.isTypeconst ? "type " : "",
+             cptr->cls->name, cptr->isTypeconst ? "type " : "");
+      return false;
+    }
+
+    // Ignore abstract constants
+    if (!c.val) continue;
+
+    if (cptr->val) {
+      // Constants from interfaces implemented by traits silently lose
+      if (fromTrait) continue;
+
+      // A constant from an interface collides with an existing constant.
+      if (isIface) {
+        ITRACE(2,
+               "build_cls_info_rec failed for `{}' because "
+               "`{}' was defined by both `{}' and `{}'\n",
+               rleaf->cls->name, c.name,
+               rparent->cls->name, cptr->cls->name);
+        return false;
+      }
+    }
+
+    cptr = &c;
   }
 
   /*
@@ -1282,7 +1302,7 @@ void resolve_combinations(IndexData& index,
   if (cls->parentName) {
     cinfo->parent   = env.lookup(cls->parentName);
     cinfo->baseList = cinfo->parent->baseList;
-    if (cinfo->parent->cls->attrs & AttrInterface) {
+    if (cinfo->parent->cls->attrs & (AttrInterface | AttrTrait)) {
       ITRACE(2,
              "Resolve combinations failed for `{}' because "
              "its parent `{}' is not a class\n",
@@ -1322,6 +1342,9 @@ void resolve_combinations(IndexData& index,
   if (Trace::moduleEnabled(Trace::hhbbc_index, 3)) {
     for (auto const DEBUG_ONLY& iface : cinfo->implInterfaces) {
       ITRACE(3, "    implements: {}\n", iface.second->cls->name);
+    }
+    for (auto const DEBUG_ONLY& trait : cinfo->usedTraits) {
+      ITRACE(3, "          uses: {}\n", trait->cls->name);
     }
   }
   index.allClassInfos.push_back(std::move(cinfo));
@@ -1365,22 +1388,34 @@ void compute_subclass_list(IndexData& index) {
 }
 
 void define_func_family(IndexData& index, borrowed_ptr<ClassInfo> cinfo,
-                        SString name, borrowed_ptr<const php::Func> /*func*/) {
+                        SString name, borrowed_ptr<const php::Func> func) {
   index.funcFamilies.push_back(std::make_unique<FuncFamily>());
   auto const family = borrow(index.funcFamilies.back());
-
+  family->isCtor = func == cinfo->ctor;
   for (auto& cleaf : cinfo->subclassList) {
-    auto const leafFnIt = cleaf->methods.find(name);
-    if (leafFnIt == end(cleaf->methods)) continue;
-    if (leafFnIt->second.func->attrs & AttrInterceptable) {
+    auto const leafFn = [&] () -> borrowed_ptr<const php::Func> {
+      if (family->isCtor) return cleaf->ctor;
+      auto const leafFnIt = cleaf->methods.find(name);
+      if (leafFnIt == end(cleaf->methods)) return nullptr;
+      return leafFnIt->second.func;
+    }();
+    if (!leafFn) continue;
+    if (leafFn->attrs & AttrInterceptable) {
       family->containsInterceptables = true;
     }
-    auto const finfo = create_func_info(index, leafFnIt->second.func);
+    auto const finfo = create_func_info(index, leafFn);
     family->possibleFuncs.push_back(finfo);
   }
 
   std::sort(begin(family->possibleFuncs), end(family->possibleFuncs),
-            [] (const FuncInfo* a, const FuncInfo* b) {
+            [&] (const FuncInfo* a, const FuncInfo* b) {
+              // We want a canonical order for the family. Putting the
+              // one corresponding to cinfo makes sense, because the
+              // first one is used as the name for FCallD, after that,
+              // sort by name so that different case spellings come in
+              // the same order.
+              if (a == b || b->first == func) return false;
+              if (a->first == func) return true;
               if (auto d = a->first->name->compare(b->first->name)) {
                 return d < 0;
               }
@@ -1417,8 +1452,13 @@ void define_func_families(IndexData& index) {
     for (auto& kv : cinfo->methods) {
       auto const func = kv.second.func;
 
-      if (func->attrs & (AttrPrivate|AttrNoOverride)) continue;
-      if (is_special_method_name(func->name))         continue;
+      if (func->attrs & AttrNoOverride) continue;
+      if (func == cinfo->ctor) {
+        define_func_family(index, borrow(cinfo), s_construct.get(), func);
+        continue;
+      }
+      if (func->attrs & AttrPrivate) continue;
+      if (is_special_method_name(func->name)) continue;
 
       define_func_family(index, borrow(cinfo), kv.first, func);
     }
@@ -1733,15 +1773,24 @@ void mark_no_override_methods(IndexData& index) {
     for (auto& ancestor : cinfo->baseList) {
       if (ancestor == cinfo.get()) continue;
 
+      auto removeNoOverride = [] (const php::Func* func) {
+        if (func->attrs & AttrNoOverride) {
+          FTRACE(2, "Removing AttrNoOverride on {}::{}\n",
+                 func->cls->name, func->name);
+          attribute_setter(func->attrs, false, AttrNoOverride);
+        }
+      };
+
       for (auto& derivedMethod : cinfo->methods) {
-        auto const it = ancestor->methods.find(derivedMethod.first);
-        if (it == end(ancestor->methods)) continue;
-        if (it->second.func != derivedMethod.second.func) {
-          if (it->second.func->attrs & AttrNoOverride) {
-            FTRACE(2, "Removing AttrNoOverride on {}::{}\n",
-              it->second.func->cls->name,
-              it->second.func->name);
-            attribute_setter(it->second.func->attrs, false, AttrNoOverride);
+        if (derivedMethod.second.func == cinfo->ctor) {
+          if (ancestor->ctor && ancestor->ctor != cinfo->ctor) {
+            removeNoOverride(ancestor->ctor);
+          }
+        } else {
+          auto const it = ancestor->methods.find(derivedMethod.first);
+          if (it == end(ancestor->methods)) continue;
+          if (it->second.func != derivedMethod.second.func) {
+            removeNoOverride(it->second.func);
           }
         }
       }
@@ -1774,6 +1823,10 @@ void check_invariants(borrowed_ptr<const ClassInfo> cinfo) {
   for (auto& m : cinfo->cls->methods) {
     always_assert(cinfo->methods.count(m->name));
     if (m->attrs & (AttrNoOverride|AttrPrivate)) continue;
+    if (borrow(m) == cinfo->ctor) {
+      always_assert(cinfo->methodFamilies.count(s_construct.get()));
+      continue;
+    }
     if (is_special_method_name(m->name)) continue;
     always_assert(cinfo->methodFamilies.count(m->name));
   }
@@ -1829,6 +1882,7 @@ void check_invariants(IndexData& data) {
   // name.
   for (auto& ffam : data.funcFamilies) {
     always_assert(!ffam->possibleFuncs.empty());
+    if (ffam->isCtor) continue;
     auto const name = ffam->possibleFuncs.front()->first->name;
     for (auto& finfo : ffam->possibleFuncs) {
       always_assert(finfo->first->name->isame(name));
@@ -2068,7 +2122,8 @@ PublicSPropEntry lookup_public_static_impl(
 
 //////////////////////////////////////////////////////////////////////
 
-Index::Index(borrowed_ptr<php::Program> program)
+Index::Index(borrowed_ptr<php::Program> program,
+             rebuild* rebuild_exception)
   : m_data(std::make_unique<IndexData>())
 {
   trace_time tracer("create index");
@@ -2078,6 +2133,14 @@ Index::Index(borrowed_ptr<php::Program> program)
   m_data->arrTableBuilder.reset(new ArrayTypeTable::Builder());
 
   add_system_constants_to_index(*m_data);
+
+  if (rebuild_exception) {
+    for (auto& ca : rebuild_exception->class_aliases) {
+      m_data->classAliases.insert(ca.first);
+      m_data->classAliases.insert(ca.second);
+    }
+    rebuild_exception->class_aliases.clear();
+  }
 
   for (auto& u : program->units) {
     add_unit_to_index(*m_data, *u);
@@ -2196,6 +2259,32 @@ void Index::mark_persistent_classes_and_functions(php::Program& program) {
                      check_persistent(*c),
                      AttrPersistent);
   }
+}
+
+bool Index::register_class_alias(SString orig, SString alias) const {
+  auto check = [&] (SString name) {
+    if (m_data->classAliases.count(name)) return true;
+
+    auto const classes = find_range(m_data->classInfo, name);
+    if (begin(classes) != end(classes)) {
+      return !(begin(classes)->second->cls->attrs & AttrUnique);
+    }
+    auto const tas = find_range(m_data->typeAliases, name);
+    if (begin(tas) == end(tas)) return true;
+    return !(begin(tas)->second->attrs & AttrUnique);
+  };
+  if (check(orig) && check(alias)) return true;
+  if (m_data->ever_frozen) return false;
+  std::lock_guard<std::mutex> lock{m_data->pending_class_aliases_mutex};
+  m_data->pending_class_aliases.emplace_back(orig, alias);
+  return true;
+}
+
+void Index::update_class_aliases() {
+  if (m_data->pending_class_aliases.empty()) return;
+  FTRACE(1, "Index needs rebuilding due to {} class aliases\n",
+         m_data->pending_class_aliases.size());
+  throw rebuild { std::move(m_data->pending_class_aliases) };
 }
 
 const CompactVector<borrowed_ptr<const php::Class>>*
@@ -2595,11 +2684,20 @@ res::Func Index::resolve_method(Context ctx,
 }
 
 folly::Optional<res::Func>
-Index::resolve_ctor(Context /*ctx*/, res::Class rcls) const {
+Index::resolve_ctor(Context ctx, res::Class rcls, bool exact) const {
   auto const cinfo = rcls.val.right();
   if (!cinfo || !cinfo->ctor) return folly::none;
-  if (cinfo->ctor->attrs & AttrInterceptable) return folly::none;
-  return do_resolve(cinfo->ctor);
+  if (exact || cinfo->ctor->attrs & AttrNoOverride) {
+    if (cinfo->ctor->attrs & AttrInterceptable) return folly::none;
+    return do_resolve(cinfo->ctor);
+  }
+
+  if (!options.FuncFamilies) return folly::none;
+
+  auto const famIt = cinfo->methodFamilies.find(s_construct.get());
+  if (famIt == end(cinfo->methodFamilies)) return folly::none;
+  if (famIt->second->containsInterceptables) return folly::none;
+  return res::Func { this, famIt->second };
 }
 
 template<class FuncRange>
@@ -2754,8 +2852,14 @@ folly::Optional<Type> Index::get_type_for_annotated_type(
        * typehints (ex. "(function(..): ..)" typehints).
        */
       return TGen;
-    case AnnotMetaType::Self:
     case AnnotMetaType::This:
+      if (auto s = selfCls(ctx)) {
+        if (!(*s).couldBeOverriden()) {
+          return subObj(*s);
+        }
+      }
+      break;
+    case AnnotMetaType::Self:
       if (auto s = selfCls(ctx)) return subObj(*s);
       break;
     case AnnotMetaType::Parent:
@@ -3288,7 +3392,7 @@ void Index::init_return_type(const php::Func* func) {
 
   auto const constraint = func->retTypeConstraint;
   if (constraint.isSoft() ||
-      (!RuntimeOption::EvalCheckThisTypeHints && constraint.isThis())) {
+      (RuntimeOption::EvalThisTypeHintLevel != 3 && constraint.isThis())) {
     return;
   }
 
@@ -3495,6 +3599,7 @@ bool Index::frozen() const {
 
 void Index::freeze() {
   m_data->frozen = true;
+  m_data->ever_frozen = true;
 }
 
 void Index::thaw() {

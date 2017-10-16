@@ -97,6 +97,7 @@ struct ObjectData : Countable, type_scan::MarkCollectable<ObjectData> {
 
   enum {
     RealPropCreate = 1,    // Property should be created if it doesn't exist
+    RealPropBind = 2,      // Property should be boxed
     RealPropUnchecked = 8, // Don't check property accessibility
     RealPropExist = 16,    // For property_exists
   };
@@ -374,7 +375,14 @@ struct ObjectData : Countable, type_scan::MarkCollectable<ObjectData> {
                                       bool copyDynArray);
 
  private:
-  template<MOpMode mode>
+  enum class PropMode : int {
+    ReadNoWarn,
+    ReadWarn,
+    DimForWrite,
+    Bind,
+  };
+
+  template<PropMode mode>
   TypedValue* propImpl(TypedValue* tvRef, const Class* ctx,
                        const StringData* key);
 
@@ -400,23 +408,10 @@ struct ObjectData : Countable, type_scan::MarkCollectable<ObjectData> {
                      Array& props, std::vector<bool>& inserted) const;
 
  public:
-  TypedValue* prop(
-    TypedValue* tvRef,
-    const Class* ctx,
-    const StringData* key
-  );
-
-  TypedValue* propD(
-    TypedValue* tvRef,
-    const Class* ctx,
-    const StringData* key
-  );
-
-  TypedValue* propW(
-    TypedValue* tvRef,
-    const Class* ctx,
-    const StringData* key
-  );
+  TypedValue* prop(TypedValue* tvRef, const Class* ctx, const StringData* key);
+  TypedValue* propW(TypedValue* tvRef, const Class* ctx, const StringData* key);
+  TypedValue* propD(TypedValue* tvRef, const Class* ctx, const StringData* key);
+  TypedValue* propB(TypedValue* tvRef, const Class* ctx, const StringData* key);
 
   bool propIsset(const Class* ctx, const StringData* key);
   bool propEmpty(const Class* ctx, const StringData* key);
@@ -521,14 +516,14 @@ typename std::enable_if<
   std::is_convertible<T*, ObjectData*>::value,
   req::ptr<T>
 >::type make(Args&&... args) {
-  auto const mem = MM().mallocSmallSize(sizeof(T));
+  auto const mem = tl_heap->mallocSmallSize(sizeof(T));
   (void)type_scan::getIndexForMalloc<T>(); // ensure T* ptrs are interesting
   try {
     auto t = new (mem) T(std::forward<Args>(args)...);
     assert(t->hasExactlyOneRef());
     return req::ptr<T>::attach(t);
   } catch (...) {
-    MM().freeSmallSize(mem, sizeof(T));
+    tl_heap->freeSmallSize(mem, sizeof(T));
     throw;
   }
 }

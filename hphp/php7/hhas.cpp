@@ -18,6 +18,8 @@
 
 #include "hphp/php7/analysis.h"
 #include "hphp/php7/cfg.h"
+#include "hphp/php7/options.h"
+
 #include "hphp/util/match.h"
 
 #include <folly/Format.h>
@@ -300,12 +302,22 @@ struct AssemblyVisitor : public boost::static_visitor<void>
 
   void block(Block* blk) override {
     label(blk);
-    for (const auto& bc : blk->code) {
-      bc.visit(*this);
-    }
-    for (const auto& ex : blk->exits) {
-      exit(ex);
-    }
+    blk->visit(
+      [&](uint32_t lineno) {
+        if (g_opts.linenoEnabled) {
+          doIndent();
+          // We list -1 as the character position since PHP's parser does not
+          // include this information.
+          folly::format(&out, ".srcloc {}:-1,{}:-1;\n", lineno, lineno);
+        }
+      },
+      [&](const auto& bc) {
+        bc.visit(*this);
+      },
+      [&](const auto& ex) {
+        ex.visit(*this);
+      }
+    );
   }
 
   void label(Block* blk) {
@@ -313,7 +325,7 @@ struct AssemblyVisitor : public boost::static_visitor<void>
     // actually emit the instruction
     if (nextUnconditionalDestination
         && nextUnconditionalDestination != blk) {
-      bytecode(bc::Jmp{nextUnconditionalDestination});
+      dump(bc::Jmp{nextUnconditionalDestination});
     }
     nextUnconditionalDestination = nullptr;
     doIndent();
@@ -322,31 +334,26 @@ struct AssemblyVisitor : public boost::static_visitor<void>
 
   void end() {
     if (nextUnconditionalDestination) {
-      bytecode(bc::Jmp{nextUnconditionalDestination});
+      dump(bc::Jmp{nextUnconditionalDestination});
       nextUnconditionalDestination = nullptr;
     }
   }
 
-  void operator()(const bc::Jmp& j) {
+  void bytecode(const bc::Jmp& j) {
     nextUnconditionalDestination = j.imm1;
   }
 
-  void operator()(const bc::JmpNS& j) {
+  void bytecode(const bc::JmpNS& j) {
     nextUnconditionalDestination = j.imm1;
-  }
-
-  template<class Exit>
-  void operator()(const Exit& e) {
-    bytecode(e);
   }
 
   void bytecode(const Bytecode& bc) {
-    doIndent();
-    bc.visit(instr);
+    dump(bc);
   }
 
-  void exit(const ExitOp& exit) {
-    boost::apply_visitor(*this, exit);
+  void dump(const Bytecode& bc) {
+    doIndent();
+    bc.visit(instr);
   }
 
   std::string& out;
@@ -354,6 +361,14 @@ struct AssemblyVisitor : public boost::static_visitor<void>
   Block* nextUnconditionalDestination{nullptr};
   unsigned indent{1};
 };
+
+std::string dump_lineno(const Function& func) {
+  std::string out;
+  if (g_opts.linenoEnabled) {
+    folly::format(&out, "({},{}) ", func.startLineno, func.endLineno);
+  }
+  return out;
+}
 
 std::string dump_pseudomain(const Function& func) {
   std::string out;
@@ -366,6 +381,7 @@ std::string dump_pseudomain(const Function& func) {
 std::string dump_function(const Function& func) {
   std::string out;
   out.append(".function ");
+  out.append(dump_lineno(func));
   out.append(func.name);
   out.append("(");
   for (const auto& param : func.params) {
@@ -379,14 +395,64 @@ std::string dump_function(const Function& func) {
   return out;
 }
 
+std::string dump_attrs(Attr attr) {
+  std::string out;
+  if (attr & Attr::AttrPublic) {
+    out.append(" public");
+  }
+  if (attr & Attr::AttrProtected) {
+    out.append(" protected");
+  }
+  if (attr & Attr::AttrPrivate) {
+    out.append(" private");
+  }
+  if (attr & Attr::AttrStatic) {
+    out.append(" static");
+  }
+  if (attr & Attr::AttrFinal) {
+    out.append(" final");
+  }
+  if (attr & Attr::AttrTrait) {
+    out.append(" trait");
+  }
+  if (attr & Attr::AttrInterface) {
+    out.append(" interface");
+  }
+  if (attr & Attr::AttrAbstract) {
+    out.append(" abstract");
+  }
+  return out;
+}
+
 std::string dump_class(const Class& cls) {
   std::string out;
   out.append(".class ");
+  if (cls.attr != 0) {
+    out.append("[");
+    out.append(dump_attrs(cls.attr));
+    out.append(" ] ");
+  }
   out.append(cls.name);
   if (cls.parentName) {
     folly::format(&out, " extends {}", *cls.parentName);
   }
+  if (!cls.implements.empty()) {
+    out.append(" implements (");
+    for (const auto& name : cls.implements) {
+      out.append(" ");
+      out.append(name);
+    }
+    out.append(" )");
+  }
   out.append(" {\n");
+  if (!cls.traits.empty()) {
+    out.append("  .use");
+    for (const auto& trait : cls.traits) {
+      out.append(" ");
+      out.append(trait);
+    }
+    out.append(";\n");
+  }
   for (const auto& property : cls.properties) {
     out.append(dump_property(property));
   }
@@ -400,18 +466,7 @@ std::string dump_class(const Class& cls) {
 std::string dump_property(const Class::Property& prop) {
   std::string out;
   out.append(".property [");
-  if (prop.attr & Attr::AttrPublic) {
-    out.append(" public");
-  }
-  if (prop.attr & Attr::AttrProtected) {
-    out.append(" protected");
-  }
-  if (prop.attr & Attr::AttrPrivate) {
-    out.append(" private");
-  }
-  if (prop.attr & Attr::AttrStatic) {
-    out.append(" static");
-  }
+  out.append(dump_attrs(prop.attr));
   out.append(" ] ");
 
   out.append(prop.name);
@@ -424,27 +479,9 @@ std::string dump_property(const Class::Property& prop) {
 std::string dump_method(const Function& func) {
   std::string out;
   out.append(".method [");
-
-  if (func.attr & Attr::AttrPublic) {
-    out.append(" public");
-  }
-  if (func.attr & Attr::AttrProtected) {
-    out.append(" protected");
-  }
-  if (func.attr & Attr::AttrPrivate) {
-    out.append(" private");
-  }
-  if (func.attr & Attr::AttrStatic) {
-    out.append(" static");
-  }
-  if (func.attr & Attr::AttrAbstract) {
-    out.append(" abstract");
-  }
-  if (func.attr & Attr::AttrFinal) {
-    out.append(" final");
-  }
-
+  out.append(dump_attrs(func.attr));
   out.append(" ] ");
+  out.append(dump_lineno(func));
   out.append(func.name);
   out.append("(");
   for (const auto& param : func.params) {

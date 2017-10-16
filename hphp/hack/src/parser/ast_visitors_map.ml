@@ -541,9 +541,13 @@ class virtual ['self] map =
     method on_Block env c0 =
       let r0 = self#on_block env c0 in Block r0
     method on_Break env c0 level_opt =
-      let r0 = self#on_Pos_t env c0 in Break (r0, level_opt)
+      let r0 = self#on_Pos_t env c0 in
+      let r1 = self#on_option self#on_expr env level_opt in
+      Break (r0, r1)
     method on_Continue env c0 level_opt =
-      let r0 = self#on_Pos_t env c0 in Continue (r0, level_opt)
+      let r0 = self#on_Pos_t env c0 in
+      let r1 = self#on_option self#on_expr env level_opt in
+      Continue (r0, r1)
     method on_Throw env c0 =
       let r0 = self#on_expr env c0 in Throw r0
     method on_Return env c0 c1 =
@@ -896,7 +900,6 @@ class virtual ['self] map =
     method on_Upincr env = Upincr
     method on_Updecr env = Updecr
     method on_Uref env = Uref
-    method on_Usplat env = Usplat
     method on_Usilence env = Usilence
     method on_uop env this =
       match this with
@@ -909,7 +912,6 @@ class virtual ['self] map =
       | Upincr -> self#on_Upincr env
       | Updecr -> self#on_Updecr env
       | Uref -> self#on_Uref env
-      | Usplat -> self#on_Usplat env
       | Usilence -> self#on_Usilence env
     method on_Default env c0 =
       let r0 = self#on_block env c0 in Default r0

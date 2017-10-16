@@ -109,8 +109,6 @@ void ClassStatement::onParse(AnalysisResultConstRawPtr ar, FileScopePtr fs) {
     return;
   }
 
-  classScope->setPersistent(false);
-
   if (m_stmt) {
     MethodStatementPtr constructor = nullptr;
     MethodStatementPtr destructor = nullptr;
@@ -201,8 +199,6 @@ std::string ClassStatement::getName() const {
 }
 
 void ClassStatement::analyzeProgram(AnalysisResultConstRawPtr ar) {
-  checkVolatile(ar);
-
   if (ar->getPhase() != AnalysisResult::AnalyzeAll) return;
 
   std::vector<std::string> bases;
@@ -219,9 +215,6 @@ void ClassStatement::analyzeProgram(AnalysisResultConstRawPtr ar) {
                         shared_from_this(),
                         "You are extending " + cls->getOriginalName() +
                           " which is an interface or a trait");
-      }
-      if (cls->isUserClass()) {
-        cls->addUse(getScope(), BlockScope::UseKindParentRef);
       }
     }
   }

@@ -237,7 +237,7 @@ private:
 ///////////////////////////////////////////////////////////////////////////////
 // Data
 
-IMPLEMENT_THREAD_LOCAL(PCREglobals, tl_pcre_globals);
+THREAD_LOCAL(PCREglobals, tl_pcre_globals);
 
 static PCRECache s_pcreCache;
 
@@ -851,6 +851,7 @@ pcre_get_compiled_regex_cache(PCRECache::Accessor& accessor,
       if ((!RuntimeOption::EvalJitNoGdb ||
            RuntimeOption::EvalJitUseVtuneAPI ||
            RuntimeOption::EvalPerfPidMap) &&
+          extra &&
           extra->executable_jit != nullptr) {
         size_t size;
         pcre_fullinfo(re, extra, PCRE_INFO_JITSIZE, &size);

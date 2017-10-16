@@ -358,7 +358,7 @@ SSATmp* opt_in_array(IRGS& env, const ParamPrep& params) {
   ArrayInit flipped{haystack->size(), ArrayInit::Map{}};
 
   for (auto iter = ArrayIter{haystack}; iter; ++iter) {
-    auto const key = tvToCell(iter.secondRval());
+    auto const key = iter.secondRval().unboxed();
     int64_t ignoredInt;
     double ignoredDbl;
 
@@ -630,7 +630,7 @@ SSATmp* opt_foldable(IRGS& env,
   }
   if (variadicArgs) {
     for (auto i = 0; i < numVariadicArgs; i++) {
-      args.append(variadicArgs->get(i));
+      args.append(variadicArgs->get(i).tv());
     }
   }
 

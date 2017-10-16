@@ -162,12 +162,6 @@ public:
   void setRedeclaring(AnalysisResultConstRawPtr ar, int redecId);
   bool isRedeclaring() const { return m_redeclaring >= 0;}
 
-  /* For class_exists */
-  void setVolatile();
-  bool isVolatile() const { return m_volatile; }
-  bool isPersistent() const { return m_persistent; }
-  void setPersistent(bool p) { m_persistent = p; }
-
   Derivation derivesFromRedeclaring() const {
     return m_derivesFromRedeclaring;
   }
@@ -465,6 +459,17 @@ private:
         cs->getOriginalName().c_str()
       );
     }
+    template <class Stmt>
+    static void errorMultiplyExcluded(Stmt stmt,
+                                      const std::string& traitName,
+                                      const std::string& methName) {
+      stmt->analysisTimeFatal(
+        Compiler::InconsistentInsteadOf,
+        Strings::MULTIPLY_EXCLUDED,
+        traitName.c_str(),
+        methName.c_str()
+      );
+    }
   };
 
   friend struct TMIOps;
@@ -512,8 +517,6 @@ private:
     BEING_FLATTENED,
     FLATTENED
   } m_traitStatus;
-  unsigned m_volatile:1; // for class_exists
-  unsigned m_persistent:1;
   int32_t m_numDeclMethods{-1};
 
   // holds the fact that accessing this class declaration is a fatal error

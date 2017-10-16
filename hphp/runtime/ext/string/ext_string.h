@@ -185,8 +185,6 @@ Variant HHVM_FUNCTION(convert_uuencode,
                       const String& data);
 String HHVM_FUNCTION(str_rot13,
                      const String& str);
-int64_t HHVM_FUNCTION(crc32,
-                      const String& str);
 String HHVM_FUNCTION(crypt,
                      const String& str,
                      const String& salt = "");
@@ -219,8 +217,7 @@ Variant HHVM_FUNCTION(setlocale,
                       const Variant& locale,
                       const Array& _argv = null_array);
 Array HHVM_FUNCTION(localeconv);
-String HHVM_FUNCTION(nl_langinfo,
-                     int item);
+Variant HHVM_FUNCTION(nl_langinfo, int item);
 
 ///////////////////////////////////////////////////////////////////////////////
 // input/output

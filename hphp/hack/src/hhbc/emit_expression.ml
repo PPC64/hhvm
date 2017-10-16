@@ -159,7 +159,7 @@ let istype_op id =
   | _ -> None
 
 (* See EmitterVisitor::getPassByRefKind in emitter.cpp *)
-let get_passByRefKind expr =
+let get_passByRefKind is_splatted expr  =
   let open PassByRefKind in
   let rec from_non_list_assignment permissive_kind expr =
     match snd expr with
@@ -170,7 +170,6 @@ let get_passByRefKind expr =
     | A.Array_get(_, Some _) -> permissive_kind
     | A.Binop(A.Eq _, _, _) -> WarnOnCell
     | A.Unop((A.Uincr | A.Udecr | A.Usilence), _) -> WarnOnCell
-    | A.Unop((A.Usplat, _)) -> AllowCell
     | A.Call((_, A.Id (_, "eval")), _, [_], []) ->
       WarnOnCell
     | A.Call((_, A.Id (_, "array_key_exists")), _, [_; _], []) ->
@@ -181,7 +180,7 @@ let get_passByRefKind expr =
       AllowCell
     | A.Xml _ ->
       AllowCell
-    | _ -> ErrorOnCell in
+    | _ -> if is_splatted then AllowCell else ErrorOnCell in
   from_non_list_assignment AllowCell expr
 
 let get_queryMOpMode need_ref op =
@@ -202,8 +201,14 @@ let is_legal_lval_op_on_this op =
   | LValOp.IncDec _ -> true
   | _ -> false
 
+let check_shape_key name =
+  if String.length name > 0 && String_utils.is_decimal_digit name.[0]
+  then Emit_fatal.raise_fatal_parse
+    Pos.none "Shape key names may not start with integers"
+
 let extract_shape_field_name_pstring = function
-  | A.SFlit p -> A.String p
+  | A.SFlit (_, s as p) ->
+    check_shape_key s; A.String p
   | A.SFclass_const (id, p) -> A.Class_const (id, p)
 
 let rec expr_and_new env instr_to_add_new instr_to_add = function
@@ -334,18 +339,18 @@ and emit_maybe_classname env (p,name) with_string with_instr =
     let e_id, _ =
       Hhbc_id.Class.elaborate_id (Emit_env.get_namespace env) (p,s) in
     with_string e_id in
-  if name = SN.Classes.cStatic then
+  if SU.is_static name then
     let get_static =
       gather [ instr_fcallbuiltin 0 0 "get_called_class"; instr_unboxr_nop ] in
     with_instr get_static
-  else if name = SN.Classes.cSelf || name = SN.Classes.cParent then
+  else if SU.is_self name || SU.is_parent name then
     let cls = Scope.get_class (Emit_env.get_scope env) in
     match cls with
     | Some c when c.A.c_kind = A.Ctrait ->
       let get_cls =
-        if name = SN.Classes.cSelf then instr_self else instr_parent in
+        if SU.is_self name then instr_self else instr_parent in
       with_instr (gather [get_cls; instr_clsrefname])
-    | Some c when name = SN.Classes.cSelf -> from_str (snd c.A.c_name)
+    | Some c when SU.is_self name -> from_str (snd c.A.c_name)
     | Some c ->
         begin match c.A.c_extends with
         | (_, A.Happly ((_, parent), _)) :: _ -> from_str parent
@@ -517,7 +522,8 @@ and emit_load_class_ref env cexpr =
 
 and emit_load_class_const env cexpr id =
   let load_const =
-    if id = SN.Members.mClass then instr (IMisc (ClsRefName 0))
+    if SU.is_class id
+    then instr (IMisc (ClsRefName 0))
     else instr (ILitConst (ClsCns (Hhbc_id.Const.from_ast_name id, 0)))
   in
   gather [
@@ -572,7 +578,7 @@ and emit_class_const env cid (_, id) =
   | Class_id cid ->
     let fq_id, _id_opt =
       Hhbc_id.Class.elaborate_id (Emit_env.get_namespace env) cid in
-    if id = SN.Members.mClass
+    if SU.is_class id
     then instr_string (Hhbc_id.Class.to_raw_string fq_id)
     else instr (ILitConst (ClsCnsD (Hhbc_id.Const.from_ast_name id, fq_id)))
   | _ ->
@@ -659,10 +665,11 @@ and emit_xhp env p id attributes children =
    *  3) filename, for debugging
    *  4) line number, for debugging
    *)
-  let convert_xml_attr (name, v) = (A.SFlit name, v) in
-  let attributes = List.map ~f:convert_xml_attr attributes in
+  let convert_attr (name, v) = (A.SFlit name, Html_entities.decode_expr v) in
+  let attributes = List.map ~f:convert_attr attributes in
   let attribute_map = p, A.Shape attributes in
-  let children_vec = make_varray p children in
+  let dec_children = List.map ~f:Html_entities.decode_expr children in
+  let children_vec = make_varray p dec_children in
   let filename = p, A.Id (p, "__FILE__") in
   let line = p, A.Id (p, "__LINE__") in
   emit_expr ~need_ref:false env @@
@@ -965,7 +972,8 @@ and emit_expr env (pos, expr_ as expr) ~need_ref =
   | A.Lvarvar (n, id) -> emit_lvarvar ~need_ref n id
   | A.Id_type_arguments (id, _) -> emit_id env id
   | A.Omitted -> empty
-  | A.Unsafeexpr e -> emit_expr ~need_ref env e
+  | A.Unsafeexpr _ ->
+    failwith "Unsafe expression should be removed during closure conversion"
   | A.Suspend _ ->
     failwith "Codegen for 'suspend' operator is not supported"
   | A.List _ ->
@@ -1308,6 +1316,11 @@ and emit_quiet_expr env (_, expr_ as expr) =
  * then this is the i'th parameter to a function
  *)
 and emit_array_get ~need_ref env param_num_hint_opt qop base_expr opt_elem_expr =
+  (* Disallow use of array(..)[] *)
+  match base_expr, opt_elem_expr with
+  | (pos, A.Array _), None ->
+    Emit_fatal.raise_fatal_parse pos "Can't use array() as base in write context"
+  | _ ->
   let mode = get_queryMOpMode need_ref qop in
   let elem_expr_instrs, elem_stack_size = emit_elem_instrs env opt_elem_expr in
   let param_num_opt = Option.map ~f:(fun (n, _h) -> n) param_num_hint_opt in
@@ -1380,10 +1393,8 @@ and emit_obj_get ~need_ref env param_num_hint_opt qop expr prop null_flavor =
     ]
 
 and is_special_class_constant_accessed_with_class_id (_, cName) id =
-  id = SN.Members.mClass &&
-  cName <> SN.Classes.cSelf &&
-  cName <> SN.Classes.cParent &&
-  cName <> SN.Classes.cStatic
+  SU.is_class id &&
+  not (SU.is_self cName || SU.is_parent cName || SU.is_static cName)
 
 and emit_elem_instrs env opt_elem_expr =
   match opt_elem_expr with
@@ -1641,7 +1652,7 @@ and emit_base ~is_object ~notice env mode base_offset param_num_opt (_, expr_ as
                    then BaseR base_offset else BaseC base_offset)),
      1
 
-and emit_arg env i (pos, expr_ as expr) =
+and emit_arg env i is_splatted (pos, expr_ as expr) =
   let force_hh =
     Hhbc_options.enable_hiphop_syntax !Hhbc_options.compiler_options in
   let is_hh = Emit_env.is_hh_file () in
@@ -1653,7 +1664,20 @@ and emit_arg env i (pos, expr_ as expr) =
   let expr_ = match expr_ with
   | A.Unop (A.Uref, (_, e)) -> e
   | _ -> expr_ in
+  let default () =
+    let instrs, flavor = emit_flavored_expr env expr in
+    let fpass_kind = match flavor with
+      | Flavor.Cell -> instr_fpass (get_passByRefKind is_splatted expr) i hint
+      | Flavor.Ref -> instr_fpassv i hint
+      | Flavor.ReturnVal -> instr_fpassr i hint
+    in
+    gather [
+      instrs;
+      fpass_kind;
+    ] in
   Emit_pos.emit_pos_then pos @@
+  if is_splatted then default ()
+  else
   match expr_ with
   | A.Lvar (_, x) when SN.Superglobals.is_superglobal x ->
     gather [
@@ -1694,18 +1718,13 @@ and emit_arg env i (pos, expr_ as expr) =
       set_instrs;
       instr_fpassl i local hint;
     ]
-
-  | _ ->
-    let instrs, flavor = emit_flavored_expr env expr in
-    let fpass_kind = match flavor with
-      | Flavor.Cell -> instr_fpass (get_passByRefKind expr) i hint
-      | Flavor.Ref -> instr_fpassv i hint
-      | Flavor.ReturnVal -> instr_fpassr i hint
-    in
+  | A.Call _ when with_ref ->
+    let instrs, _ = emit_flavored_expr env (pos, expr_) in
     gather [
       instrs;
-      fpass_kind;
+      instr_fpassr i hint;
     ]
+  | _ -> default ()
 
 and emit_ignored_expr env e =
   match snd e with
@@ -1717,17 +1736,14 @@ and emit_ignored_expr env e =
       instr_pop flavor;
     ]
 
-and is_splatted = function
-  | _, A.Unop (A.Usplat, _) -> true
-  | _ -> false
-
 (* Emit code to construct the argument frame and then make the call *)
 and emit_args_and_call env args uargs =
+  let args_count = List.length args in
   let all_args = args @ uargs in
-  let is_splatted = List.exists ~f:is_splatted args in
+  let is_splatted =  not (List.is_empty uargs) in
   let nargs = List.length all_args in
   gather [
-    gather (List.mapi all_args (emit_arg env));
+    gather (List.mapi all_args (fun i e -> emit_arg env i (i >= args_count) e));
     if uargs = [] && not is_splatted
     then instr (ICall (FCall nargs))
     else instr (ICall (FCallUnpack nargs))
@@ -2287,7 +2303,7 @@ and emit_lval_op_nonlist env op e rhs_instrs rhs_stack_size =
     setop;
   ]
 
-and emit_lval_op_nonlist_steps env op (_, expr_) rhs_instrs rhs_stack_size =
+and emit_lval_op_nonlist_steps env op (pos, expr_) rhs_instrs rhs_stack_size =
   let handle_lvarvar n id final_op =
     if n = 1 then
       let instruction =
@@ -2444,9 +2460,7 @@ and emit_lval_op_nonlist_steps env op (_, expr_) rhs_instrs rhs_stack_size =
     emit_final_named_local_op op
 
   | _ ->
-    emit_nyi "lval expression",
-    rhs_instrs,
-    empty
+    Emit_fatal.raise_fatal_parse pos "Can't use return value in write context"
 
 and from_unop op =
   let ints_overflow_to_ints =
@@ -2457,7 +2471,7 @@ and from_unop op =
   | A.Unot -> instr (IOp Not)
   | A.Uplus -> instr (IOp (if ints_overflow_to_ints then Add else AddO))
   | A.Uminus -> instr (IOp (if ints_overflow_to_ints then Sub else SubO))
-  | A.Uincr | A.Udecr | A.Upincr | A.Updecr | A.Uref | A.Usplat | A.Usilence ->
+  | A.Uincr | A.Udecr | A.Upincr | A.Updecr | A.Uref | A.Usilence ->
     emit_nyi "unop - probably does not need translation"
 
 and emit_expr_as_ref env e = emit_expr ~need_ref:true env e
@@ -2491,8 +2505,6 @@ and emit_unop ~need_ref env op e =
       emit_box_if_necessary need_ref instr
     end
   | A.Uref -> emit_expr_as_ref env e
-  | A.Usplat ->
-    emit_expr ~need_ref:false env e
   | A.Usilence ->
     Local.scope @@ fun () ->
       let fault_label = Label.next_fault () in

@@ -463,8 +463,8 @@ let string_of_call instruction =
     sep ["FPushCtorD"; string_of_int n; string_of_class_id cid]
   | FPushCtorI (n, id) ->
     sep ["FPushCtorI"; string_of_int n; string_of_classref id]
-  | DecodeCufIter (n, l) ->
-    sep ["DecodeCufIter"; string_of_int n; string_of_label l]
+  | DecodeCufIter (id, l) ->
+    sep ["DecodeCufIter"; string_of_iterator_id id; string_of_label l]
   | FPushCufIter (n, id) ->
     sep ["FPushCufIter"; string_of_int n; string_of_iterator_id id]
   | FPushCuf n ->
@@ -834,7 +834,7 @@ and string_of_uop = function
   | A.Usilence -> "@"
   | A.Upincr
   | A.Updecr
-  | A.Usplat -> failwith "string_of_uop - should have been captures earlier"
+    -> failwith "string_of_uop - should have been captures earlier"
 
 and string_of_hint ~ns h =
   let h =
@@ -897,9 +897,6 @@ and string_of_fun f use_list =
 and string_of_optional_expr e =
   string_of_optional_value string_of_expression e
 
-and string_of_optional_int i =
-  string_of_optional_value string_of_int i
-
 and string_of_block_ ~start_indent ~block_indent ~end_indent block =
   let lines =
     (String.concat "" @@ List.map (string_of_statement ~indent:block_indent) block) in
@@ -926,9 +923,9 @@ and string_of_statement ~indent stmt =
     | A.Expr e ->
       string_of_expression e, true
     | A.Break (_, level_opt) ->
-      "break" ^ (string_of_optional_int level_opt), true
+      "break" ^ (string_of_optional_expr level_opt), true
     | A.Continue (_, level_opt) ->
-      "continue" ^ (string_of_optional_int level_opt), true
+      "continue" ^ (string_of_optional_expr level_opt), true
     | A.Throw e ->
       "throw " ^ (string_of_expression e), true
     | A.Block block ->
@@ -1068,7 +1065,6 @@ and string_of_param_default_value ?(use_single_quote=false) expr =
     match uop with
     | A.Upincr -> e ^ "++"
     | A.Updecr -> e ^ "--"
-    | A.Usplat -> e
     | _ -> string_of_uop uop ^ e
   end
   | A.Obj_get (e1, e2, f) ->

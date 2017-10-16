@@ -65,27 +65,7 @@ ExpressionPtr ObjectMethodExpression::clone() {
 void ObjectMethodExpression::analyzeProgram(AnalysisResultConstRawPtr ar) {
   FunctionCall::analyzeProgram(ar);
   if (ar->getPhase() >= AnalysisResult::AnalyzeAll) {
-    if (Option::WholeProgram &&
-        ar->getPhase() >= AnalysisResult::AnalyzeFinal &&
-        !m_funcScope &&
-        m_object->isThis() &&
-        !m_origName.empty()) {
-      auto cls = getClassScope();
-      if (cls) {
-        m_classScope = cls;
-        auto const func = cls->findFunction(ar, m_origName, true, true);
-        if (func &&
-            !cls->isInterface() &&
-            !(func->isVirtual() &&
-              (func->isAbstract() ||
-               (func->hasOverride() &&
-                cls->getAttribute(ClassScope::NotFinal))))) {
-          m_funcScope = func;
-        }
-      }
-    }
-
-    markRefParams(m_funcScope, m_origName);
+    if (m_params) m_params->markParams();
   }
 }
 

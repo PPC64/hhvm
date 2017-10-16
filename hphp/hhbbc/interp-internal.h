@@ -231,28 +231,18 @@ void bindLocalStatic(ISS& env, LocalId id, const Type& t) {
   modifyLocalStatic(env, id, t);
 }
 
-void killLocals(ISS& env) {
-  FTRACE(2, "    killLocals\n");
-  readUnknownLocals(env);
-  modifyLocalStatic(env, NoLocalId, TGen);
-  for (auto& l : env.state.locals) l = TGen;
-  for (auto& e : env.state.stack) e.equivLoc = NoLocalId;
-  env.state.equivLocals.clear();
-}
-
 void doRet(ISS& env, Type t, bool hasEffects) {
   readAllLocals(env);
   assert(env.state.stack.empty());
-  if (!hasEffects) {
-    for (auto const& l : env.state.locals) {
-      if (could_run_destructor(l)) {
-        hasEffects = true;
-        break;
-      }
-    }
-    if (!hasEffects) effect_free(env);
-  }
   env.flags.returned = t;
+  if (hasEffects) return;
+  nothrow(env);
+  for (auto const& l : env.state.locals) {
+    if (could_run_destructor(l)) {
+      return;
+    }
+  }
+  effect_free(env);
 }
 
 void mayUseVV(ISS& env) {
@@ -369,6 +359,17 @@ bool fpiPush(ISS& env, ActRec ar, int32_t nArgs) {
     // non-foldable, but other builtins might be, even if they
     // don't have the __Foldable attribute.
     if (func->nativeInfo) return false;
+
+    // Don't try to fold functions which aren't guaranteed to be accessible at
+    // this call site.
+    if (func->attrs & AttrPrivate) {
+      if (env.ctx.cls != func->cls) return false;
+    } else if (func->attrs & AttrProtected) {
+      if (!env.ctx.cls) return false;
+      if (!env.index.must_be_derived_from(env.ctx.cls, func->cls) &&
+          !env.index.must_be_derived_from(func->cls, env.ctx.cls)) return false;
+    }
+
     if (func->params.size()) {
       // Not worth trying if we're going to warn due to missing args
       return check_nargs_in_range(func, nArgs);
@@ -444,11 +445,11 @@ void killFPass(ISS& env, PrepKind kind, FPassHint hint, uint32_t arg,
                Bytecodes&&... bcs) {
   assert(kind != PrepKind::Unknown);
 
-  // Since PrepKind is never Unknown for buildins or foldables we
+  // Since PrepKind is never Unknown for builtins or foldables we
   // should know statically if we will throw or not at runtime
   // (PrepKind and FPassHint don't match).
   if (fpassCanThrow(env, kind, hint)) {
-    auto& ar = fpiTop(env);
+    auto const& ar = fpiTop(env);
     assertx(ar.foldable || ar.kind == FPIKind::Builtin);
     assertx(ar.func && !ar.fallbackFunc);
     return reduce(
@@ -468,7 +469,7 @@ bool shouldKillFPass(ISS& env, FPassHint hint, uint32_t param) {
   if (!ar.foldable) return false;
   auto const ok = [&] {
     if (hint == FPassHint::Ref) return false;
-    auto const &t = topT(env);
+    auto const& t = topT(env);
     if (!is_scalar(t)) return false;
     auto const callee = ar.func->exactFunc();
     if (param >= callee->params.size() ||
@@ -610,6 +611,14 @@ void setStkLocal(ISS& env, LocalId loc, uint32_t idx = 0) {
   }
 }
 
+void killThisLocToKill(ISS& env, LocalId l) {
+  if (l != NoLocalId ?
+      env.state.thisLocToKill == l : env.state.thisLocToKill != NoLocalId) {
+    FTRACE(2, "Killing thisLocToKill: {}\n", env.state.thisLocToKill);
+    env.state.thisLocToKill = NoLocalId;
+  }
+}
+
 // Kill all equivalencies involving the given local to stack values
 void killStkEquiv(ISS& env, LocalId l) {
   for (auto& e : env.state.stack) {
@@ -644,6 +653,7 @@ void setLocRaw(ISS& env, LocalId l, Type t) {
   mayReadLocal(env, l);
   killLocEquiv(env, l);
   killStkEquiv(env, l);
+  killThisLocToKill(env, l);
   if (is_volatile_local(env.ctx.func, l)) {
     auto current = env.state.locals[l];
     always_assert_flog(current == TGen, "volatile local was not TGen");
@@ -755,6 +765,7 @@ void refineLocation(ISS& env, LocalId l,
 void setLoc(ISS& env, LocalId l, Type t) {
   killLocEquiv(env, l);
   killStkEquiv(env, l);
+  killThisLocToKill(env, l);
   modifyLocalStatic(env, l, t);
   mayReadLocal(env, l);
   refineLocHelper(env, l, std::move(t));
@@ -780,6 +791,7 @@ void loseNonRefLocalTypes(ISS& env) {
   }
   killAllLocEquiv(env);
   killAllStkEquiv(env);
+  killThisLocToKill(env, NoLocalId);
   modifyLocalStatic(env, NoLocalId, TCell);
 }
 
@@ -791,6 +803,7 @@ void boxUnknownLocal(ISS& env) {
   }
   killAllLocEquiv(env);
   killAllStkEquiv(env);
+  killThisLocToKill(env, NoLocalId);
   // Don't update the local statics here; this is called both for
   // boxing and binding, and the effects on local statics are
   // different.
@@ -802,7 +815,18 @@ void unsetUnknownLocal(ISS& env) {
   for (auto& l : env.state.locals) l |= TUninit;
   killAllLocEquiv(env);
   killAllStkEquiv(env);
+  killThisLocToKill(env, NoLocalId);
   unbindLocalStatic(env, NoLocalId);
+}
+
+void killLocals(ISS& env) {
+  FTRACE(2, "    killLocals\n");
+  readUnknownLocals(env);
+  modifyLocalStatic(env, NoLocalId, TGen);
+  for (auto& l : env.state.locals) l = TGen;
+  killAllLocEquiv(env);
+  killAllStkEquiv(env);
+  killThisLocToKill(env, NoLocalId);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -954,20 +978,24 @@ bool thisAvailable(ISS& env) { return env.state.thisAvailable; }
 // Returns the type $this would have if it's not null.  Generally
 // you have to check thisIsAvailable() before assuming it can't be
 // null.
-folly::Optional<Type> thisType(ISS& env) {
-  if (!env.ctx.cls) return folly::none;
+folly::Optional<Type> thisTypeHelper(const Index& index, Context ctx) {
+  if (!ctx.cls) return folly::none;
 
   // Due to `bindTo`, we can't conclude the type of $this.
-  if (RuntimeOption::EvalAllowScopeBinding && env.ctx.func->isClosureBody) {
+  if (RuntimeOption::EvalAllowScopeBinding && ctx.func->isClosureBody) {
     return folly::none;
   }
 
   // Due to unflattened traits in non-repo mode, we can't conclude $this type.
-  if (!RuntimeOption::RepoAuthoritative && env.ctx.cls->attrs & AttrTrait) {
+  if (!RuntimeOption::RepoAuthoritative && ctx.cls->attrs & AttrTrait) {
     return folly::none;
   }
 
-  return subObj(env.index.resolve_class(env.ctx.cls));
+  return subObj(index.resolve_class(ctx.cls));
+}
+
+folly::Optional<Type> thisType(ISS& env) {
+  return thisTypeHelper(env.index, env.ctx);
 }
 
 folly::Optional<Type> selfCls(ISS& env) {

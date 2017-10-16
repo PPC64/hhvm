@@ -72,10 +72,7 @@ ClassScope::ClassScope(FileScopeRawPtr fs,
   : BlockScope(originalName, docComment, stmt, BlockScope::ClassScope),
     m_parent(parent), m_bases(bases), m_attribute(0), m_redeclaring(-1),
     m_kindOf(kindOf), m_derivesFromRedeclaring(Derivation::Normal),
-    m_traitStatus(NOT_FLATTENED), m_volatile(false),
-    m_persistent(false) {
-
-  m_volatile = Option::AllVolatile;
+    m_traitStatus(NOT_FLATTENED) {
 
   for (unsigned i = 0; i < attrs.size(); ++i) {
     if (m_userAttributes.find(attrs[i]->getName()) != m_userAttributes.end()) {
@@ -101,8 +98,7 @@ ClassScope::ClassScope(AnalysisResultPtr ar,
     m_attribute(0), m_redeclaring(-1),
     m_kindOf(KindOf::ObjectClass),
     m_derivesFromRedeclaring(Derivation::Normal),
-    m_traitStatus(NOT_FLATTENED),
-    m_volatile(false), m_persistent(false) {
+    m_traitStatus(NOT_FLATTENED) {
   for (auto f : methods) {
     if (f->isNamed("__construct")) setAttribute(HasConstructor);
     else if (f->isNamed("__destruct")) setAttribute(HasDestructor);
@@ -304,17 +300,12 @@ void ClassScope::collectMethods(AnalysisResultPtr ar,
         }
 
         m_derivesFromRedeclaring = Derivation::Redeclaring;
-
-        setVolatile();
       } else {
         derivedMagicMethods(super);
         super->collectMethods(ar, funcs, false);
         inheritedMagicMethods(super);
         if (super->derivesFromRedeclaring() == Derivation::Redeclaring) {
           m_derivesFromRedeclaring = Derivation::Redeclaring;
-          setVolatile();
-        } else if (super->isVolatile()) {
-          setVolatile();
         }
       }
     } else {
@@ -322,7 +313,6 @@ void ClassScope::collectMethods(AnalysisResultPtr ar,
       if (base == m_parent) {
         ar->declareUnknownClass(m_parent);
         m_derivesFromRedeclaring = Derivation::Redeclaring;
-        setVolatile();
       } else {
         /*
          * TODO(#3685260): this should not be removing interfaces from
@@ -531,7 +521,17 @@ ClassScope::TMIOps::findSingleTraitWithMethod(ClassScope* cs,
 ClassScopePtr
 ClassScope::TMIOps::findTraitClass(ClassScope* cs,
                                    const std::string& traitName) {
-  return cs->getContainingProgram()->findClass(traitName);
+  auto ret = cs->getContainingProgram()->findClass(traitName);
+  if (!ret) return ret;
+  if (std::find_if(cs->m_usedTraitNames.begin(),
+                   cs->m_usedTraitNames.end(),
+                   [&] (const std::string& name) {
+                     return name.size() == traitName.size() &&
+                       bstrcaseeq(name.c_str(), traitName.c_str(), name.size());
+                   }) == cs->m_usedTraitNames.end()) {
+    return ClassScopePtr{};
+  }
+  return ret;
 }
 
 MethodStatementPtr
@@ -801,21 +801,6 @@ ClassScopePtr ClassScope::FindCommonParent(AnalysisResultConstRawPtr ar,
   return ClassScopePtr();
 }
 
-void ClassScope::setVolatile() {
-  if (!m_volatile) {
-    m_volatile = true;
-    Lock lock(s_depsMutex);
-    for (const auto pf : getOrderedUsers()) {
-      if (pf->second & UseKindParentRef) {
-        auto scope = pf->first;
-        if (scope->is(BlockScope::ClassScope)) {
-          static_cast<HPHP::ClassScope*>(scope.get())->setVolatile();
-        }
-      }
-    }
-  }
-}
-
 FunctionScopePtr ClassScope::findFunction(AnalysisResultConstRawPtr ar,
                                           const std::string &name,
                                           bool recursive,
@@ -875,7 +860,6 @@ FunctionScopePtr ClassScope::findConstructor(AnalysisResultConstRawPtr ar,
 
 void ClassScope::setSystem() {
   setAttribute(ClassScope::System);
-  m_volatile = false;
   for (const auto& func : m_functionsVec) {
     func->setSystem();
   }
@@ -1057,7 +1041,6 @@ void ClassScope::setRedeclaring(AnalysisResultConstRawPtr /*ar*/, int redecId) {
     Compiler::Error(Compiler::RedeclaredTrait, m_stmt);
   }
   m_redeclaring = redecId;
-  setVolatile(); // redeclared class is also volatile
 }
 
 bool ClassScope::addFunction(AnalysisResultConstRawPtr /*ar*/,

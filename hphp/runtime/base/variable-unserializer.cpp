@@ -308,10 +308,8 @@ void VariableUnserializer::add(Variant* v, UnserializeMode mode) {
     m_refs.emplace_back(RefInfo::makeColValue(v));
   } else {
     assert(mode == UnserializeMode::ColKey);
-    // We don't currently support using the 'r' encoding to refer
-    // to collection keys, but eventually we'll need to make this
-    // work to allow objects as keys. For now we encode collections
-    // keys in m_refs using a null pointer.
+    // We don't currently support using the 'R' encoding to refer to collection
+    // keys. For now we encode collections keys in m_refs using a null pointer.
     m_refs.emplace_back(RefInfo(nullptr));
   }
 }
@@ -565,9 +563,6 @@ void VariableUnserializer::unserializeProp(ObjectData* obj,
     // Dynamic property. If this is the first, and we're using MixedArray,
     // we need to pre-allocate space in the array to ensure the elements
     // dont move during unserialization.
-    //
-    // TODO(#2881866): this assumption means we can't do reallocations
-    // when promoting kPackedKind -> kMixedKind.
     SuppressHackArrCompatNotices shacn;
     t = &obj->reserveProperties(nProp).lvalAt(realKey, AccessFlags::Key);
   } else {
@@ -794,7 +789,7 @@ void VariableUnserializer::unserializeVariant(
       int64_t id = readInt();
       Variant *v = getByVal(id);
       if (!v) throwOutOfRange(id);
-      tvSet(tvToInitCell(v->asTypedValue()), *self.asTypedValue());
+      tvSet(tvToInitCell(*v->asTypedValue()), *self.asTypedValue());
     }
     break;
   case 'R':
@@ -1196,7 +1191,7 @@ Array VariableUnserializer::unserializeArray() {
   auto const allocsz = MixedArray::computeAllocBytes(scale);
 
   // For large arrays, do a naive pre-check for OOM.
-  if (UNLIKELY(allocsz > kMaxSmallSize && MM().preAllocOOM(allocsz))) {
+  if (UNLIKELY(allocsz > kMaxSmallSize && tl_heap->preAllocOOM(allocsz))) {
     check_non_safepoint_surprise();
   }
 
@@ -1253,7 +1248,7 @@ Array VariableUnserializer::unserializeDict() {
   auto const allocsz = MixedArray::computeAllocBytes(scale);
 
   // For large arrays, do a naive pre-check for OOM.
-  if (UNLIKELY(allocsz > kMaxSmallSize && MM().preAllocOOM(allocsz))) {
+  if (UNLIKELY(allocsz > kMaxSmallSize && tl_heap->preAllocOOM(allocsz))) {
     check_non_safepoint_surprise();
   }
 
@@ -1314,7 +1309,7 @@ Array VariableUnserializer::unserializeVec() {
   auto const allocsz = MixedArray::computeAllocBytes(scale);
 
   // For large arrays, do a naive pre-check for OOM.
-  if (UNLIKELY(allocsz > kMaxSmallSize && MM().preAllocOOM(allocsz))) {
+  if (UNLIKELY(allocsz > kMaxSmallSize && tl_heap->preAllocOOM(allocsz))) {
     check_non_safepoint_surprise();
   }
 
@@ -1355,7 +1350,7 @@ Array VariableUnserializer::unserializeVArray() {
   auto const allocsz = kSizeIndex2PackedArrayCapacity[sizeClass];
 
   // For large arrays, do a naive pre-check for OOM.
-  if (UNLIKELY(allocsz > kMaxSmallSize && MM().preAllocOOM(allocsz))) {
+  if (UNLIKELY(allocsz > kMaxSmallSize && tl_heap->preAllocOOM(allocsz))) {
     check_non_safepoint_surprise();
   }
 
@@ -1394,7 +1389,7 @@ Array VariableUnserializer::unserializeKeyset() {
   auto const allocsz = SetArray::computeAllocBytes(scale);
 
   // For large arrays, do a naive pre-check for OOM.
-  if (UNLIKELY(allocsz > kMaxSmallSize && MM().preAllocOOM(allocsz))) {
+  if (UNLIKELY(allocsz > kMaxSmallSize && tl_heap->preAllocOOM(allocsz))) {
     check_non_safepoint_surprise();
   }
 

@@ -590,9 +590,6 @@ private:
  *     valid ways to check if a slot is empty.
  */
 struct MIterTable {
-  using TlsWrapper = ThreadLocalSingleton<MIterTable>;
-  static void Create(void* storage);
-  static void OnThreadExit(void*) {}
   struct Ent {
     ArrayData* array;
     MArrayIter* iter;
@@ -606,7 +603,7 @@ struct MIterTable {
   TlsPodBag<Ent,req::Allocator<Ent>> extras;
 };
 static_assert(sizeof(MIterTable) == 2*64, "want multiple of cache line size");
-MIterTable& miter_table();
+extern THREAD_LOCAL_FLAT(MIterTable, tl_miter_table);
 
 void free_strong_iterators(ArrayData*);
 void move_strong_iterators(ArrayData* dest, ArrayData* src);

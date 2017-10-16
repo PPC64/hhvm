@@ -38,6 +38,7 @@
 #include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/timer.h"
+#include "hphp/zend/zend-string.h"
 
 // TODO(#3704) Remove when xdebug fully implemented
 #define XDEBUG_NOTIMPLEMENTED  { throw_not_implemented(__FUNCTION__); }
@@ -130,8 +131,9 @@ static String format_filename(folly::StringPiece dir,
     switch (c) {
       // crc32 of current working directory
       case 'c': {
-        auto const crc32 = HHVM_FN(crc32)(g_context->getCwd());
-        buf.append(crc32);
+        auto const cwd = g_context->getCwd();
+        auto const crc32 = string_crc32(cwd.data(), cwd.size());
+        buf.append((int64_t)(uint32_t)crc32);
         break;
       }
       // process id
@@ -144,7 +146,7 @@ static String format_filename(folly::StringPiece dir,
         break;
       // Script name
       case 's': {
-        auto server = globals->get(s_SERVER).toArray();
+        auto const server = tvCastToArrayLike(globals->get(s_SERVER).tv());
         if (server.exists(s_SCRIPT_NAME) && server[s_SCRIPT_NAME].isString()) {
           const String scriptname(server[s_SCRIPT_NAME].toString(), CopyString);
           replace_special_chars(scriptname.get());
@@ -170,7 +172,7 @@ static String format_filename(folly::StringPiece dir,
       }
       // $_SERVER['HTTP_HOST']
       case 'H': {
-        Array server = globals->get(s_SERVER).toArray();
+        auto const server = tvCastToArrayLike(globals->get(s_SERVER).tv());
         if (server.exists(s_HTTP_HOST) && server[s_HTTP_HOST].isString()) {
           const String hostname(server[s_HTTP_HOST].toString(), CopyString);
           replace_special_chars(hostname.get());
@@ -180,7 +182,7 @@ static String format_filename(folly::StringPiece dir,
       }
       // $_SERVER['REQUEST_URI']
       case 'R': {
-        auto server = globals->get(s_SERVER).toArray();
+        auto const server = tvCastToArrayLike(globals->get(s_SERVER).tv());
         if (globals->exists(s_REQUEST_URI)) {
           const String requri(server[s_REQUEST_URI].toString(), CopyString);
           replace_special_chars(requri.get());
@@ -190,7 +192,7 @@ static String format_filename(folly::StringPiece dir,
       }
       // $_SERVER['UNIQUE_ID']
       case 'U': {
-        auto server = globals->get(s_SERVER).toArray();
+        auto const server = tvCastToArrayLike(globals->get(s_SERVER).tv());
         if (server.exists(s_UNIQUE_ID) && server[s_UNIQUE_ID].isString()) {
           const String uniqueid(server[s_UNIQUE_ID].toString(), CopyString);
           replace_special_chars(uniqueid.get());
@@ -204,7 +206,7 @@ static String format_filename(folly::StringPiece dir,
         // from the cookies
         String session_name;
         if (IniSetting::Get(s_SESSION_NAME, session_name)) {
-          auto cookies = globals->get(s_COOKIE).toArray();
+          auto const cookies = tvCastToArrayLike(globals->get(s_COOKIE).tv());
           if (cookies.exists(session_name) &&
               cookies[session_name].isString()) {
             const String sessionstr(cookies[session_name].toString(),
@@ -583,13 +585,13 @@ static bool HHVM_FUNCTION(xdebug_is_enabled) {
 
 static int64_t HHVM_FUNCTION(xdebug_memory_usage) {
   // With jemalloc, the usage can go negative (see memory_get_usage)
-  auto const usage = MM().getStats().usage();
+  auto const usage = tl_heap->getStats().usage();
   assert(use_jemalloc || usage >= 0);
   return std::max<int64_t>(usage, 0);
 }
 
 static int64_t HHVM_FUNCTION(xdebug_peak_memory_usage) {
-  return MM().getStats().peakUsage;
+  return tl_heap->getStats().peakUsage;
 }
 
 // TODO(#3704) This requires var_dump, error handling, and stack trace printing

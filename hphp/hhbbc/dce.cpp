@@ -642,6 +642,9 @@ Type locRaw(Env& env, LocalId loc) {
 }
 
 bool setLocCouldHaveSideEffects(Env& env, LocalId loc, bool forExit = false) {
+  // A "this" local is protected by the $this in the ActRec.
+  if (loc == env.stateBefore.thisLocToKill) return false;
+
   // Normally, if there's an equivLocal this isn't the last reference,
   // so overwriting it won't run any destructors. But if we're
   // destroying all the locals (eg RetC) they can't all protect each
@@ -714,6 +717,7 @@ void writeSlot(Env& env, uint32_t id) {
   if (ui.usage != Use::Used &&
       ui.actions.size() &&
       ui.location.blk != NoBlockId) {
+    FTRACE(2, "       force-live: {}\n", id);
     env.dceState.forcedLiveLocations.insert(ui.location);
   }
   env.dceState.slotUsage[id] = UseInfo { Use::Not };
@@ -725,7 +729,10 @@ bool isSlotLive(Env& env, uint32_t id) {
 }
 
 UseInfo slotUsage(Env& env, uint32_t id) {
-  return std::move(env.dceState.slotUsage[id]);
+  auto ret = std::move(env.dceState.slotUsage[id]);
+  // Leaving this set can pessimize block merging
+  env.dceState.slotUsage[id].location.blk = NoBlockId;
+  return ret;
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -814,6 +821,11 @@ void combineActions(DceActionMap& dst, const DceActionMap& src) {
 
       if (i.second.action == DceAction::PopAndReplace ||
           ret.first->second.action == DceAction::PopAndReplace) {
+        ret.first->second.action = DceAction::Replace;
+        continue;
+      }
+      if (i.second.action == DceAction::Replace ||
+          ret.first->second.action == DceAction::Replace) {
         ret.first->second.action = DceAction::Replace;
         continue;
       }
@@ -1126,12 +1138,14 @@ void dce(Env& env, const bc::ClsRefName& op) {
 }
 
 bool clsRefGetHelper(Env& env, const Type& ty, ClsRefSlotId slot) {
-  if (!ty.strictSubtypeOf(TStr)) return false;
-  auto v = tv(ty);
-  if (!v) return false;
-  auto res = env.dceState.index.resolve_class(
-    env.dceState.ainfo.ctx, v->m_data.pstr);
-  if (!res || !res->resolved()) return false;
+  if (!ty.subtypeOf(TObj)) {
+    if (!ty.strictSubtypeOf(TStr)) return false;
+    auto v = tv(ty);
+    if (!v) return false;
+    auto res = env.dceState.index.resolve_class(
+      env.dceState.ainfo.ctx, v->m_data.pstr);
+    if (!res || !res->resolved()) return false;
+  }
   return !isSlotLive(env, slot);
 }
 
@@ -1287,6 +1301,16 @@ void dce(Env& env, const bc::CGetL2& op) {
     });
 }
 
+void dce(Env& env, const bc::BareThis& op) {
+  stack_ops(env, [&] (UseInfo& ui) {
+      if (allUnusedIfNotLastRef(ui) &&
+          op.subop1 != BareThisOp::Notice) {
+        return PushFlags::MarkUnused;
+      }
+      return PushFlags::MarkLive;
+    });
+}
+
 void dce(Env& env, const bc::RetC&)  { pop(env); readDtorLocs(env); }
 void dce(Env& env, const bc::Throw&) { pop(env); readDtorLocs(env); }
 void dce(Env& env, const bc::Fatal&) { pop(env); readDtorLocs(env); }
@@ -1408,6 +1432,12 @@ void dce(Env& env, const bc::PopL& op) {
   }
 }
 
+void dce(Env& env, const bc::InitThisLoc& op) {
+  if (!isLocLive(env, op.loc1)) {
+    return markDead(env);
+  }
+}
+
 void dce(Env& env, const bc::SetL& op) {
   auto const effects = setLocCouldHaveSideEffects(env, op.loc1);
   if (!isLocLive(env, op.loc1) && !effects) {
@@ -1416,7 +1446,15 @@ void dce(Env& env, const bc::SetL& op) {
            LocalStaticBinding::Bound);
     return markDead(env);
   }
-  stack_ops(env);
+  stack_ops(env, [&] (UseInfo& ui) {
+    if (!allUnusedIfNotLastRef(ui)) return PushFlags::MarkLive;
+    // If the stack result of the SetL is unused, we can replace it
+    // with a PopL.
+    CompactVector<Bytecode> bcs { bc::PopL { op.loc1 } };
+    env.dceState.replaceMap.emplace(env.id, std::move(bcs));
+    ui.actions[env.id] = DceAction::Replace;
+    return PushFlags::MarkDead;
+  });
   if (effects || locRaw(env, op.loc1).couldBe(TRef)) {
     addLocGen(env, op.loc1);
   } else {
@@ -1904,9 +1942,8 @@ dce_visit(const Index& index,
         return from(dceState.slotUsage)
           | mapped(
             [&] (const UseInfo& ui) {
-              if (ui.actions.empty()) return std::string{};
               return folly::sformat("  {}: [{}]\n",
-                                    i++, show(ui.actions));
+                                    i++, show(ui));
             })
           | unsplit<std::string>("");
       }()
@@ -2398,12 +2435,17 @@ void global_dce(const Index& index, const FuncAnalysis& ai) {
       auto& pbs = blockStates[pred->id];
       auto const oldPredLocLive = pbs.locLive;
       pbs.locLive |= result.locLiveIn;
+      auto changed =
+        mergeUIVecs(pbs.slotUsage, result.slotUsage, blk->id, true);
       auto const oldPredSlotLive = pbs.slotLive;
       pbs.slotLive |= result.slotLiveIn;
-      auto changed =
-        pbs.locLive != oldPredLocLive ||
-        pbs.slotLive != oldPredSlotLive;
-      if (mergeUIVecs(pbs.slotUsage, result.slotUsage, blk->id, true)) {
+      // If any slotUsage entries were forced live, we also have to
+      // mark the slot live.
+      for (auto const& loc : forcedLiveLocations) {
+        if (loc.isSlot && loc.blk == blk->id) pbs.slotLive.set(loc.id);
+      }
+      if (pbs.locLive != oldPredLocLive ||
+          pbs.slotLive != oldPredSlotLive) {
         changed = true;
       }
       if (mergeUIVecs(pbs.dceStack, result.stack, blk->id, false)) {

@@ -326,14 +326,15 @@ void register_variable(Array& variables, char *name, const Variant& value,
       }
 
       if (!index) {
-        auto& val = symtable->lvalAt();
-        val = Array::Create();
+        auto lval = symtable->lvalAt();
+        lval.type() = KindOfPersistentArray;
+        lval.val().parr = staticEmptyArray();
         gpc_elements.push_back(uninit_null());
-        gpc_elements.back().assignRef(val);
+        gpc_elements.back().assignRef(tvAsVariant(lval.tv_ptr()));
       } else {
         String key(index, index_len, CopyString);
-        auto const& v = symtable->rvalAt(key);
-        if (v.isNull() || !v.isArray()) {
+        auto const v = symtable->rvalAt(key).unboxed();
+        if (isNullType(v.type()) || !isArrayLikeType(v.type())) {
           symtable->set(key, Array::Create());
         }
         gpc_elements.push_back(uninit_null());
@@ -1642,7 +1643,7 @@ static int execute_program_impl(int argc, char** argv) {
   zend_startup_strtod();
 #endif
 
-  MemoryManager::TlsWrapper::getCheck();
+  tl_heap.getCheck();
   if (RuntimeOption::ServerExecutionMode()) {
     // Create the hardware counter before reading options,
     // so that the main thread never has inherit set in server
@@ -1758,7 +1759,7 @@ static int execute_program_impl(int argc, char** argv) {
     RuntimeOption::SafeFileAccess = false;
   }
   IniSetting::s_system_settings_are_set = true;
-  MM().resetRuntimeOptions();
+  tl_heap->resetRuntimeOptions();
 
   auto opened_logs = open_server_log_files();
   if (po.mode == "daemon") {
@@ -2121,14 +2122,14 @@ static void update_constants_and_options() {
 }
 
 void hphp_thread_init() {
-#ifdef USE_JEMALLOC_CUSTOM_HOOKS
+#ifdef USE_JEMALLOC_EXTENT_HOOKS
   thread_huge_tcache_create();
 #endif
   ServerStats::GetLogger();
   zend_get_bigint_data();
   zend_rand_init();
   get_server_note();
-  MemoryManager::TlsWrapper::getCheck();
+  tl_heap.getCheck();
 
   assert(ThreadInfo::s_threadInfo.isNull());
   ThreadInfo::s_threadInfo.getCheck()->init();
@@ -2145,7 +2146,7 @@ void hphp_thread_exit() {
   InitFiniNode::ThreadFini();
   ExtensionRegistry::threadShutdown();
   if (!g_context.isNull()) g_context.destroy();
-#ifdef USE_JEMALLOC_CUSTOM_HOOKS
+#ifdef USE_JEMALLOC_EXTENT_HOOKS
   thread_huge_tcache_destroy();
 #endif
 }
@@ -2175,11 +2176,7 @@ void hphp_process_init() {
   BootStats::mark("Process::InitProcessStatics");
 
   HHProf::Init();
-
-  {
-    (void)type_scan::getIndexForMalloc<MArrayIter>();
-    MIterTable::TlsWrapper tls;
-  }
+  tl_miter_table.getCheck();
 
   // initialize the tzinfo cache.
   timezone_init();
@@ -2334,7 +2331,7 @@ void hphp_session_init() {
   AsioSession::Init();
   Socket::clearLastError();
   TI().onSessionInit();
-  MM().resetExternalStats();
+  tl_heap->resetExternalStats();
 
   g_thread_safe_locale_handler->reset();
   Treadmill::startRequest();
@@ -2407,7 +2404,7 @@ bool hphp_invoke(ExecutionContext *context, const std::string &cmd,
     return false;
   }
 
-  MM().resetCouldOOM(isStandardRequest());
+  tl_heap->resetCouldOOM(isStandardRequest());
   RID().resetTimer();
 
   bool ret = true;
@@ -2488,7 +2485,7 @@ void hphp_context_exit(bool shutdown /* = true */) {
 }
 
 void hphp_memory_cleanup() {
-  auto& mm = MM();
+  auto& mm = *tl_heap;
   // sweep functions are allowed to access g_context,
   // so we can't destroy it yet
   mm.sweep();
@@ -2552,7 +2549,7 @@ void hphp_session_exit(const Transport* transport) {
     hphp_memory_cleanup();
   }
 
-  assert(MM().empty());
+  assert(tl_heap->empty());
 
   s_sessionInitialized = false;
   s_extra_request_nanoseconds = 0;

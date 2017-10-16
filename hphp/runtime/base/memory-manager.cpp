@@ -49,6 +49,7 @@ namespace HPHP {
 
 const unsigned kInvalidSweepIndex = 0xffffffff;
 __thread bool tl_sweeping;
+THREAD_LOCAL_FLAT(MemoryManager, tl_heap);
 
 TRACE_SET_MOD(mm);
 
@@ -101,25 +102,6 @@ void MemoryManager::threadStats(uint64_t*& allocated, uint64_t*& deallocated) {
 }
 #endif
 
-static void* MemoryManagerInit() {
-  MemoryManager::TlsWrapper tls;
-  return (void*)tls.getNoCheck;
-}
-
-void* MemoryManager::TlsInitSetup = MemoryManagerInit();
-
-void MemoryManager::Create(void* storage) {
-  new (storage) MemoryManager();
-}
-
-void MemoryManager::Delete(MemoryManager* mm) {
-  mm->~MemoryManager();
-}
-
-void MemoryManager::OnThreadExit(MemoryManager* mm) {
-  mm->~MemoryManager();
-}
-
 MemoryManager::MemoryManager() {
 #ifdef USE_JEMALLOC
   threadStats(m_allocated, m_deallocated);
@@ -147,14 +129,14 @@ MemoryManager::~MemoryManager() {
                     header_names[size_t(h->kind())]);
     });
   }
-  // ~BigHeap releases its slabs/bigs.
+  // ~SparseHeap releases its slabs/bigs.
 }
 
 void MemoryManager::resetRuntimeOptions() {
   if (debug) checkHeap("resetRuntimeOptions");
-
-  MemoryManager::TlsWrapper::destroy(); // ~MemoryManager()
-  MemoryManager::TlsWrapper::getCheck(); // new MemoryManager()
+  void* mem = this;
+  this->~MemoryManager();
+  new (mem) MemoryManager();
 }
 
 void MemoryManager::traceStats(const char* event) {
@@ -289,7 +271,7 @@ void MemoryManager::refreshStatsImpl(MemoryUsageStats& stats) {
     // because of the MaskAlloc capability, which updates m_resetAllocated.
 
     // stats.heapAllocVolume is only used for contiguous heap, it would always
-    // be 0 in default BigHeap.
+    // be 0 in default SparseHeap.
     stats.totalAlloc = curAllocated - m_resetAllocated + stats.heapAllocVolume;
     FTRACE(1, "heap-id {} after sync extUsage {} totalAlloc: {}\n",
       t_heap_id, stats.extUsage, stats.totalAlloc);
@@ -424,8 +406,8 @@ void MemoryManager::flush() {
  *     out 16-byte aligned pointers easily.
  *
  *     We know when we have one of these because it has to be freed
- *     through a different entry point.  (E.g. MM().freeSmallSize() or
- *     MM().freeBigSize().)
+ *     through a different entry point.  (E.g. tl_heap->freeSmallSize() or
+ *     tl_heap->freeBigSize().)
  *
  * When small blocks are freed (case b and c), they're placed in the
  * appropriate size-segregated freelist.  Large blocks are immediately
@@ -457,14 +439,10 @@ void MemoryManager::initHole(void* ptr, uint32_t size) {
   FreeNode::InitFrom(ptr, size, HeaderKind::Hole);
 }
 
-void MemoryManager::initHole() {
+void MemoryManager::initFree() {
   if ((char*)m_front < (char*)m_limit) {
     initHole(m_front, (char*)m_limit - (char*)m_front);
   }
-}
-
-void MemoryManager::initFree() {
-  initHole();
   m_heap.sort();
   reinitFree();
 }
@@ -764,7 +742,7 @@ inline void MemoryManager::updateBigStats() {
 template<MemoryManager::MBS Mode> NEVER_INLINE
 void* MemoryManager::mallocBigSize(size_t bytes, HeaderKind kind,
                                    type_scan::Index ty) {
-  if (debug) MM().requestEagerGC();
+  if (debug) tl_heap->requestEagerGC();
   auto block = Mode == Zeroed ? m_heap.callocBig(bytes, kind, ty, m_stats) :
                m_heap.allocBig(bytes, kind, ty, m_stats);
   updateBigStats();
@@ -810,12 +788,14 @@ static void* allocate(size_t nbytes, type_scan::Index ty) {
   nbytes = std::max(nbytes, size_t(1));
   auto const npadded = nbytes + sizeof(MallocNode);
   if (LIKELY(npadded <= kMaxSmallSize)) {
-    auto const ptr = static_cast<MallocNode*>(MM().mallocSmallSize(npadded));
+    auto const ptr = static_cast<MallocNode*>(
+        tl_heap->mallocSmallSize(npadded)
+    );
     ptr->nbytes = npadded;
     ptr->initHeader_32_16(HeaderKind::SmallMalloc, 0, ty);
     return Mode == MBS::Zeroed ? memset(ptr + 1, 0, nbytes) : ptr + 1;
   }
-  return MM().mallocBigSize<Mode>(nbytes, HeaderKind::BigMalloc, ty);
+  return tl_heap->mallocBigSize<Mode>(nbytes, HeaderKind::BigMalloc, ty);
 }
 
 void* malloc(size_t nbytes, type_scan::Index tyindex) {
@@ -829,7 +809,7 @@ void* calloc(size_t count, size_t nbytes, type_scan::Index tyindex) {
 }
 
 void* malloc_untyped(size_t nbytes) {
-  return MM().mallocBigSize<MBS::Unzeroed>(
+  return tl_heap->mallocBigSize<MBS::Unzeroed>(
       std::max(nbytes, 1ul),
       HeaderKind::BigMalloc,
       type_scan::kIndexUnknown
@@ -837,7 +817,7 @@ void* malloc_untyped(size_t nbytes) {
 }
 
 void* calloc_untyped(size_t count, size_t bytes) {
-  return MM().mallocBigSize<MBS::Zeroed>(
+  return tl_heap->mallocBigSize<MBS::Zeroed>(
       std::max(count * bytes, 1ul),
       HeaderKind::BigMalloc,
       type_scan::kIndexUnknown
@@ -867,7 +847,7 @@ void* realloc(void* ptr, size_t nbytes, type_scan::Index tyindex) {
     return newmem;
   }
   // it's a big allocation.
-  return MM().resizeBig(n, nbytes);
+  return tl_heap->resizeBig(n, nbytes);
 }
 
 void* realloc_untyped(void* ptr, size_t nbytes) {
@@ -884,7 +864,7 @@ void* realloc_untyped(void* ptr, size_t nbytes) {
   auto const n = static_cast<MallocNode*>(ptr) - 1;
   assert(n->kind() == HeaderKind::BigMalloc);
   assert(n->typeIndex() == type_scan::kIndexUnknown);
-  return MM().resizeBig(n, nbytes);
+  return tl_heap->resizeBig(n, nbytes);
 }
 
 char* strndup(const char* str, size_t len) {
@@ -901,10 +881,10 @@ void free(void* ptr) {
   if (!ptr) return;
   auto const n = static_cast<MallocNode*>(ptr) - 1;
   if (LIKELY(n->kind() == HeaderKind::SmallMalloc)) {
-    return MM().freeSmallSize(n, n->nbytes);
+    return tl_heap->freeSmallSize(n, n->nbytes);
   }
   assert(n->kind() == HeaderKind::BigMalloc);
-  MM().freeBigSize(ptr);
+  tl_heap->freeBigSize(ptr);
 }
 
 } // namespace req
@@ -948,7 +928,7 @@ void MemoryManager::addSweepable(Sweepable* obj) {
 
 // defined here because memory-manager.h includes sweepable.h
 Sweepable::Sweepable() {
-  MM().addSweepable(this);
+  tl_heap->addSweepable(this);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -977,19 +957,19 @@ bool MemoryManager::triggerProfiling(const std::string& filename) {
 }
 
 void MemoryManager::requestInit() {
-  MM().m_req_start_micros = HPHP::Timer::GetThreadCPUTimeNanos() / 1000;
+  tl_heap->m_req_start_micros = HPHP::Timer::GetThreadCPUTimeNanos() / 1000;
 
   // If the trigger has already been claimed, do nothing.
   auto trigger = s_trigger.exchange(nullptr);
   if (trigger == nullptr) return;
 
-  always_assert(MM().empty());
+  always_assert(tl_heap->empty());
 
   // Initialize the request-local context from the trigger.
-  auto& profctx = MM().m_profctx;
+  auto& profctx = tl_heap->m_profctx;
   assert(!profctx.flag);
 
-  MM().m_bypassSlabAlloc = true;
+  tl_heap->m_bypassSlabAlloc = true;
   profctx = *trigger;
   delete trigger;
 
@@ -1015,7 +995,7 @@ void MemoryManager::requestInit() {
 }
 
 void MemoryManager::requestShutdown() {
-  auto& profctx = MM().m_profctx;
+  auto& profctx = tl_heap->m_profctx;
 
   if (!profctx.flag) return;
 
@@ -1026,18 +1006,18 @@ void MemoryManager::requestShutdown() {
   mallctlWrite("prof.active", profctx.prof_active);
 #endif
 
-  MM().m_bypassSlabAlloc = RuntimeOption::DisableSmallAllocator;
-  MM().m_memThresholdCallbackPeakUsage = SIZE_MAX;
+  tl_heap->m_bypassSlabAlloc = RuntimeOption::DisableSmallAllocator;
+  tl_heap->m_memThresholdCallbackPeakUsage = SIZE_MAX;
   profctx = ReqProfContext{};
 }
 
 /* static */ void MemoryManager::setupProfiling() {
-  always_assert(MM().empty());
-  MM().m_bypassSlabAlloc = true;
+  always_assert(tl_heap->empty());
+  tl_heap->m_bypassSlabAlloc = true;
 }
 
 /* static */ void MemoryManager::teardownProfiling() {
-  MM().m_bypassSlabAlloc = RuntimeOption::DisableSmallAllocator;
+  tl_heap->m_bypassSlabAlloc = RuntimeOption::DisableSmallAllocator;
 }
 
 bool MemoryManager::isGCEnabled() {
@@ -1050,12 +1030,12 @@ void MemoryManager::setGCEnabled(bool isGCEnabled) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-void BigHeap::reset() {
-  TRACE(1, "heap-id %lu BigHeap-reset: slabs %lu bigs %lu\n",
+void SparseHeap::reset() {
+  TRACE(1, "heap-id %lu SparseHeap-reset: slabs %lu bigs %lu\n",
         t_heap_id, m_slabs.size(), m_bigs.size());
   auto const do_free = [&](void* ptr, size_t size) {
     if (RuntimeOption::EvalTrashFillOnRequestExit) {
-      memset(ptr, size, kSmallFreeFill);
+      memset(ptr, kSmallFreeFill, size);
     }
 #ifdef USE_JEMALLOC
     dallocx(ptr, 0);
@@ -1069,13 +1049,13 @@ void BigHeap::reset() {
   m_bigs.clear();
 }
 
-void BigHeap::flush() {
+void SparseHeap::flush() {
   assert(empty());
   m_slabs = std::vector<MemBlock>{};
   m_bigs = std::vector<MallocNode*>{};
 }
 
-MemBlock BigHeap::allocSlab(size_t size, MemoryUsageStats& stats) {
+MemBlock SparseHeap::allocSlab(size_t size, MemoryUsageStats& stats) {
 #ifdef USE_JEMALLOC
   void* slab = mallocx(size, 0);
   auto usable = sallocx(slab, 0);
@@ -1089,15 +1069,16 @@ MemBlock BigHeap::allocSlab(size_t size, MemoryUsageStats& stats) {
   return {slab, usable};
 }
 
-void BigHeap::enlist(MallocNode* n, HeaderKind kind,
-                     size_t size, type_scan::Index tyindex) {
+void SparseHeap::enlist(MallocNode* n, HeaderKind kind,
+                        size_t size, type_scan::Index tyindex) {
   n->initHeader_32_16(kind, m_bigs.size(), tyindex);
   n->nbytes = size;
   m_bigs.push_back(n);
 }
 
-MemBlock BigHeap::allocBig(size_t bytes, HeaderKind kind,
-                           type_scan::Index tyindex, MemoryUsageStats& stats) {
+MemBlock SparseHeap::allocBig(size_t bytes, HeaderKind kind,
+                              type_scan::Index tyindex,
+                              MemoryUsageStats& stats) {
 #ifdef USE_JEMALLOC
   auto n = static_cast<MallocNode*>(mallocx(bytes + sizeof(MallocNode), 0));
   auto cap = sallocx(n, 0);
@@ -1111,8 +1092,9 @@ MemBlock BigHeap::allocBig(size_t bytes, HeaderKind kind,
   return {n + 1, cap - sizeof(MallocNode)};
 }
 
-MemBlock BigHeap::callocBig(size_t nbytes, HeaderKind kind,
-                            type_scan::Index tyindex, MemoryUsageStats& stats) {
+MemBlock SparseHeap::callocBig(size_t nbytes, HeaderKind kind,
+                               type_scan::Index tyindex,
+                               MemoryUsageStats& stats) {
 #ifdef USE_JEMALLOC
   auto n = static_cast<MallocNode*>(
       mallocx(nbytes + sizeof(MallocNode), MALLOCX_ZERO)
@@ -1128,7 +1110,7 @@ MemBlock BigHeap::callocBig(size_t nbytes, HeaderKind kind,
   return {n + 1, cap - sizeof(MallocNode)};
 }
 
-bool BigHeap::contains(void* ptr) const {
+bool SparseHeap::contains(void* ptr) const {
   auto const ptrInt = reinterpret_cast<uintptr_t>(ptr);
   auto it = std::find_if(std::begin(m_slabs), std::end(m_slabs),
     [&] (MemBlock slab) {
@@ -1139,7 +1121,7 @@ bool BigHeap::contains(void* ptr) const {
   return it != std::end(m_slabs);
 }
 
-void BigHeap::freeBig(void* ptr) {
+void SparseHeap::freeBig(void* ptr) {
   auto n = static_cast<MallocNode*>(ptr) - 1;
   auto i = n->index();
   auto last = m_bigs.back();
@@ -1153,8 +1135,8 @@ void BigHeap::freeBig(void* ptr) {
 #endif
 }
 
-MemBlock BigHeap::resizeBig(void* ptr, size_t newsize,
-                            MemoryUsageStats& stats) {
+MemBlock SparseHeap::resizeBig(void* ptr, size_t newsize,
+                               MemoryUsageStats& stats) {
   // Since we don't know how big it is (i.e. how much data we should memcpy),
   // we have no choice but to ask malloc to realloc for us.
   auto const n = static_cast<MallocNode*>(ptr) - 1;
@@ -1178,7 +1160,7 @@ MemBlock BigHeap::resizeBig(void* ptr, size_t newsize,
   return {newNode + 1, newNode->nbytes - sizeof(MallocNode)};
 }
 
-void BigHeap::sort() {
+void SparseHeap::sort() {
   std::sort(std::begin(m_slabs), std::end(m_slabs),
     [] (const MemBlock& l, const MemBlock& r) {
       assertx(static_cast<char*>(l.ptr) + l.size <= r.ptr ||
@@ -1199,7 +1181,7 @@ void BigHeap::sort() {
  *
  * If that fails, we return nullptr.
  */
-HeapObject* BigHeap::find(const void* p) {
+HeapObject* SparseHeap::find(const void* p) {
   sort();
   auto const slab = std::lower_bound(
     std::begin(m_slabs), std::end(m_slabs), p,

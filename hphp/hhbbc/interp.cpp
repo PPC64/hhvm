@@ -1384,6 +1384,9 @@ void in(ISS& env, const bc::NativeImpl&) {
 }
 
 void in(ISS& env, const bc::CGetL& op) {
+  if (op.loc1 == env.state.thisLocToKill) {
+    return reduce(env, bc::BareThis { BareThisOp::Notice });
+  }
   if (!locCouldBeUninit(env, op.loc1)) {
     nothrow(env);
     constprop(env);
@@ -1392,6 +1395,9 @@ void in(ISS& env, const bc::CGetL& op) {
 }
 
 void in(ISS& env, const bc::CGetQuietL& op) {
+  if (op.loc1 == env.state.thisLocToKill) {
+    return reduce(env, bc::BareThis { BareThisOp::NoNotice });
+  }
   nothrow(env);
   constprop(env);
   push(env, locAsCell(env, op.loc1), op.loc1);
@@ -1558,6 +1564,11 @@ void clsRefGetImpl(ISS& env, Type t1, ClsRefSlotId slot) {
 }
 
 void in(ISS& env, const bc::ClsRefGetL& op) {
+  if (op.loc1 == env.state.thisLocToKill) {
+    return reduce(env,
+                  bc::BareThis { BareThisOp::Notice },
+                  bc::ClsRefGetC { op.slot });
+  }
   clsRefGetImpl(env, locAsCell(env, op.loc1), op.slot);
 }
 void in(ISS& env, const bc::ClsRefGetC& op) {
@@ -1687,6 +1698,12 @@ void in(ISS& env, const bc::GetMemoKeyL& op) {
 }
 
 void in(ISS& env, const bc::IssetL& op) {
+  if (op.loc1 == env.state.thisLocToKill) {
+    return reduce(env,
+                  bc::BareThis { BareThisOp::NoNotice },
+                  bc::IsTypeC { IsTypeOp::Null },
+                  bc::Not {});
+  }
   nothrow(env);
   constprop(env);
   auto const loc = locAsCell(env, op.loc1);
@@ -1823,16 +1840,30 @@ void in(ISS& env, const bc::IsMemoType& /*op*/) {
 }
 
 void in(ISS& env, const bc::InstanceOfD& op) {
-  auto const t1 = popC(env);
+  auto t1 = topC(env);
   // Note: InstanceOfD can do autoload if the type might be a type
   // alias, so it's not nothrow unless we know it's an object type.
   if (auto const rcls = env.index.resolve_class(env.ctx, op.str1)) {
-    nothrow(env);
+    auto result = [&] (const Type& r) {
+      nothrow(env);
+      if (r != TBool) constprop(env);
+      popC(env);
+      push(env, r);
+    };
     if (!interface_supports_non_objects(rcls->name())) {
-      isTypeImpl(env, t1, subObj(*rcls));
-      return;
+      auto testTy = subObj(*rcls);
+      if (t1.subtypeOf(testTy)) return result(TTrue);
+      if (!t1.couldBe(testTy)) return result(TFalse);
+      if (is_opt(t1)) {
+        t1 = unopt(std::move(t1));
+        if (t1.subtypeOf(testTy)) {
+          return reduce(env, bc::IsTypeC { IsTypeOp::Null }, bc::Not {});
+        }
+      }
+      return result(TBool);
     }
   }
+  popC(env);
   push(env, TBool);
 }
 
@@ -2357,10 +2388,10 @@ void in(ISS& env, const bc::FPushClsMethodF& op) {
 
 void ctorHelper(ISS& env, SString name) {
   auto const rcls = env.index.resolve_class(env.ctx, name);
-  push(env, rcls ? objExact(*rcls) : TObj);
-  auto const rfunc =
-    rcls ? env.index.resolve_ctor(env.ctx, *rcls) : folly::none;
+  auto const rfunc = rcls ?
+    env.index.resolve_ctor(env.ctx, *rcls, true) : folly::none;
   fpiPush(env, ActRec { FPIKind::Ctor, rcls, rfunc });
+  push(env, rcls ? objExact(*rcls) : TObj);
 }
 
 void in(ISS& env, const bc::FPushCtorD& op) {
@@ -2380,6 +2411,12 @@ void in(ISS& env, const bc::FPushCtor& op) {
       return reduce(env, bc::DiscardClsRef { op.slot },
                     bc::FPushCtorD { op.arg1, dcls.cls.name(), op.has_unpack });
     }
+
+    auto const rfunc = env.index.resolve_ctor(env.ctx, dcls.cls, false);
+    takeClsRefSlot(env, op.slot);
+    push(env, subObj(dcls.cls));
+    fpiPush(env, ActRec { FPIKind::Ctor, dcls.cls, rfunc });
+    return;
   }
   takeClsRefSlot(env, op.slot);
   push(env, TObj);
@@ -3182,6 +3219,7 @@ void in(ISS& env, const bc::BareThis& op) {
 
 void in(ISS& env, const bc::InitThisLoc& op) {
   setLocRaw(env, op.loc1, TCell);
+  env.state.thisLocToKill = op.loc1;
 }
 
 void in(ISS& env, const bc::StaticLocDef& op) {
@@ -3297,7 +3335,7 @@ void in(ISS& env, const bc::VerifyParamType& op) {
    * references if it re-enters, even if Option::HardTypeHints is
    * on.
    */
-  if (!RuntimeOption::EvalCheckThisTypeHints && constraint.isThis()) {
+  if (RuntimeOption::EvalThisTypeHintLevel != 3 && constraint.isThis()) {
     return;
   }
   if (constraint.hasConstraint() && !constraint.isTypeVar() &&
@@ -3327,7 +3365,7 @@ void in(ISS& env, const bc::VerifyRetTypeC& /*op*/) {
   // then there are no optimizations we can safely do here, so
   // just leave the top of stack as is.
   if (RuntimeOption::EvalCheckReturnTypeHints < 3 || constraint.isSoft()
-      || (!RuntimeOption::EvalCheckThisTypeHints && constraint.isThis())) {
+      || (RuntimeOption::EvalThisTypeHintLevel != 3 && constraint.isThis())) {
     return;
   }
 
@@ -3797,6 +3835,10 @@ StepFlags step(Interp& interp, const Bytecode& op) {
 
 void default_dispatch(ISS& env, const Bytecode& op) {
   dispatch(env, op);
+}
+
+folly::Optional<Type> thisType(const Interp& interp) {
+  return thisTypeHelper(interp.index, interp.ctx);
 }
 
 //////////////////////////////////////////////////////////////////////

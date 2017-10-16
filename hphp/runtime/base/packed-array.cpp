@@ -223,7 +223,7 @@ ArrayData* PackedArray::Grow(ArrayData* adIn, bool copy) {
 
   auto const sizeIndex = sizeClass(adIn) + kSizeClassesPerDoubling;
   if (UNLIKELY(sizeIndex > MaxSizeIndex)) return nullptr;
-  auto ad = static_cast<ArrayData*>(MM().objMallocIndex(sizeIndex));
+  auto ad = static_cast<ArrayData*>(tl_heap->objMallocIndex(sizeIndex));
 
   if (copy) {
     // CopyPackedHelper will copy the header and m_sizeAndPos; since we pass
@@ -309,7 +309,7 @@ bool PackedArray::CopyPackedHelper(const ArrayData* adIn, ArrayData* ad) {
         return false;
       }
     }
-    tvIncRefGen(elm);
+    tvIncRefGen(*elm);
   }
   return true;
 }
@@ -318,7 +318,7 @@ NEVER_INLINE
 ArrayData* PackedArray::Copy(const ArrayData* adIn) {
   assert(checkInvariants(adIn));
 
-  auto ad = static_cast<ArrayData*>(MM().objMallocIndex(sizeClass(adIn)));
+  auto ad = static_cast<ArrayData*>(tl_heap->objMallocIndex(sizeClass(adIn)));
 
   // CopyPackedHelper will copy the header (including capacity and kind), and
   // m_sizeAndPos; since we pass convertingPackedToVec = false, it can't fail.
@@ -397,7 +397,7 @@ ArrayData* PackedArray::ConvertStatic(const ArrayData* arr) {
 ALWAYS_INLINE
 ArrayData* PackedArray::MakeReserveImpl(uint32_t cap, HeaderKind hk) {
   auto const sizeIndex = capacityToSizeIndex(cap);
-  auto ad = static_cast<ArrayData*>(MM().objMallocIndex(sizeIndex));
+  auto ad = static_cast<ArrayData*>(tl_heap->objMallocIndex(sizeIndex));
   ad->initHeader_16(
     hk,
     OneReference,
@@ -520,7 +520,7 @@ void PackedArray::Release(ArrayData* ad) {
   if (UNLIKELY(strong_iterators_exist())) {
     free_strong_iterators(ad);
   }
-  MM().objFreeIndex(ad, sizeClass(ad));
+  tl_heap->objFreeIndex(ad, sizeClass(ad));
   AARCH64_WALKABLE_FRAME();
 }
 
@@ -813,7 +813,7 @@ ArrayData* PackedArray::SetRefInt(ArrayData* adIn, int64_t k, Variant& v,
   if (RuntimeOption::EvalHackArrCompatNotices) raiseHackArrCompatRefBind(k);
 
   return MutableOpInt(adIn, k, copy,
-    [&] (ArrayData* ad) { tvBind(v.asRef(), &packedData(ad)[k]); return ad; },
+    [&] (ArrayData* ad) { tvBind(*v.asRef(), packedData(ad)[k]); return ad; },
     [&] { return AppendRef(adIn, v, copy); },
     // TODO(#2606310): Make use of our knowledge that the key is missing.
     [&] (MixedArray* mixed) { return mixed->updateRef(k, v); }
@@ -1161,9 +1161,9 @@ ArrayData* PackedArray::ToVec(ArrayData* adIn, bool copy) {
     // convertingPackedToVec = true, it can fail and we have to handle that.
     // All we have to do afterwards is fix the kind and refcount in the copy;
     // it's easiest to do that by reinitializing the whole header.
-    auto ad = static_cast<ArrayData*>(MM().objMallocIndex(sizeClass(adIn)));
+    auto ad = static_cast<ArrayData*>(tl_heap->objMallocIndex(sizeClass(adIn)));
     if (!CopyPackedHelper<true>(adIn, ad)) {
-      MM().objFreeIndex(ad, sizeClass(adIn));
+      tl_heap->objFreeIndex(ad, sizeClass(adIn));
       SystemLib::throwInvalidArgumentExceptionObject(
         "Vecs cannot contain references");
     }

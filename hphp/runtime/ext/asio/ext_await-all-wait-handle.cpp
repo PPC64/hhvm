@@ -35,7 +35,7 @@ namespace HPHP {
 
 req::ptr<c_AwaitAllWaitHandle> c_AwaitAllWaitHandle::Alloc(int32_t cnt) {
   auto size = c_AwaitAllWaitHandle::heapSize(cnt);
-  auto mem = MM().objMalloc(size);
+  auto mem = tl_heap->objMalloc(size);
   auto handle = new (mem) c_AwaitAllWaitHandle(cnt);
   assert(handle->hasExactlyOneRef());
   return req::ptr<c_AwaitAllWaitHandle>::attach(handle);
@@ -271,7 +271,7 @@ void c_AwaitAllWaitHandle::onUnblocked(uint32_t idx) {
 void c_AwaitAllWaitHandle::markAsFinished() {
   auto parentChain = getParentChain();
   setState(STATE_SUCCEEDED);
-  tvWriteNull(&m_resultOrException);
+  tvWriteNull(m_resultOrException);
   parentChain.unblock();
   decRefObj(this);
 }

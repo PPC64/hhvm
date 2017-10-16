@@ -110,6 +110,12 @@ struct ScalarHash {
   bool equal(const ArrayData* ad1, const ArrayData* ad2) const {
     if (ad1 == ad2) return true;
     if (ad1->size() != ad2->size()) return false;
+    if (ad1->isHackArray()) {
+      if (!ad2->isHackArray()) return false;
+      if (ad1->kind() != ad2->kind()) return false;
+    } else if (ad2->isHackArray()) {
+      return false;
+    }
 
     auto check = [] (const TypedValue& tv1, const TypedValue& tv2) {
       if (tv1.m_type != tv2.m_type) {
@@ -940,7 +946,7 @@ bool ArrayData::EqualHelper(const ArrayData* ad1, const ArrayData* ad2,
     IterateKV(
       ad1,
       [&](Cell k, TypedValue v) {
-        if (!ad2->exists(k) || !tvEqual(v, *ad2->get(k).asTypedValue())) {
+        if (!ad2->exists(k) || !tvEqual(v, ad2->get(k).tv())) {
           equal = false;
           return true;
         }
@@ -972,7 +978,7 @@ int64_t ArrayData::CompareHelper(const ArrayData* ad1, const ArrayData* ad2) {
         result = 1;
         return true;
       }
-      auto const cmp = tvCompare(v, *ad2->get(k).asTypedValue());
+      auto const cmp = tvCompare(v, ad2->get(k).tv());
       if (cmp != 0) {
         result = cmp;
         return true;
@@ -1159,24 +1165,24 @@ Variant ArrayData::each() {
 ///////////////////////////////////////////////////////////////////////////////
 // helpers
 
-const Variant& ArrayData::getNotFound(int64_t k) {
+member_rval ArrayData::getNotFound(int64_t k) {
   raise_notice("Undefined index: %" PRId64, k);
-  return uninit_variant;
+  return member_rval::dummy();
 }
 
-const Variant& ArrayData::getNotFound(const StringData* k) {
+member_rval ArrayData::getNotFound(const StringData* k) {
   raise_notice("Undefined index: %s", k->data());
-  return uninit_variant;
+  return member_rval::dummy();
 }
 
-const Variant& ArrayData::getNotFound(int64_t k, bool error) const {
+member_rval ArrayData::getNotFound(int64_t k, bool error) const {
   return error && kind() != kGlobalsKind ? getNotFound(k) :
-         uninit_variant;
+         member_rval::dummy();
 }
 
-const Variant& ArrayData::getNotFound(const StringData* k, bool error) const {
+member_rval ArrayData::getNotFound(const StringData* k, bool error) const {
   return error && kind() != kGlobalsKind ? getNotFound(k) :
-         uninit_variant;
+         member_rval::dummy();
 }
 
 const char* ArrayData::kindToString(ArrayKind kind) {

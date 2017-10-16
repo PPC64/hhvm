@@ -412,8 +412,14 @@ class virtual ['self] reduce =
     method on_Fallthrough _ = self#e
     method on_Expr = self#on_expr
     method on_Block = self#on_block
-    method on_Break env pos level_opt = self#on_Pos_t env pos
-    method on_Continue env pos level_opt = self#on_Pos_t env pos
+    method on_Break env pos level_opt =
+      let r0 = self#on_Pos_t env pos in
+      let r1 = self#on_option self#on_expr env level_opt in
+      self#add r0 r1
+    method on_Continue env pos level_opt =
+      let r0 = self#on_Pos_t env pos in
+      let r1 = self#on_option self#on_expr env level_opt in
+      self#add r0 r1
     method on_Throw = self#on_expr
     method on_Return env c0 c1 =
       let r0 = self#on_Pos_t env c0 in
@@ -757,7 +763,6 @@ class virtual ['self] reduce =
     method on_Upincr _ = self#e
     method on_Updecr _ = self#e
     method on_Uref _ = self#e
-    method on_Usplat _ = self#e
     method on_Usilence _ = self#e
     method on_uop env = function
       | Utild -> self#on_Utild env
@@ -769,7 +774,6 @@ class virtual ['self] reduce =
       | Upincr -> self#on_Upincr env
       | Updecr -> self#on_Updecr env
       | Uref -> self#on_Uref env
-      | Usplat -> self#on_Usplat env
       | Usilence -> self#on_Usilence env
     method on_Default = self#on_block
     method on_Case env c0 c1 =

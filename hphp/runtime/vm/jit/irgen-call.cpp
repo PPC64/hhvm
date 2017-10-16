@@ -51,8 +51,11 @@ findCuf(Op /*op*/, SSATmp* callable, const Func* ctxFunc, const Class*& cls,
 
   const StringData* str =
     callable->hasConstVal(TStr) ? callable->strVal() : nullptr;
-  const ArrayData* arr =
-    callable->hasConstVal(TArr) ? callable->arrVal() : nullptr;
+  auto arr = [&]() -> const ArrayData* {
+    if (callable->hasConstVal(TArr)) return callable->arrVal();
+    if (callable->hasConstVal(TVec)) return callable->vecVal();
+    return nullptr;
+  }();
 
   StringData* sclass = nullptr;
   StringData* sname = nullptr;
@@ -73,11 +76,11 @@ findCuf(Op /*op*/, SSATmp* callable, const Func* ctxFunc, const Class*& cls,
     sname = makeStaticString(name.substr(pos + 2).get());
   } else if (arr) {
     if (arr->size() != 2) return nullptr;
-    const Variant& e0 = arr->get(int64_t(0), false);
-    const Variant& e1 = arr->get(int64_t(1), false);
-    if (!e0.isString() || !e1.isString()) return nullptr;
-    sclass = e0.getStringData();
-    sname = e1.getStringData();
+    auto const e0 = arr->get(int64_t(0), false).unboxed();
+    auto const e1 = arr->get(int64_t(1), false).unboxed();
+    if (!isStringType(e0.type()) || !isStringType(e1.type())) return nullptr;
+    sclass = e0.val().pstr;
+    sname = e1.val().pstr;
     String name(sname);
     if (name.find("::") != String::npos) return nullptr;
   } else {
@@ -577,7 +580,7 @@ void fpushCufUnknown(IRGS& env, Op op, uint32_t numParams) {
 
   if (topC(env)->isA(TObj)) return fpushFuncObj(env, numParams);
 
-  if (!topC(env)->type().subtypeOfAny(TArr, TStr)) {
+  if (!topC(env)->type().subtypeOfAny(TArr, TVec, TStr)) {
     PUNT(fpushCufUnknown);
   }
 
@@ -600,7 +603,10 @@ void fpushCufUnknown(IRGS& env, Op op, uint32_t numParams) {
   updateMarker(env);
   env.irb->exceptionStackBoundary();
 
-  auto const opcode = callable->isA(TArr) ? LdArrFPushCuf : LdStrFPushCuf;
+  auto const opcode =
+    callable->type().subtypeOfAny(TArr, TVec)
+      ? LdArrFPushCuf
+      : LdStrFPushCuf;
   gen(env, opcode,
       IRSPRelOffsetData { spOffBCFromIRSP(env) },
       callable, sp(env), fp(env));
@@ -1045,7 +1051,9 @@ void emitFPushFuncU(IRGS& env,
 
 void emitFPushFunc(IRGS& env, uint32_t numParams) {
   if (topC(env)->isA(TObj)) return fpushFuncObj(env, numParams);
-  if (topC(env)->isA(TArr)) return fpushFuncArr(env, numParams);
+  if (topC(env)->isA(TArr) || topC(env)->isA(TVec)) {
+    return fpushFuncArr(env, numParams);
+  }
 
   if (!topC(env)->isA(TStr)) {
     PUNT(FPushFunc_not_Str);

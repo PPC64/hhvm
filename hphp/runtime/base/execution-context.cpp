@@ -78,7 +78,7 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 TRACE_SET_MOD(bcinterp);
 
-IMPLEMENT_THREAD_LOCAL_NO_CHECK(ExecutionContext, g_context);
+THREAD_LOCAL_NO_CHECK(ExecutionContext, g_context);
 
 ExecutionContext::ExecutionContext()
   : m_transport(nullptr)
@@ -113,7 +113,7 @@ ExecutionContext::ExecutionContext()
 
   VariableSerializer::serializationSizeLimit =
     RuntimeOption::SerializationSizeLimit;
-  tvWriteUninit(&m_headerCallback);
+  tvWriteUninit(m_headerCallback);
 }
 
 // See header for why this is required.
@@ -669,7 +669,7 @@ void ExecutionContext::onShutdownPreSend() {
     try { obFlushAll(); } catch (...) {}
   };
 
-  MM().resetCouldOOM(isStandardRequest());
+  tl_heap->resetCouldOOM(isStandardRequest());
   executeFunctions(ShutDown);
 }
 
@@ -677,7 +677,7 @@ extern void ext_session_request_shutdown();
 
 void ExecutionContext::onShutdownPostSend() {
   ServerStats::SetThreadMode(ServerStats::ThreadMode::PostProcessing);
-  MM().resetCouldOOM(isStandardRequest());
+  tl_heap->resetCouldOOM(isStandardRequest());
   try {
     try {
       ServerStatsHelper ssh("psp", ServerStatsHelper::TRACK_HWINST);
@@ -942,7 +942,7 @@ bool ExecutionContext::callUserErrorHandler(const Exception &e, int errnum,
 }
 
 bool ExecutionContext::onFatalError(const Exception &e) {
-  MM().resetCouldOOM(isStandardRequest());
+  tl_heap->resetCouldOOM(isStandardRequest());
   RID().resetTimer();
   // need to restore the error reporting level, because the fault
   // handler for silencers won't be run on fatals, and we might be
@@ -1905,14 +1905,14 @@ bool ExecutionContext::evalUnit(Unit* unit, PC& pc, int funcType) {
   return ret;
 }
 
-const Variant& ExecutionContext::getEvaledArg(const StringData* val,
-                                              const String& namespacedName,
-                                              const Unit* funcUnit) {
+Variant ExecutionContext::getEvaledArg(const StringData* val,
+                                       const String& namespacedName,
+                                       const Unit* funcUnit) {
   auto key = StrNR(val);
 
   if (m_evaledArgs.get()) {
-    const Variant& arg = m_evaledArgs.get()->get(key);
-    if (&arg != &uninit_variant) return arg;
+    auto const arg = m_evaledArgs.get()->get(key);
+    if (!arg.is_dummy()) return Variant::wrap(arg.tv());
   }
 
   String code;

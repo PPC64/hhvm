@@ -16,7 +16,7 @@
 
 #include "hphp/util/managed-arena.h"
 
-#ifdef USE_JEMALLOC_CUSTOM_HOOKS
+#ifdef USE_JEMALLOC_EXTENT_HOOKS
 
 #include "hphp/util/hugetlb.h"
 #include "hphp/util/numa.h"
@@ -27,38 +27,6 @@
 
 namespace HPHP {
 
-#ifdef USE_JEMALLOC_CHUNK_HOOKS
-// jemalloc chunk hooks
-static bool chunk_dalloc(void* chunk, size_t size,
-                         bool committed, unsigned arena_ind) {
-  return true;
-}
-
-static bool chunk_commit(void* chunk, size_t size, size_t offset,
-                         size_t length, unsigned arena_ind) {
-  return false;
-}
-
-static bool chunk_decommit(void* chunk, size_t size, size_t offset,
-                           size_t length, unsigned arena_ind) {
-  return true;
-}
-
-static bool chunk_purge(void* chunk, size_t size, size_t offset,
-                        size_t length, unsigned arena_ind) {
-  return true;
-}
-
-static bool chunk_split(void* chunk, size_t size, size_t sizea, size_t sizeb,
-                        bool comitted, unsigned arena_ind) {
-  return false;
-}
-
-static bool chunk_merge(void* chunka, size_t sizea, void* chunkb, size_t sizeb,
-                        bool committed, unsigned arena_ind) {
-  return false;
-}
-#elif defined USE_JEMALLOC_EXTENT_HOOKS
 // jemalloc extent hooks
 static bool
 extent_dalloc(extent_hooks_t* /*extent_hooks*/, void* /*addr*/, size_t /*size*/,
@@ -113,22 +81,16 @@ static extent_hooks_t custom_extent_hooks {
   extent_split,
   extent_merge
 };
-#else
-# error "Missing jemalloc custom hook definitions."
-#endif
 
 //////////////////////////////////////////////////////////////////////
 
 std::atomic_bool ManagedArena::s_lock;
 ManagedArena* ManagedArena::s_arenas[MAX_HUGE_ARENA_COUNT];
 
-ManagedArena::ManagedArena(void* base, size_t maxCap,
-                           int nextNode /* = -1 */,
-                           int nodeMask /* = -1 */)
+ManagedArena::ManagedArena(void* base, size_t maxCap, int nextNode /* = -1 */)
   : m_base(static_cast<char*>(base))
   , m_maxCapacity(maxCap)
   , m_nextNode(nextNode)
-  , m_nodeMask(nodeMask)
 {
   assert(reinterpret_cast<uintptr_t>(base) % size1g == 0);
   assert(maxCap % size1g == 0);
@@ -139,94 +101,95 @@ ManagedArena::ManagedArena(void* base, size_t maxCap,
     throw std::runtime_error{"error when creating new arena."};
   }
   if (m_arenaId >= MAX_HUGE_ARENA_COUNT) {
-    always_assert(false);               // testing
     throw std::runtime_error{"too many arenas, check MAX_HUGE_ARENA_COUNT"};
   }
-  // Disable purging in this arena, as we won't be able to return the memory to
-  // the system anyway.
-  ssize_t decay_time = -1;
-
-#ifdef USE_JEMALLOC_CHUNK_HOOKS
-  chunk_hooks_t hooks {
-    ManagedArena::chunk_alloc,
-    chunk_dalloc,
-    chunk_commit,
-    chunk_decommit,
-    chunk_purge,
-    chunk_split,
-    chunk_merge
-  };
-  char command[32];
-  std::snprintf(command, sizeof(command), "arena.%d.chunk_hooks", m_arenaId);
-  sz = sizeof(hooks);
-  if (mallctl(command, nullptr, nullptr, &hooks, sz)) {
-    throw std::runtime_error("error in setting chunk hooks");
-  }
-  std::snprintf(command, sizeof(command), "arena.%d.decay_time", m_arenaId);
-  if (mallctl(command, nullptr, nullptr, &decay_time, sizeof(decay_time))) {
-    throw std::runtime_error("error when turning off decaying");
-  }
-#else
   char command[32];
   std::snprintf(command, sizeof(command), "arena.%d.extent_hooks", m_arenaId);
   extent_hooks_t *hooks_ptr = &custom_extent_hooks;
   sz = sizeof(hooks_ptr);
   if (mallctl(command, nullptr, nullptr, &hooks_ptr, sz)) {
-    throw std::runtime_error("error in setting extent hooks");
+    throw std::runtime_error{"error in setting extent hooks"};
   }
+
+  // Disable purging in this arena, as we won't be able to return the memory to
+  // the system anyway.
+  ssize_t decay_time = -1;
   std::snprintf(command, sizeof(command),
                 "arena.%d.dirty_decay_ms", m_arenaId);
   if (mallctl(command, nullptr, nullptr, &decay_time, sizeof(decay_time))) {
-    throw std::runtime_error("error when turning off decaying");
+    throw std::runtime_error{"error when turning off decaying"};
   }
   std::snprintf(command, sizeof(command),
                 "arena.%d.muzzy_decay_ms", m_arenaId);
   if (mallctl(command, nullptr, nullptr, &decay_time, sizeof(decay_time))) {
-    throw std::runtime_error("error when turning off decaying");
+    throw std::runtime_error{"error when turning off decaying"};
   }
-#endif
   s_arenas[m_arenaId] = this;
 }
 
-#ifdef USE_JEMALLOC_CHUNK_HOOKS
-void* ManagedArena::chunk_alloc(void* addr, size_t size,
-                                size_t alignment, bool* zero, bool* commit,
-                                unsigned arena_ind) {
-#else
+bool ManagedArena::tryGrab1G(size_t newSize) {
+  // Must hold `s_lock` when calling this.
+  assertx(s_lock.load(std::memory_order_relaxed));
+
+  // Before we do anything, check if someone already added a page (after we
+  // realized the need for a new page but before we got `s_lock`).
+  if (newSize <= m_currCapacity) return true;
+
+  int targetNode = -1; // in `mmap_1g()`, passing -1 as node indicating no NUMA
+  if (m_nextNode.load(std::memory_order_relaxed) >= 0) {
+    // Non-negative `m_nextNode` indicates that we do care about NUMA.
+    targetNode = next_numa_node(m_nextNode);
+    assertx(targetNode >=0 && numa_node_allowed(targetNode));
+  }
+
+  char* newPageStart = m_base - m_currCapacity - size1g;
+  assertx(reinterpret_cast<uintptr_t>(newPageStart) % size1g == 0);
+
+  if (mmap_1g(newPageStart, targetNode)) {
+    m_currCapacity += size1g;
+    return true;
+  }
+  return false;
+}
+
 void* ManagedArena::extent_alloc(extent_hooks_t* /*extent_hooks*/, void* addr,
                                  size_t size, size_t alignment, bool* zero,
                                  bool* commit, unsigned arena_ind) {
-#endif
   if (addr != nullptr) return nullptr;
   if (size > size1g) return nullptr;
 
   ManagedArena* arena = s_arenas[arena_ind];
   if (arena == nullptr) return nullptr;
 
-  // Just in case size is too big (negative)
-  if (size > arena->m_maxCapacity) return nullptr;
-
   assert(folly::isPowTwo(alignment));
   auto const mask = alignment - 1;
   size_t startOffset;
-  int failCount = 0;
+  uint32_t failCount = 0;
   do {
     size_t oldSize = arena->m_size.load(std::memory_order_relaxed);
     startOffset = (oldSize + size + mask) & ~mask;
     size_t newSize = startOffset;
-    if (newSize > arena->m_maxCapacity) return nullptr;
+
     if (newSize > arena->m_currCapacity) {
-      // Check if any huge page is available.
-      HugePageInfo info = get_huge1g_info();
-      if (info.nr_hugepages == num_1g_pages()) {
-        // We've got all possible pages, don't try to grab more in future.
-        arena->m_maxCapacity = arena->m_currCapacity;
+      if (arena->m_outOf1GPages) {
+        // TODO (T11400255): we plan add some normal pages here if we run out of
+        // huge pages.
         return nullptr;
       }
+
+      if (arena->m_currCapacity >= arena->m_maxCapacity) {
+        arena->m_outOf1GPages = true;
+        continue;
+      }
+      HugePageInfo info = get_huge1g_info();
+      if (info.nr_hugepages == num_1g_pages()) {
+        arena->m_outOf1GPages = true;
+        continue;
+      }
       if (info.free_hugepages <= 0) {
-        // We haven't got all possible pages reserved, but someone else is
-        // holding some of the pages, so we cannot get them now.  We can still
-        // try again later.
+        // We haven't got all huge pages we want, but someone else is holding
+        // some of the pages, so we cannot get them now.  We can try again
+        // later.
         return nullptr;
       }
 
@@ -240,47 +203,13 @@ void* ManagedArena::extent_alloc(extent_hooks_t* /*extent_hooks*/, void* addr,
       // We have the lock, remember to unlock.
       SCOPE_EXIT { s_lock.store(false, std::memory_order_relaxed); };
 
-      // Before we do anything, check if someone already added a page (after we
-      // realized a new page is needed but before we tried to grab the lock).
-      if (newSize <= arena->m_currCapacity) {
-        continue;
-      }
+      if (arena->tryGrab1G(newSize)) continue;
 
-      // OK. It is our duty to add a new page.
-      char* newPageStart = arena->m_base - arena->m_currCapacity - size1g;
-      assert(reinterpret_cast<uintptr_t>(newPageStart) % size1g == 0);
+      // This test works even if NUMA is not supported, or if there is only 1
+      // NUMA node, in which cases we just return nullptr after the first try.
+      if (++failCount >= numa_num_nodes) return nullptr;
 
-      if (arena->m_nextNode < 0) {
-        if (mmap_1g(newPageStart)) {
-          arena->m_currCapacity += size1g;
-        } else {
-          // I thought a page was available, hmmm..  Maybe some other process
-          // got the page?
-          return nullptr;
-        }
-      } else {
-#ifdef HAVE_NUMA
-        if (arena->m_nodeMask == 0) return nullptr;
-        auto targetNode = arena->m_nextNode & numa_node_mask;
-        while ((arena->m_nodeMask & (1 << targetNode)) == 0) {
-          targetNode = (targetNode + 1) & numa_node_mask;
-        }
-        arena->m_nextNode = (targetNode + 1) & numa_node_mask;
-        assert(arena->m_nodeMask & (1 << targetNode));
-        if (mmap_1g(newPageStart, targetNode)) {
-          arena->m_currCapacity += size1g;
-        } else if (++failCount == numa_num_nodes) {
-          // We tried on all the nodes, but couldn't get a page, even
-          // though a page appeared available.
-          return nullptr;
-        }
-#else
-        // Shouldn't specify next node if NUMA is unavailable.
-        return nullptr;
-#endif
-      }
-      // We have successfully added a page to the arena, or have failed for a
-      // specific node, move to the next node and retry.
+      // We haven't tried on all NUMA nodes yet, so retry in the next iteration.
       continue;
     }
     if (arena->m_size.compare_exchange_weak(oldSize, newSize)) {
@@ -290,6 +219,23 @@ void* ManagedArena::extent_alloc(extent_hooks_t* /*extent_hooks*/, void* addr,
   *zero = true;
   *commit = true;
   return arena->m_base - startOffset;
+}
+
+size_t ManagedArena::activeSize() const {
+  // update jemalloc stats
+  uint64_t epoch = 1;
+  mallctl("epoch", nullptr, nullptr, &epoch, sizeof(epoch));
+  size_t pactive = 0;
+  size_t sz = sizeof(pactive);
+  char buffer[32];
+  std::snprintf(buffer, sizeof(buffer),
+                "stats.arenas.%d.pactive", m_arenaId);
+  if (mallctl(buffer, &pactive, &sz, nullptr, 0) != 0) {
+    return size();
+  }
+  auto const activeSize = pactive * s_pageSize;
+  assertx(activeSize <= size());
+  return activeSize;
 }
 
 std::string ManagedArena::reportStats() {
@@ -302,10 +248,10 @@ std::string ManagedArena::reportStats() {
                     "Arena %d on NUMA mask %d: capacity %zd, "
                     "max_capacity %zd, used %zd\n",
                     i,
-                    arena->m_nodeMask,
+                    numa_node_mask,
                     arena->m_currCapacity,
                     arena->m_maxCapacity,
-                    arena->m_size.load(std::memory_order_relaxed));
+                    arena->activeSize());
       result += buffer;
     }
   }
@@ -313,4 +259,4 @@ std::string ManagedArena::reportStats() {
 }
 
 }
-#endif // USE_JEMALLOC_CUSTOM_HOOKS
+#endif // USE_JEMALLOC_EXTENT_HOOKS

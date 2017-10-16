@@ -518,6 +518,7 @@ module Naming                               = struct
   let goto_label_defined_in_finally         = 2074 (* DONT MODIFY!!!! *)
   let goto_invoked_in_finally               = 2075 (* DONT MODIFY!!!! *)
   let dynamic_class_property_name_in_strict_mode  = 2076 (* DONT MODIFY!!!! *)
+  let this_as_lexical_variable              = 2077 (* DONT MODIFY!!!! *)
 
   (* EXTEND HERE WITH NEW VALUES IF NEEDED *)
 end
@@ -562,6 +563,7 @@ module NastCheck                            = struct
   let yield_in_coroutine                    = 3037 (* DONT MODIFY!!!! *)
   let suspend_outside_of_coroutine          = 3038 (* DONT MODIFY!!!! *)
   let suspend_in_finally                    = 3039 (* DONT MODIFY!!!! *)
+  let break_continue_n_not_supported        = 3040 (* DONT MODIFY!!!! *)
   (* EXTEND HERE WITH NEW VALUES IF NEEDED *)
 end
 
@@ -736,6 +738,7 @@ module Typing                               = struct
   let coroutine_call_outside_of_suspend     = 4171 (* DONT MODIFY!!!! *)
   let function_is_not_coroutine             = 4172 (* DONT MODIFY!!!! *)
   let coroutinness_mismatch                 = 4173 (* DONT MODIFY!!!! *)
+  let expecting_awaitable_return_type_hint  = 4174 (* DONT MODIFY!!!! *)
   (* EXTEND HERE WITH NEW VALUES IF NEEDED *)
 end
 
@@ -1307,6 +1310,10 @@ let suspend_in_finally p =
   add NastCheck.suspend_in_finally p
     "suspend is not allowed inside finally blocks."
 
+let break_continue_n_not_supported p =
+  add NastCheck.break_continue_n_not_supported p
+    "Break/continue N operators are not supported."
+
 let magic (p, s) =
   add NastCheck.magic p
     ("Don't call "^s^" it's one of these magic things we want to avoid")
@@ -1659,6 +1666,10 @@ let expecting_return_type_hint p =
 let expecting_return_type_hint_suggest p ty =
   add Typing.expecting_return_type_hint_suggest p
     ("Was expecting a return type hint (what about: ': "^ty^"')")
+
+let expecting_awaitable_return_type_hint p =
+  add Typing.expecting_awaitable_return_type_hint p
+    "Was expecting an Awaitable return type hint"
 
 let field_kinds pos1 pos2 =
   add_list Typing.field_kinds
@@ -2264,6 +2275,9 @@ let coroutinness_mismatch pos1_is_coroutine pos1 pos2 =
       pos1, if pos1_is_coroutine then m1 else m2;
       pos2, if pos1_is_coroutine then m2 else m1;
     ]
+
+let this_as_lexical_variable pos =
+  add Naming.this_as_lexical_variable pos "Cannot use $this as lexical variable"
 
 (*****************************************************************************)
 (* Typing decl errors *)

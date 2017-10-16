@@ -424,9 +424,9 @@ public:
   void setVar(StringData* name, const TypedValue* v);
   void bindVar(StringData* name, TypedValue* v);
   Array getLocalDefinedVariables(int frame);
-  const Variant& getEvaledArg(const StringData* val,
-                              const String& namespacedName,
-                              const Unit* funcUnit);
+  Variant getEvaledArg(const StringData* val,
+                       const String& namespacedName,
+                       const Unit* funcUnit);
 
 private:
   template <bool forwarding>
@@ -606,7 +606,7 @@ template<>
 #endif
 void ThreadLocalNoCheck<ExecutionContext>::destroy();
 
-extern DECLARE_THREAD_LOCAL_NO_CHECK(ExecutionContext, g_context);
+extern THREAD_LOCAL_NO_CHECK(ExecutionContext, g_context);
 
 ///////////////////////////////////////////////////////////////////////////////
 }

@@ -53,6 +53,8 @@ struct Function {
   Class* definingClass;
   CFG cfg;
   std::vector<Param> params;
+  uint32_t startLineno;
+  uint32_t endLineno;
 };
 
 struct Class {
@@ -72,12 +74,14 @@ struct Class {
     CFG cfg;
   };
 
-  Function* getConstructor();
-  void buildPropInit();
+  Function* getConstructor(uint32_t lineno);
+  void buildPropInit(uint32_t lineno);
 
   Unit* parent;
   std::string name;
   folly::Optional<std::string> parentName;
+  std::vector<std::string> implements;
+  std::vector<std::string> traits;
   uint32_t index;
   Attr attr{Attr::AttrNone};
   std::vector<std::unique_ptr<Function>> methods;
@@ -97,8 +101,12 @@ struct Unit {
     return functions.back().get();
   }
 
+  uint32_t nextClassId() {
+    return classes.size();
+  }
+
   Class* makeClass() {
-    classes.emplace_back(std::make_unique<Class>(this, classes.size()));
+    classes.emplace_back(std::make_unique<Class>(this, nextClassId()));
     return classes.back().get();
   }
 

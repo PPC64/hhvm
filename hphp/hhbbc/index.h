@@ -17,10 +17,10 @@
 #define incl_HHBBC_INDEX_H_
 
 #include <memory>
-#include <mutex>
 #include <tuple>
 #include <vector>
 #include <map>
+#include <exception>
 
 #include <boost/variant.hpp>
 #include <tbb/concurrent_hash_map.h>
@@ -356,10 +356,24 @@ std::string show(const Class&);
  */
 struct Index {
   /*
+   * Throwing a rebuild exception indicates that the index needs to
+   * be rebuilt.
+   *
+   * The exception should be passed to the Index constructor.
+   */
+  struct rebuild : std::exception {
+    explicit rebuild(std::vector<std::pair<SString, SString>> ca) :
+        class_aliases(std::move(ca)) {}
+  private:
+    friend struct Index;
+    std::vector<std::pair<SString, SString>> class_aliases;
+  };
+
+  /*
    * Create an Index for a php::Program.  Performs some initial
    * analysis of the program.
    */
-  explicit Index(borrowed_ptr<php::Program>);
+  explicit Index(borrowed_ptr<php::Program>, rebuild* = nullptr);
 
   /*
    * This class must not be destructed after its associated
@@ -410,6 +424,21 @@ struct Index {
    */
   const CompactVector<borrowed_ptr<const php::Class>>*
     lookup_closures(borrowed_ptr<const php::Class>) const;
+
+  /*
+   * Attempt to record a new alias in the index. May be called from
+   * multi-threaded contexts, so doesn't actually update the index
+   * (call update_class_aliases to do that). Returns false if it would
+   * violate any current uniqueness assumptions.
+   */
+  bool register_class_alias(SString orig, SString alias) const;
+
+  /*
+   * Add any aliases that have been registered since the last call to
+   * update_class_aliases to the index. Must be called from a single
+   * threaded context.
+   */
+  void update_class_aliases();
 
   /*
    * Try to find a res::Class for a given php::Class.
@@ -510,12 +539,13 @@ struct Index {
   res::Func resolve_method(Context, Type clsType, SString name) const;
 
   /*
-   * Try to resolve a class constructor for the supplied class.
+   * Try to resolve a class constructor for the supplied class type.
    *
-   * Returns: folly::none if we can't figure out which constructor
-   * this would call.
+   * Returns: folly::none if it can't at least figure out a func
+   * family for the call.
    */
-  folly::Optional<res::Func> resolve_ctor(Context, res::Class) const;
+  folly::Optional<res::Func>
+  resolve_ctor(Context, res::Class rcls, bool exact) const;
 
   /*
    * Give the Type in our type system that matches an hhvm
@@ -803,6 +833,14 @@ struct Index {
    * WaitH<Type>.
    */
   void fixup_return_type(borrowed_ptr<const php::Func>, Type&) const;
+
+  /*
+   * Return true if we know for sure that one php::Class must derive
+   * from another at runtime, in all possible instantiations.
+   */
+  bool must_be_derived_from(borrowed_ptr<const php::Class>,
+                            borrowed_ptr<const php::Class>) const;
+
 private:
   Index(const Index&) = delete;
   Index& operator=(Index&&) = delete;
@@ -811,8 +849,6 @@ private:
   template<class FuncRange>
   res::Func resolve_func_helper(const FuncRange&, SString) const;
   res::Func do_resolve(borrowed_ptr<const php::Func>) const;
-  bool must_be_derived_from(borrowed_ptr<const php::Class>,
-                            borrowed_ptr<const php::Class>) const;
   bool could_be_related(borrowed_ptr<const php::Class>,
                         borrowed_ptr<const php::Class>) const;
 

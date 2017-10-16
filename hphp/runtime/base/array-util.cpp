@@ -175,13 +175,13 @@ namespace {
 void rangeCheckAlloc(double estNumSteps) {
   // An array can hold at most INT_MAX elements
   if (estNumSteps > std::numeric_limits<int32_t>::max()) {
-    MM().forceOOM();
+    tl_heap->forceOOM();
     check_non_safepoint_surprise();
     return;
   }
 
   int32_t numElms = static_cast<int32_t>(estNumSteps);
-  if (MM().preAllocOOM(MixedArray::computeAllocBytesFromMaxElms(numElms))) {
+  if (tl_heap->preAllocOOM(MixedArray::computeAllocBytesFromMaxElms(numElms))) {
     check_non_safepoint_surprise();
   }
 }
@@ -249,8 +249,7 @@ Variant ArrayUtil::Range(int64_t low, int64_t high, int64_t step /* = 1 */) {
 Variant ArrayUtil::CountValues(const Array& input) {
   Array ret = Array::Create();
   for (ArrayIter iter(input); iter; ++iter) {
-    auto const rval = iter.secondRval();
-    auto const inner = tvToCell(rval);
+    auto const inner = iter.secondRval().unboxed();
     if (isIntType(inner.type()) || isStringType(inner.type())) {
       if (!ret.exists(inner.tv())) {
         ret.set(inner.tv(), make_tv<KindOfInt64>(1));

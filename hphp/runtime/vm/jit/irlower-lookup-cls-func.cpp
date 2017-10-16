@@ -334,7 +334,7 @@ void loadArrayFunctionContext(ArrayData* arr, ActRec* preLiveAR, ActRec* fp) {
   try {
     loadFuncContextImpl<OnFail::Fatal>(ArrNR(arr), preLiveAR, fp);
   } catch (...) {
-    *arPreliveOverwriteCells(preLiveAR) = make_tv<KindOfArray>(arr);
+    *arPreliveOverwriteCells(preLiveAR) = make_array_like_tv(arr);
     throw;
   }
 }
@@ -358,12 +358,12 @@ static bool strHasColon(StringData* sd) {
 
 void fpushCufHelperArray(ArrayData* arr, ActRec* preLiveAR, ActRec* fp) {
   try {
-    if (UNLIKELY(!arr->isPacked() || arr->getSize() != 2)) {
+    if (UNLIKELY(!arr->hasPackedLayout() || arr->getSize() != 2)) {
       return fpushCufHelperArraySlowPath(arr, preLiveAR, fp);
     }
 
-    auto const elem0 = tvToCell(PackedArray::RvalInt(arr, 0));
-    auto const elem1 = tvToCell(PackedArray::RvalInt(arr, 1));
+    auto const elem0 = PackedArray::RvalInt(arr, 0).unboxed();
+    auto const elem1 = PackedArray::RvalInt(arr, 1).unboxed();
 
     if (UNLIKELY(elem0.type() != KindOfObject ||
                  !isStringType(elem1.type()))) {
@@ -392,7 +392,7 @@ void fpushCufHelperArray(ArrayData* arr, ActRec* preLiveAR, ActRec* fp) {
     inst->incRefCount();
     preLiveAR->setThis(inst);
   } catch (...) {
-    *arPreliveOverwriteCells(preLiveAR) = make_tv<KindOfArray>(arr);
+    *arPreliveOverwriteCells(preLiveAR) = make_array_like_tv(arr);
     throw;
   }
 }

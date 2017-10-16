@@ -66,14 +66,13 @@ FunctionScope::FunctionScope(AnalysisResultConstRawPtr ar, bool method,
       m_attribute(attribute), m_modifiers(modifiers), m_hasVoid(false),
       m_method(method), m_refReturn(reference), m_virtual(false),
       m_hasOverride(false),
-      m_volatile(false), m_persistent(false), m_pseudoMain(inPseudoMain),
+      m_pseudoMain(inPseudoMain),
       m_system(false),
       m_containsThis(false), m_containsBareThis(0),
       m_generator(false),
       m_async(false),
       m_noLSB(false), m_nextLSB(false), m_localRedeclaring(false),
-      m_fromTrait(false),
-      m_redeclaring(-1), m_inlineIndex(0), m_optFunction(0) {
+      m_fromTrait(false) {
   init(ar);
 
   for (unsigned i = 0; i < attrs.size(); ++i) {
@@ -115,8 +114,6 @@ FunctionScope::FunctionScope(FunctionScopePtr orig,
       m_userAttributes(orig->m_userAttributes), m_hasVoid(orig->m_hasVoid),
       m_method(orig->m_method), m_refReturn(orig->m_refReturn),
       m_virtual(orig->m_virtual), m_hasOverride(orig->m_hasOverride),
-      m_volatile(orig->m_volatile),
-      m_persistent(orig->m_persistent),
       m_pseudoMain(orig->m_pseudoMain),
       m_system(!user),
       m_containsThis(orig->m_containsThis),
@@ -125,19 +122,13 @@ FunctionScope::FunctionScope(FunctionScopePtr orig,
       m_async(orig->m_async),
       m_noLSB(orig->m_noLSB),
       m_nextLSB(orig->m_nextLSB), m_localRedeclaring(orig->m_localRedeclaring),
-      m_fromTrait(orig->m_fromTrait),
-      m_redeclaring(orig->m_redeclaring),
-      m_inlineIndex(orig->m_inlineIndex), m_optFunction(orig->m_optFunction) {
+      m_fromTrait(orig->m_fromTrait) {
   init(ar);
   setParamCounts(ar, m_minParam, m_numDeclParams);
 }
 
 void FunctionScope::init(AnalysisResultConstRawPtr /*ar*/) {
   m_dynamicInvoke = false;
-
-  if (isNamed("__autoload")) {
-    setVolatile();
-  }
 
   // FileScope's flags are from parser, but VariableTable has more flags
   // coming from type inference phase. So we are tranferring these flags
@@ -150,10 +141,6 @@ void FunctionScope::init(AnalysisResultConstRawPtr /*ar*/) {
   }
   if (m_attribute & FileScope::ContainsUnset) {
     m_variables->setAttribute(VariableTable::ContainsUnset);
-  }
-
-  if (m_stmt && Option::AllVolatile && !m_pseudoMain && !m_method) {
-    m_volatile = true;
   }
 
   if (!m_method && RuntimeOption::DynamicInvokeFunctions.count(m_scopeName)) {
@@ -187,14 +174,13 @@ FunctionScope::FunctionScope(bool method, const std::string &name,
       m_modifiers(ModifierExpressionPtr()), m_hasVoid(false),
       m_method(method), m_refReturn(reference), m_virtual(false),
       m_hasOverride(false),
-      m_volatile(false), m_persistent(false), m_pseudoMain(false),
+      m_pseudoMain(false),
       m_system(true),
       m_containsThis(false), m_containsBareThis(0),
       m_generator(false),
       m_async(false),
       m_noLSB(false), m_nextLSB(false), m_localRedeclaring(false),
-      m_fromTrait(false), m_redeclaring(-1), m_inlineIndex(0),
-      m_optFunction(0) {
+      m_fromTrait(false) {
   m_dynamicInvoke = false;
   if (!method && RuntimeOption::DynamicInvokeFunctions.count(name)) {
     setDynamicInvoke();
@@ -421,11 +407,7 @@ std::vector<ScalarExpressionPtr> FunctionScope::getUserAttributeParams(
 }
 
 std::string FunctionScope::getDocName() const {
-  auto const& name = getScopeName();
-  if (m_redeclaring < 0) {
-    return name;
-  }
-  return name + Option::IdPrefix + folly::to<std::string>(m_redeclaring);
+  return getScopeName();
 }
 
 std::string FunctionScope::getDocFullName() const {
@@ -495,42 +477,11 @@ void FunctionScope::serialize(JSON::DocTarget::OutputStream &out) const {
   ms.done();
 }
 
-FunctionScope::StringToFunctionInfoPtrMap FunctionScope::s_refParamInfo;
-static Mutex s_refParamInfoLock;
-
-void FunctionScope::RecordFunctionInfo(std::string fname,
-                                       FunctionScopePtr func) {
-  VariableTablePtr variables = func->getVariables();
-  if (Option::WholeProgram) {
-    Lock lock(s_refParamInfoLock);
-    FunctionInfoPtr &info = s_refParamInfo[fname];
-    if (!info) {
-      info = std::make_shared<FunctionInfo>();
-    }
-    if (func->isRefReturn()) {
-      info->setMaybeRefReturn();
-    }
-    if (func->isReferenceVariableArgument()) {
-      info->setRefVarArg(func->getMaxParamCount());
-    }
-    for (int i = 0; i < func->getMaxParamCount(); i++) {
-      if (func->isRefParam(i)) info->setRefParam(i);
-    }
-  }
-  auto limit = func->getDeclParamCount();
+void FunctionScope::recordParams() {
+  auto const variables = getVariables();
+  auto limit = getDeclParamCount();
   for (int i = 0; i < limit; i++) {
-    variables->addParam(func->getParamName(i),
+    variables->addParam(getParamName(i),
                         AnalysisResultPtr(), ConstructPtr());
   }
-}
-
-FunctionScope::FunctionInfoPtr FunctionScope::GetFunctionInfo(
-  const std::string& fname
-) {
-  assert(Option::WholeProgram);
-  auto it = s_refParamInfo.find(fname);
-  if (it == s_refParamInfo.end()) {
-    return FunctionInfoPtr();
-  }
-  return it->second;
 }

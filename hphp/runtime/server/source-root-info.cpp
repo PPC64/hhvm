@@ -31,8 +31,8 @@ using std::map;
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-IMPLEMENT_THREAD_LOCAL_NO_CHECK(std::string, SourceRootInfo::s_path);
-IMPLEMENT_THREAD_LOCAL_NO_CHECK(std::string, SourceRootInfo::s_phproot);
+THREAD_LOCAL_NO_CHECK(std::string, SourceRootInfo::s_path);
+THREAD_LOCAL_NO_CHECK(std::string, SourceRootInfo::s_phproot);
 
 const StaticString s_default("default");
 const StaticString s___builtin("__builtin");
@@ -63,17 +63,19 @@ SourceRootInfo::SourceRootInfo(Transport* transport)
     return;
   }
   if (RuntimeOption::SandboxFromCommonRoot) {
-    String sandboxName = matches.toArray().rvalAt(1).toString();
+    auto sandboxName = tvCastToString(matches.toArray().rvalAt(1).tv());
     createFromCommonRoot(sandboxName);
   } else {
     Array pair = StringUtil::Explode(
-      matches.toArray().rvalAt(1).toString(), "-", 2).toArray();
-    m_user = pair.rvalAt(0).toString();
+      tvCastToString(matches.toArray().rvalAt(1).tv()),
+      "-", 2
+    ).toArray();
+    m_user = tvCastToString(pair.rvalAt(0).tv());
     bool defaultSb = pair.size() == 1;
     if (defaultSb) {
       m_sandbox = s_default;
     } else {
-      m_sandbox = pair.rvalAt(1).toString();
+      m_sandbox = tvCastToString(pair.rvalAt(1).tv());
     }
 
     createFromUserConfig();
@@ -283,9 +285,9 @@ const StaticString
   s_PHP_ROOT("PHP_ROOT");
 
 std::string& SourceRootInfo::initPhpRoot() {
-  auto v = php_global(s_SERVER).toArray().rvalAt(s_PHP_ROOT);
-  if (v.isString()) {
-    *s_phproot.getCheck() = std::string(v.asCStrRef().data()) + "/";
+  auto const v = php_global(s_SERVER).toArray().rvalAt(s_PHP_ROOT).unboxed();
+  if (isStringType(v.type())) {
+    *s_phproot.getCheck() = std::string(v.val().pstr->data()) + "/";
   } else {
     // Our best guess at the source root.
     *s_phproot.getCheck() = GetCurrentSourceRoot();

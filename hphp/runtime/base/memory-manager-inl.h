@@ -31,25 +31,21 @@ static_assert(
   "Size-specified small block alloc functions assume this"
 );
 
-inline MemoryManager& MM() {
-  return *MemoryManager::TlsWrapper::getNoCheck();
-}
-
 ///////////////////////////////////////////////////////////////////////////////
 
-inline BigHeap::~BigHeap() {
+inline SparseHeap::~SparseHeap() {
   reset();
 }
 
-inline bool BigHeap::empty() const {
+inline bool SparseHeap::empty() const {
   return m_slabs.empty() && m_bigs.empty();
 }
 
-inline bool ContiguousBigHeap::empty() const {
+inline bool ContiguousHeap::empty() const {
   return m_base == m_front;
 }
 
-inline size_t ContiguousBigHeap::chunk_index(char* p) const {
+inline size_t ContiguousHeap::chunk_index(char* p) const {
   assert(p >= m_base);
   return (p - m_base) / ChunkSize;
 }
@@ -424,15 +420,15 @@ inline HeapObject* MemoryManager::find(const void* p) {
 ///////////////////////////////////////////////////////////////////////////////
 
 inline bool MemoryManager::sweeping() {
-  return !TlsWrapper::isNull() && tl_sweeping;
+  return tl_heap && tl_sweeping;
 }
 
 inline bool MemoryManager::exiting() {
-  return !TlsWrapper::isNull() && MM().m_exiting;
+  return tl_heap && tl_heap->m_exiting;
 }
 
 inline void MemoryManager::setExiting() {
-  if (!TlsWrapper::isNull()) MM().m_exiting = true;
+  if (tl_heap) tl_heap->m_exiting = true;
 }
 
 inline StringDataNode& MemoryManager::getStringList() {

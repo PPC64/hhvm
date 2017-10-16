@@ -288,7 +288,7 @@ std::vector<PointInfo> toPointInfoArray(const Array& coordinates) {
   int idx = 0;
 
   for (ArrayIter it(coordinates); it; ++it) {
-    auto const element = tvToCell(it.secondRvalPlus());
+    auto const element = it.secondRvalPlus().unboxed();
     if (!isArrayLikeType(element.type())) {
       return {};
     }
@@ -352,7 +352,7 @@ bool ImagickExtension::hasProgressMonitor() {
   return s_ini_setting->m_progress_monitor;
 }
 
-IMPLEMENT_THREAD_LOCAL(ImagickExtension::ImagickIniSetting,
+THREAD_LOCAL(ImagickExtension::ImagickIniSetting,
                        ImagickExtension::s_ini_setting);
 
 ImagickExtension s_imagick_extension;

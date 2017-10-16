@@ -102,7 +102,7 @@ class virtual ['b] endo :
         on_Break : 'c ->
                    Ast_visitors_ancestors.stmt ->
                    Ast_visitors_ancestors.pos_t ->
-                   int option ->
+                   Ast_visitors_ancestors.expr option ->
                    Ast_visitors_ancestors.stmt;
         on_CA_enum : 'c ->
                      Ast_visitors_ancestors.ca_type ->
@@ -221,7 +221,7 @@ class virtual ['b] endo :
         on_Continue : 'c ->
                       Ast_visitors_ancestors.stmt ->
                       Ast_visitors_ancestors.pos_t ->
-                      int option ->
+                      Ast_visitors_ancestors.expr option ->
                       Ast_visitors_ancestors.stmt;
         on_Contravariant : 'c ->
                            Ast_visitors_ancestors.variance ->
@@ -632,8 +632,6 @@ class virtual ['b] endo :
                    Ast_visitors_ancestors.uop -> Ast_visitors_ancestors.uop;
         on_Uref : 'c ->
                   Ast_visitors_ancestors.uop -> Ast_visitors_ancestors.uop;
-        on_Usplat : 'c ->
-                    Ast_visitors_ancestors.uop -> Ast_visitors_ancestors.uop;
         on_Usilence : 'c ->
                     Ast_visitors_ancestors.uop -> Ast_visitors_ancestors.uop;
         on_Utild : 'c ->
@@ -971,7 +969,7 @@ class virtual ['b] endo :
       'c ->
       Ast_visitors_ancestors.stmt ->
       Ast_visitors_ancestors.pos_t ->
-      int option -> Ast_visitors_ancestors.stmt
+      Ast_visitors_ancestors.expr option -> Ast_visitors_ancestors.stmt
     method on_CA_enum :
       'c ->
       Ast_visitors_ancestors.ca_type ->
@@ -1101,7 +1099,7 @@ class virtual ['b] endo :
       'c ->
       Ast_visitors_ancestors.stmt ->
       Ast_visitors_ancestors.pos_t ->
-      int option -> Ast_visitors_ancestors.stmt
+      Ast_visitors_ancestors.expr option -> Ast_visitors_ancestors.stmt
     method on_Contravariant :
       'c ->
       Ast_visitors_ancestors.variance -> Ast_visitors_ancestors.variance
@@ -1522,8 +1520,6 @@ class virtual ['b] endo :
     method on_Uplus :
       'c -> Ast_visitors_ancestors.uop -> Ast_visitors_ancestors.uop
     method on_Uref :
-      'c -> Ast_visitors_ancestors.uop -> Ast_visitors_ancestors.uop
-    method on_Usplat :
       'c -> Ast_visitors_ancestors.uop -> Ast_visitors_ancestors.uop
     method on_Usilence :
       'c -> Ast_visitors_ancestors.uop -> Ast_visitors_ancestors.uop

@@ -148,7 +148,7 @@ public:
   String id;
 };
 
-IMPLEMENT_THREAD_LOCAL_NO_CHECK(SessionRequestData, s_session);
+THREAD_LOCAL_NO_CHECK(SessionRequestData, s_session);
 
 void SessionRequestData::requestShutdownImpl() {
   if (mod_is_open()) {
@@ -837,7 +837,7 @@ private:
     return nrdels;
   }
 };
-IMPLEMENT_THREAD_LOCAL(FileSessionData, s_file_session_data);
+THREAD_LOCAL(FileSessionData, s_file_session_data);
 
 struct FileSessionModule : SessionModule {
   FileSessionModule() : SessionModule("files") {
@@ -1208,7 +1208,7 @@ static bool ini_on_update_save_dir(const std::string& value) {
     return false;
   }
   if (g_context.isNull()) return false;
-  const char *path = value.data() + value.rfind(';') + 1;
+  const char *path = value.data() + (value.rfind(';') + 1);
   if (File::TranslatePath(path).empty()) {
     return false;
   }

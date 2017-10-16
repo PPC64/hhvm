@@ -97,10 +97,19 @@ let emit_markup env s echo_expr_opt ~check_for_hashbang =
     echo
   ]
 
+let get_level p op e =
+  match Ast_utils.get_break_continue_level e with
+  | Ast_utils.Level_ok (Some i) -> i
+  | Ast_utils.Level_ok None -> 1
+  | Ast_utils.Level_non_positive ->
+    Emit_fatal.raise_fatal_parse
+      p ("'" ^ op ^ "' operator accepts only positive numbers")
+  | Ast_utils.Level_non_literal ->
+    Emit_fatal.raise_fatal_parse
+      p ("'" ^ op ^ "' with non-constant operand is not supported")
+
 let rec emit_stmt env st =
   match st with
-  | A.Expr (_, A.Unsafeexpr e) ->
-    emit_stmt env (A.Expr e)
   | A.Expr (_, A.Yield_break) ->
     gather [
       instr_null;
@@ -227,9 +236,9 @@ let rec emit_stmt env st =
   | A.While (e, b) ->
     emit_while env e (A.Block b)
   | A.Break (pos, level_opt) ->
-    emit_break env pos (Option.value level_opt ~default:1)
+    emit_break env pos (get_level pos "break" level_opt)
   | A.Continue (pos, level_opt) ->
-    emit_continue env pos (Option.value level_opt ~default:1)
+    emit_continue env pos (get_level pos "continue" level_opt)
   | A.Do (b, e) ->
     emit_do env (A.Block b) e
   | A.For (e1, e2, e3, b) ->
@@ -439,9 +448,11 @@ and emit_switch env scrutinee_expr cl =
   (* If there is no default clause, add an empty one at the end *)
   let is_default c = match c with A.Default _ -> true | _ -> false in
   let cl =
-    if List.exists cl is_default
-    then cl
-    else cl @ [A.Default []] in
+    match List.count cl is_default with
+    | 0 -> cl @ [A.Default []]
+    | 1 -> cl
+    | _ -> Emit_fatal.raise_fatal_runtime
+      Pos.none "Switch statements may only contain one 'default' clause." in
   (* "continue" in a switch in PHP has the same semantics as break! *)
   let cl =
     Emit_env.do_in_switch_body break_label env @@

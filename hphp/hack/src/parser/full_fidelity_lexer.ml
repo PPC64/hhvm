@@ -29,6 +29,8 @@ let invalid = '\000'
 let make text =
   { text; start = 0; offset = 0; errors = [] }
 
+let empty = make SourceText.empty
+
 let source lexer =
   lexer.text
 
@@ -1252,7 +1254,8 @@ we use are:
 * The first newline trivia encountered is the last trailing trivia.
 * The newline which follows a // or # comment is not part of the comment
   but does terminate the trailing trivia.
-* An /*UNSAFE_EXPR*/ is always a leading trivia.
+* A pragma to turn checks off (HH_FIXME, HH_IGNORE_ERROR and UNSAFE_EXPR) is
+* always a leading trivia.
 *)
 
 let scan_leading_trivia scanner lexer =
@@ -1278,7 +1281,10 @@ let scan_trailing_trivia scanner lexer  =
     | Some t -> begin
       match t.Trivia.kind with
       | TriviaKind.EndOfLine -> (lexer1, t :: acc)
-      | TriviaKind.UnsafeExpression -> (lexer, acc)
+      | TriviaKind.FixMe
+      | TriviaKind.IgnoreError
+      | TriviaKind.UnsafeExpression
+        -> (lexer, acc)
       | _ -> aux lexer1 (t :: acc)
       end in
   let (lexer, trivia_list) = aux lexer [] in
@@ -1372,8 +1378,14 @@ let scan_next_token_as_keyword = scan_next_token false
 (* Entrypoints *)
 (* TODO: Instead of passing Boolean flags, create a flags enum? *)
 
-let next_token lexer =
-  scan_next_token_as_keyword scan_token_outside_type lexer
+(* This function is the inner loop of the parser, is pure, and
+is frequently called twice in a row with the same lexer due to the
+design of the parser. We get a big win by memoizing it. *)
+let next_token = (* takes a lexer, returns a (lexer, token) *)
+  let next_token_cache = Little_cache.make empty
+    (empty, Full_fidelity_minimal_token.make TokenKind.EndOfFile 0 [] []) in
+  Little_cache.memoize next_token_cache
+    (scan_next_token_as_keyword scan_token_outside_type)
 
 let next_token_no_trailing lexer =
   let tokenizer lexer =

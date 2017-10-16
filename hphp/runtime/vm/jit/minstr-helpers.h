@@ -126,14 +126,14 @@ inline TypedValue cGetRefShuffle(const TypedValue& localTvRef,
                                  const TypedValue* result) {
   if (LIKELY(result != &localTvRef)) {
     result = tvToCell(result);
-    tvIncRefGen(result);
+    tvIncRefGen(*result);
   } else {
     // If a magic getter or array access method returned by reference, we have
     // to incref the inner cell and drop our reference to the RefData.
     // Otherwise we do nothing, since we already own a reference to result.
     if (UNLIKELY(localTvRef.m_type == KindOfRef)) {
       auto inner = *localTvRef.m_data.pref->tv();
-      tvIncRefGen(&inner);
+      tvIncRefGen(inner);
       decRefRef(localTvRef.m_data.pref);
       return inner;
     }
@@ -195,7 +195,7 @@ inline TypedValue cGetPropSOQ(Class* ctx, ObjectData* base, StringData* key) {
 inline RefData* vGetRefShuffle(const TypedValue& localTvRef,
                                TypedValue* result) {
   if (LIKELY(result != &localTvRef)) {
-    if (result->m_type != KindOfRef) tvBox(result);
+    if (result->m_type != KindOfRef) tvBox(*result);
     auto ref = result->m_data.pref;
     ref->incRefCount();
     return ref;
@@ -210,30 +210,30 @@ inline RefData* vGetRefShuffle(const TypedValue& localTvRef,
   return localTvRef.m_data.pref;
 }
 
-#define VGET_PROP_HELPER_TABLE(m)       \
-  /* name        keyType     */\
-  m(vGetPropC,   KeyType::Any)  \
-  m(vGetPropS,   KeyType::Str)  \
+#define VGET_PROP_HELPER_TABLE(m) \
+  /* name        keyType     */   \
+  m(vGetPropC,   KeyType::Any)    \
+  m(vGetPropS,   KeyType::Str)
 
-#define X(nm, kt)                                                     \
-inline RefData* nm(Class* ctx, TypedValue* base, key_type<kt> key) {  \
-  TypedValue localTvRef;                                              \
-  auto result = Prop<MOpMode::Define,kt>(localTvRef, ctx, base, key);\
-  return vGetRefShuffle(localTvRef, result);                          \
+#define X(nm, kt)                                                          \
+inline RefData* nm(Class* ctx, TypedValue* base, key_type<kt> key) {       \
+  TypedValue localTvRef;                                                   \
+  auto result = Prop<MOpMode::Define,kt,true>(localTvRef, ctx, base, key); \
+  return vGetRefShuffle(localTvRef, result);                               \
 }
 VGET_PROP_HELPER_TABLE(X)
 #undef X
 
-#define VGET_OBJ_PROP_HELPER_TABLE(m)       \
-  /* name        keyType      */\
-  m(vGetPropCO,  KeyType::Any)  \
+#define VGET_OBJ_PROP_HELPER_TABLE(m) \
+  /* name        keyType      */      \
+  m(vGetPropCO,  KeyType::Any)        \
   m(vGetPropSO,  KeyType::Str)
 
-#define X(nm, kt)                                                     \
-inline RefData* nm(Class* ctx, ObjectData* base, key_type<kt> key) {  \
-  TypedValue localTvRef;                                              \
-  auto result = PropObj<MOpMode::Define,kt>(localTvRef, ctx, base, key);\
-  return vGetRefShuffle(localTvRef, result);\
+#define X(nm, kt)                                                             \
+inline RefData* nm(Class* ctx, ObjectData* base, key_type<kt> key) {          \
+  TypedValue localTvRef;                                                      \
+  auto result = PropObj<MOpMode::Define,kt,true>(localTvRef, ctx, base, key); \
+  return vGetRefShuffle(localTvRef, result);                                  \
 }
 VGET_OBJ_PROP_HELPER_TABLE(X)
 #undef X
@@ -249,21 +249,21 @@ void bindPropImpl(RefData* val, PropImpl prop_impl) {
     // it now.
     tvDecRefGen(localTvRef);
   } else {
-    tvBindRef(val, prop);
+    tvBindRef(val, *prop);
   }
 }
 
 inline void bindPropC(Class* ctx, TypedValue* base, TypedValue key,
                       RefData* val) {
   bindPropImpl(val, [&](TypedValue& tvref) {
-    return Prop<MOpMode::Define,KeyType::Any>(tvref, ctx, base, key);
+    return Prop<MOpMode::Define,KeyType::Any,true>(tvref, ctx, base, key);
   });
 }
 
 inline void bindPropCO(Class* ctx, ObjectData* base, TypedValue key,
                       RefData* val) {
   bindPropImpl(val, [&](TypedValue& tvref) {
-    return PropObj<MOpMode::Define,KeyType::Any>(tvref, ctx, base, key);
+    return PropObj<MOpMode::Define,KeyType::Any,true>(tvref, ctx, base, key);
   });
 }
 
@@ -986,7 +986,7 @@ uint64_t arrayIssetImpl(ArrayData* a, key_type<keyType> key) {
     : a->rval(key);
   return !rval
     ? 0
-    : !isNullType(tvToCell(rval).type());
+    : !isNullType(rval.unboxed().type());
 }
 
 #define ARRAY_ISSET_HELPER_TABLE(m)                             \
@@ -1102,8 +1102,8 @@ ISSET_EMPTY_ELEM_HELPER_TABLE(X)
 
 template<KeyType keyType>
 TypedValue mapGetImpl(c_Map* map, key_type<keyType> key) {
-  TypedValue* ret = map->at(key);
-  tvIncRefGen(ret);
+  auto const ret = map->at(key);
+  tvIncRefGen(*ret);
   return *ret;
 }
 

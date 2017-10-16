@@ -713,10 +713,12 @@ class virtual ['self] endo =
       if c0 == r0 then this else Block r0
     method on_Break env this c0 level_opt =
       let r0 = self#on_Pos_t env c0 in
-      if c0 == r0 then this else Break (r0, level_opt)
+      let r1 = self#on_option self#on_expr env level_opt in
+      if c0 == r0 && level_opt == r1 then this else Break (r0, r1)
     method on_Continue env this c0 level_opt =
       let r0 = self#on_Pos_t env c0 in
-      if c0 == r0 then this else Continue(r0, level_opt)
+      let r1 = self#on_option self#on_expr env level_opt in
+      if c0 == r0 && level_opt == r1 then this else Continue(r0, r1)
     method on_Throw env this c0 =
       let r0 = self#on_expr env c0 in
       if c0 == r0 then this else Throw r0
@@ -1178,7 +1180,6 @@ class virtual ['self] endo =
     method on_Upincr env this = this
     method on_Updecr env this = this
     method on_Uref env this = this
-    method on_Usplat env this = this
     method on_Usilence env this = this
     method on_uop env this =
       match this with
@@ -1191,7 +1192,6 @@ class virtual ['self] endo =
       | Upincr -> self#on_Upincr env this
       | Updecr -> self#on_Updecr env this
       | Uref -> self#on_Uref env this
-      | Usplat -> self#on_Usplat env this
       | Usilence -> self#on_Usilence env this
     method on_Default env this c0 =
       let r0 = self#on_block env c0 in

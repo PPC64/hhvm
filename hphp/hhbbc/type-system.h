@@ -565,7 +565,7 @@ private:
   struct DDHelperFn;
 
 private:
-  static Type unionArrLike(const Type& a, const Type& b);
+  static Type unionArrLike(Type a, Type b);
   template<class Ret, class T, class Function>
   DDHelperFn<Ret,T,Function> ddbind(const Function& f, const T& t) const;
   template<class Ret, class T, class Function>
@@ -951,6 +951,11 @@ bool is_scalar(const Type& t);
 /*
  * Return the canonical scalar type for t - equivalent to
  * from_cell(*tv(t)).
+ *
+ * This can be used to ensure that the arguments in a CallContext are
+ * canonicalized, so that immaterial changes to them (eg TArrN ->
+ * TSArrN or DArrLikeMap -> DArrLikeVal) don't affect which entry gets
+ * looked up.
  *
  * pre: is_scalar(t).
  */

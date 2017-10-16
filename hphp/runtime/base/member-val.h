@@ -67,7 +67,7 @@ struct member_lval {
   member_lval(HeapObject* base, TypedValue* elem);
 
   /*
-   * The base type which logically contains the referenced value and type.
+   * The base value which logically contains the referenced value and type.
    */
   HeapObject* base() const;
   ArrayData* arr_base() const;
@@ -83,10 +83,8 @@ struct member_lval {
    *
    * @requires: has_val()
    */
-  const Value& val() const;
-        Value& val();
-  const DataType& type() const;
-        DataType& type();
+  Value& val() const;
+  DataType& type() const;
 
   /*
    * Get a pointer to the referenced TypedValue.
@@ -145,6 +143,13 @@ struct member_rval {
   member_rval(const HeapObject* base, ptr_u ptr);
   member_rval(const HeapObject* base, const TypedValue* elem);
 
+  bool operator==(member_rval) const;
+
+  /*
+   * The base value which logically contains the referenced value and type.
+   */
+  const HeapObject* base() const;
+
   /*
    * Whether this member_rval contains a valid reference to a value and type.
    */
@@ -183,6 +188,26 @@ struct member_rval {
    * existing ones.
    */
   ptr_u elem() const;
+
+  /*
+   * The canonical non-null "missing" rval.
+   *
+   * Some users of member_rval prefer to use a dummy rval-to-Uninit to
+   * represent a missing element, instead of a nullptr rval, so that tv() is
+   * always valid.  These functions provide and test for such a value.
+   */
+  static member_rval dummy();
+  bool is_dummy() const;
+
+  /////////////////////////////////////////////////////////////////////////////
+
+  /*
+   * Return `this' if the referenced value is already unboxed, else a rval to
+   * the inner value.
+   */
+  member_rval unboxed() const;
+
+  /////////////////////////////////////////////////////////////////////////////
 
 private:
   union {

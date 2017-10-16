@@ -208,7 +208,7 @@ Array Array::diffImpl(const Array& array, bool by_key, bool by_value, bool match
         if (by_value) {
           found = value_cmp_as_string_function(
             VarNR(value),
-            array.rvalAt(key, AccessFlags::Key),
+            VarNR(array.rvalAt(key, AccessFlags::Key).tv()),
             value_data
           ) == 0;
         } else {
@@ -659,9 +659,9 @@ int Array::compare(const Array& v2, bool flip /* = false */) const {
 ///////////////////////////////////////////////////////////////////////////////
 
 template<typename T> ALWAYS_INLINE
-const Variant& Array::rvalAtImpl(const T& key, AccessFlags flags) const {
-  if (!m_arr) return uninit_variant;
-  return m_arr->get(key, any(flags & AccessFlags::Error));
+member_rval Array::rvalAtImpl(const T& key, AccessFlags flags) const {
+  return m_arr ? m_arr->get(key, any(flags & AccessFlags::Error))
+               : member_rval::dummy();
 }
 
 template<typename T> ALWAYS_INLINE
@@ -752,6 +752,9 @@ template<> bool not_found<bool>() { return false; }
 template<> const Variant& not_found<const Variant&>() { return uninit_variant; }
 template<> Variant& not_found<Variant&>() { return lvalBlackHole(); }
 
+template<> member_rval not_found<member_rval>() {
+  return member_rval::dummy();
+}
 template<> member_lval not_found<member_lval>() {
   return member_lval { nullptr, lvalBlackHole().asTypedValue() };
 }
@@ -772,10 +775,10 @@ decltype(auto) elem(const Array& arr, Fn fn, bool is_key,
   // The logic here is a specialization of cellToKey().
   if (key.isNull()) {
     if (!ad->useWeakKeys()) {
-      throwInvalidArrayKeyException(uninit_variant.asTypedValue(), ad);
+      throwInvalidArrayKeyException(&immutable_uninit_base, ad);
     }
     if (RuntimeOption::EvalHackArrCompatNotices) {
-      raiseHackArrCompatImplicitArrayKey(uninit_variant.asTypedValue());
+      raiseHackArrCompatImplicitArrayKey(&immutable_uninit_base);
     }
     return fn(make_tv<KindOfPersistentString>(staticEmptyString()),
               std::forward<Args>(args)...);
@@ -844,7 +847,7 @@ Variant& as_var(member_lval lval) { return tvAsVariant(lval.tv_ptr()); }
     return conv(name##Impl(int64_t(k), fl));            \
   }
 
-FOR_EACH_KEY_TYPE(rvalAt, const Variant&, const Variant&, identity, const)
+FOR_EACH_KEY_TYPE(rvalAt, member_rval, member_rval, identity, const)
 FOR_EACH_KEY_TYPE(lvalAt, member_lval, Variant&, detail::as_var, )
 FOR_EACH_KEY_TYPE(lvalAtRef, member_lval, Variant&, detail::as_var, )
 
@@ -912,20 +915,20 @@ FOR_EACH_KEY_TYPE(add)
 
 ///////////////////////////////////////////////////////////////////////////////
 
-Variant& Array::lvalAt() {
+member_lval Array::lvalAt() {
   if (!m_arr) m_arr = Ptr::attach(ArrayData::Create());
   auto const lval = m_arr->lvalNew(m_arr->cowCheck());
   if (lval.arr_base() != m_arr) m_arr = Ptr::attach(lval.arr_base());
-  assert(lval.tv_ptr());
-  return tvAsVariant(lval.tv_ptr());
+  assert(lval);
+  return lval;
 }
 
-Variant& Array::lvalAtRef() {
+member_lval Array::lvalAtRef() {
   if (!m_arr) m_arr = Ptr::attach(ArrayData::Create());
   auto const lval = m_arr->lvalNewRef(m_arr->cowCheck());
   if (lval.arr_base() != m_arr) m_arr = Ptr::attach(lval.arr_base());
-  assert(lval.tv_ptr());
-  return tvAsVariant(lval.tv_ptr());
+  assert(lval);
+  return lval;
 }
 
 void Array::append(TypedValue v) {

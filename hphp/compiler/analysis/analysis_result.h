@@ -127,6 +127,8 @@ public:
   }
   void finish();
 
+  Mutex &getMutex() { return m_mutex; }
+
   /**
    * create_function() generates extra PHP code that defines the lambda.
    * Stores the code in a temporary string, so we can parse this as an
@@ -193,7 +195,6 @@ public:
   /**
    * Declarations
    */
-  bool declareFunction(FunctionScopePtr funcScope) const;
   bool declareClass(ClassScopePtr classScope) const;
   void declareUnknownClass(const std::string &name);
   bool declareConst(FileScopePtr fs, const std::string &name);
@@ -212,7 +213,6 @@ public:
    */
   std::vector<ClassScopePtr> findClasses(const std::string &className) const;
   ClassScopePtr findExactClass(ConstructPtr cs, const std::string &name) const;
-  FunctionScopePtr findFunction(const std::string &funcName) const ;
   BlockScopeConstPtr findConstantDeclarer(const std::string &constName) const {
     return const_cast<AnalysisResult*>(this)->findConstantDeclarer(constName);
   }
@@ -252,8 +252,6 @@ private:
   std::map<std::string, std::string> m_extraCodes;
 
   StringToClassScopePtrMap m_systemClasses;
-  StringToFunctionScopePtrMap m_functionDecs;
-  StringToFunctionScopePtrVecMap m_functionReDecs;
   StringToClassScopePtrVecMap m_classDecs;
   StringToFileScopePtrMap m_constDecs;
   std::set<std::string> m_constRedeclared;
@@ -274,6 +272,8 @@ public:
   AnalysisResultConstRawPtr shared_from_this() const = delete;
 
 private:
+  Mutex m_mutex;
+
   std::vector<BlockScopePtr> m_ignoredScopes;
 
   // Temporary vector of lambda expressions; populated
@@ -312,14 +312,7 @@ private:
    */
   void checkClassDerivations();
 
-  void resolveNSFallbackFuncs();
-
   int getFileSize(FileScopePtr fs);
-
-public:
-  static DECLARE_THREAD_LOCAL(BlockScopeRawPtr, s_currentScopeThreadLocal);
-  static DECLARE_THREAD_LOCAL(BlockScopeRawPtrFlagsHashMap,
-                              s_changedScopesMapThreadLocal);
 };
 
 ///////////////////////////////////////////////////////////////////////////////

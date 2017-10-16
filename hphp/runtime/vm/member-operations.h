@@ -218,8 +218,8 @@ inline member_rval ElemArrayPre(ArrayData* base, TypedValue key) {
 
   // TODO(#3888164): Array elements can never be KindOfUninit.  This API should
   // be changed.
-  auto tv = ArrNR(base).asArray().rvalAt(cellAsCVarRef(key)).asTypedValue();
-  return member_rval { base, tv->m_type != KindOfUninit ? tv : nullptr };
+  auto const rval = ArrNR(base).asArray().rvalAt(cellAsCVarRef(key));
+  return rval.type() != KindOfUninit ? rval : member_rval { base, nullptr };
 }
 
 /**
@@ -430,7 +430,7 @@ inline member_rval ElemObject(TypedValue& tvRef,
     auto res = collections::get(base->m_data.pobj, &scratch);
     if (!res) {
       res = &tvRef;
-      tvWriteNull(res);
+      tvWriteNull(*res);
     }
     return member_rval { base->m_data.pobj, res };
   }
@@ -777,7 +777,7 @@ inline TypedValue* ElemDEmptyish(TypedValue* base, key_type<keyType> key) {
  */
 inline TypedValue* ElemDScalar(TypedValue& tvRef) {
   raise_warning(Strings::CANNOT_USE_SCALAR_AS_ARRAY);
-  tvWriteNull(&tvRef);
+  tvWriteNull(tvRef);
   return &tvRef;
 }
 
@@ -1212,7 +1212,7 @@ TypedValue* ElemU(TypedValue& tvRef, TypedValue* base, key_type<keyType> key) {
 inline TypedValue* NewElemEmptyish(TypedValue* base) {
   detail::checkPromotion(base);
   Array a = Array::Create();
-  TypedValue* result = const_cast<TypedValue*>(a.lvalAt().asTypedValue());
+  TypedValue* result = a.lvalAt().tv_ptr();
   tvAsVariant(base) = a;
   return result;
 }
@@ -1223,7 +1223,7 @@ inline TypedValue* NewElemEmptyish(TypedValue* base) {
  */
 inline TypedValue* NewElemInvalid(TypedValue& tvRef) {
   raise_warning("Cannot use a scalar value as an array");
-  tvWriteNull(&tvRef);
+  tvWriteNull(tvRef);
   return &tvRef;
 }
 
@@ -1255,8 +1255,8 @@ inline TypedValue* NewElemArray(TypedValue* base) {
   assertx(tvIsArray(base));
   assertx(tvIsPlausible(*base));
   return reffy ?
-    tvAsVariant(base).asArrRef().lvalAtRef().asTypedValue() :
-    tvAsVariant(base).asArrRef().lvalAt().asTypedValue();
+    tvAsVariant(base).asArrRef().lvalAtRef().tv_ptr() :
+    tvAsVariant(base).asArrRef().lvalAt().tv_ptr();
 }
 
 /**
@@ -1336,7 +1336,7 @@ inline void SetElemScalar(Cell* value) {
     throw InvalidSetMException(make_tv<KindOfNull>());
   }
   tvDecRefGen((TypedValue*)value);
-  tvWriteNull((TypedValue*)value);
+  tvWriteNull(*(TypedValue*)value);
 }
 
 /**
@@ -1375,7 +1375,7 @@ inline StringData* SetElemString(TypedValue* base, key_type<keyType> key,
   if (baseLen == 0) {
     SetElemEmptyish<keyType>(base, key, value);
     if (!setResult) {
-      tvIncRefGen(value);
+      tvIncRefGen(*value);
       throw InvalidSetMException(*value);
     }
     return nullptr;
@@ -1390,7 +1390,7 @@ inline StringData* SetElemString(TypedValue* base, key_type<keyType> key,
       throw InvalidSetMException(make_tv<KindOfNull>());
     }
     tvDecRefGen(value);
-    tvWriteNull(value);
+    tvWriteNull(*value);
     return nullptr;
   }
 
@@ -1568,7 +1568,7 @@ inline ArrayData* SetElemArrayPre(ArrayData* a,
   // Assignment failed, so the result is null rather than the RHS.
   if (setResult) {
     tvDecRefGen(value);
-    tvWriteNull(value);
+    tvWriteNull(*value);
   } else {
     throw InvalidSetMException(make_tv<KindOfNull>());
   }
@@ -1782,7 +1782,7 @@ inline void SetNewElemScalar(Cell* value) {
     throw InvalidSetMException(make_tv<KindOfNull>());
   }
   tvDecRefGen((TypedValue*)value);
-  tvWriteNull((TypedValue*)value);
+  tvWriteNull(*(TypedValue*)value);
 }
 
 /**
@@ -1962,7 +1962,7 @@ inline TypedValue* SetOpElemEmptyish(SetOpOp op, Cell* base,
  */
 inline TypedValue* SetOpElemScalar(TypedValue& tvRef) {
   raise_warning(Strings::CANNOT_USE_SCALAR_AS_ARRAY);
-  tvWriteNull(&tvRef);
+  tvWriteNull(tvRef);
   return &tvRef;
 }
 
@@ -2062,14 +2062,14 @@ inline TypedValue* SetOpNewElemEmptyish(SetOpOp op,
                                         TypedValue* base, Cell* rhs) {
   detail::checkPromotion(base);
   Array a = Array::Create();
-  TypedValue* result = (TypedValue*)&a.lvalAt();
+  TypedValue* result = a.lvalAt().tv_ptr();
   tvAsVariant(base) = a;
   setopBody(tvToCell(result), op, rhs);
   return result;
 }
 inline TypedValue* SetOpNewElemScalar(TypedValue& tvRef) {
   raise_warning(Strings::CANNOT_USE_SCALAR_AS_ARRAY);
-  tvWriteNull(&tvRef);
+  tvWriteNull(tvRef);
   return &tvRef;
 }
 inline TypedValue* SetOpNewElem(TypedValue& tvRef,
@@ -2114,7 +2114,7 @@ inline TypedValue* SetOpNewElem(TypedValue& tvRef,
     case KindOfPersistentArray:
     case KindOfArray: {
       TypedValue* result;
-      result = (TypedValue*)&tvAsVariant(base).asArrRef().lvalAt();
+      result = tvAsVariant(base).asArrRef().lvalAt().tv_ptr();
       setopBody(tvToCell(result), op, rhs);
       return result;
     }
@@ -2312,7 +2312,7 @@ inline Cell IncDecNewElemEmptyish(
 ) {
   detail::checkPromotion(base);
   auto a = Array::Create();
-  auto result = (TypedValue*)&a.lvalAt();
+  auto result = a.lvalAt().tv_ptr();
   tvAsVariant(base) = a;
   assert(result->m_type == KindOfNull);
   return IncDecBody(op, result);
@@ -2366,7 +2366,7 @@ inline Cell IncDecNewElem(
 
     case KindOfPersistentArray:
     case KindOfArray: {
-      TypedValue* result = (TypedValue*)&tvAsVariant(base).asArrRef().lvalAt();
+      TypedValue* result = tvAsVariant(base).asArrRef().lvalAt().tv_ptr();
       assert(result->m_type == KindOfNull);
       return IncDecBody(op, tvToCell(result));
     }
@@ -2830,7 +2830,7 @@ bool IssetEmptyElem(TypedValue* base, key_type<keyType> key) {
 
 template<MOpMode mode>
 inline TypedValue* propPreNull(TypedValue& tvRef) {
-  tvWriteNull(&tvRef);
+  tvWriteNull(tvRef);
   if (mode == MOpMode::Warn) {
     raise_notice("Cannot access property on non-object");
   }
@@ -2900,7 +2900,7 @@ TypedValue* propPreStdclass(TypedValue& tvRef, TypedValue* base) {
     // See the comments above. Although promoteToStdClass will have
     // either thrown an exception, or promoted base to an object, an
     // installed error handler might have caused it to be overwritten
-    tvWriteNull(&tvRef);
+    tvWriteNull(tvRef);
     return &tvRef;
   }
 
@@ -2960,7 +2960,7 @@ inline TypedValue* nullSafeProp(TypedValue& tvRef,
   switch (base->m_type) {
     case KindOfUninit:
     case KindOfNull:
-      tvWriteNull(&tvRef);
+      tvWriteNull(tvRef);
       return &tvRef;
     case KindOfBoolean:
     case KindOfInt64:
@@ -2976,7 +2976,7 @@ inline TypedValue* nullSafeProp(TypedValue& tvRef,
     case KindOfKeyset:
     case KindOfPersistentArray:
     case KindOfArray:
-      tvWriteNull(&tvRef);
+      tvWriteNull(tvRef);
       raise_notice("Cannot access property on non-object");
       return &tvRef;
     case KindOfObject:
@@ -2993,26 +2993,32 @@ inline TypedValue* nullSafeProp(TypedValue& tvRef,
  * Returns a pointer to a number of possible places, but does not unbox it.
  * (The returned pointer is never pointing into a RefData.)
  */
-template<MOpMode mode, KeyType keyType = KeyType::Any>
+template<MOpMode mode, KeyType keyType = KeyType::Any, bool reffy = false>
 inline TypedValue* PropObj(TypedValue& tvRef, const Class* ctx,
                            ObjectData* instance, key_type<keyType> key) {
-  auto constexpr warn   = mode == MOpMode::Warn;
-  auto constexpr define = mode == MOpMode::Define;
-  auto constexpr unset  = mode == MOpMode::Unset;
-
   auto keySD = prepareKey(key);
   SCOPE_EXIT { releaseKey<keyType>(keySD); };
 
   // Get property.
-  if (warn) {
+  if (mode == MOpMode::Define) {
+    if (reffy) {
+      return instance->propB(&tvRef, ctx, keySD);
+    } else {
+      return instance->propD(&tvRef, ctx, keySD);
+    }
+  }
+  assert(!reffy);
+  if (mode == MOpMode::None) {
+    return instance->prop(&tvRef, ctx, keySD);
+  }
+  if (mode == MOpMode::Warn) {
     return instance->propW(&tvRef, ctx, keySD);
   }
-
-  if (define || unset) return instance->propD(&tvRef, ctx, keySD);
-  return instance->prop(&tvRef, ctx, keySD);
+  assert(mode == MOpMode::Unset);
+  return instance->propD(&tvRef, ctx, keySD);
 }
 
-template<MOpMode mode, KeyType keyType = KeyType::Any>
+template<MOpMode mode, KeyType keyType = KeyType::Any, bool reffy = false>
 inline TypedValue* Prop(TypedValue& tvRef,
                         const Class* ctx,
                         TypedValue* base,
@@ -3023,7 +3029,7 @@ inline TypedValue* Prop(TypedValue& tvRef,
   }
   assertx(result->m_type == KindOfObject);
   auto instance = instanceFromTv(result);
-  return PropObj<mode,keyType>(tvRef, ctx, instance, key);
+  return PropObj<mode,keyType,reffy>(tvRef, ctx, instance, key);
 }
 
 template <bool useEmpty, KeyType kt>
@@ -3051,7 +3057,7 @@ inline void SetPropNull(Cell* val) {
   raise_warning("Cannot access property on non-object");
   if (setResult) {
     tvDecRefGen(val);
-    tvWriteNull(val);
+    tvWriteNull(*val);
   } else {
     throw InvalidSetMException(make_tv<KindOfNull>());
   }
@@ -3125,7 +3131,7 @@ inline void SetProp(Class* ctx, TypedValue* base, key_type<keyType> key,
 
 inline TypedValue* SetOpPropNull(TypedValue& tvRef) {
   raise_warning("Attempt to assign property of non-object");
-  tvWriteNull(&tvRef);
+  tvWriteNull(tvRef);
   return &tvRef;
 }
 
@@ -3138,7 +3144,7 @@ inline TypedValue* SetOpPropStdclass(TypedValue& tvRef, SetOpOp op,
     [&] (ObjectData* obj) {
       StringData* keySD = prepareKey(key);
       SCOPE_EXIT { decRefStr(keySD); };
-      tvWriteNull(&tvRef);
+      tvWriteNull(tvRef);
       setopBody(tvAssertCell(&tvRef), op, rhs);
       obj->setProp(nullptr, keySD, tvAssertCell(tvRef));
     });
@@ -3216,7 +3222,7 @@ inline Cell IncDecPropStdclass(IncDecOp op, TypedValue* base,
       StringData* keySD = prepareKey(key);
       SCOPE_EXIT { decRefStr(keySD); };
       TypedValue tv;
-      tvWriteNull(&tv);
+      tvWriteNull(tv);
       dest = IncDecBody(op, &tv);
       obj->setProp(nullptr, keySD, dest);
       assert(!isRefcountedType(tv.m_type));

@@ -120,15 +120,28 @@ class TestLsp(LspTestDriver, unittest.TestCase):
             self.get_received_items(observed_transcript)
         )
 
+        # If the server's busy, maybe the machine's just under too much pressure
+        # to give results in a timely fashion. Doing a retry would only defer
+        # the question of what to do in that case, so instead we'll just skip.
+        if "'message': 'Server busy'" in str(observed_transcript):
+            raise unittest.SkipTest('Hack server busy')
+            return
+
         # validation checks that the number of items matches and that
         # the responses are exactly identical to what we expect
-        self.assertEqual(len(expected_items), len(observed_items))
+        self.assertEqual(len(expected_items), len(observed_items),
+                         'Wrong count. Observed this:\n' +
+                         json.dumps(observed_transcript, indent=2,
+                                    separators=(',', ': ')))
         for i in range(len(expected_items)):
             self.assertEqual(observed_items[i], expected_items[i])
 
     def prepare_environment(self):
         self.write_load_config()
-        self.check_cmd(['No errors!'])
+        (output, err, _) = self.run_check()
+        if 'Error: Ran out of retries' in err:
+            raise unittest.SkipTest('Hack server could not be launched')
+        self.assertEqual(output.strip(), 'No errors!')
 
     def load_and_run(self, test_name, variables):
         test, expected = self.load_test_data(test_name, variables)

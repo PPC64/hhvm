@@ -138,7 +138,7 @@ void c_Closure::init(int numArgs, ActRec* ar, TypedValue* sp) {
     tvCopy(*--beforeCurUseVar, *curProperty++);
   }
   for (; i < numDeclProperties; ++i) {
-    tvWriteUninit(curProperty++);
+    tvWriteUninit(*curProperty++);
   }
 }
 
@@ -299,7 +299,7 @@ static ObjectData* closureInstanceCtorRepoAuth(Class* cls) {
   (void)type_scan::getIndexForMalloc<ClosureHdr>();
   auto const nProps = cls->numDeclProperties();
   auto const size = sizeof(ClosureHdr) + ObjectData::sizeForNProps(nProps);
-  auto hdr = new (MM().objMalloc(size)) ClosureHdr(size);
+  auto hdr = new (tl_heap->objMalloc(size)) ClosureHdr(size);
   auto obj = new (hdr + 1) c_Closure(cls);
   assertx(obj->hasExactlyOneRef());
   return obj;
@@ -349,7 +349,7 @@ static void closureInstanceDtor(ObjectData* obj, const Class* cls) {
     tvDecRefGen(prop);
   }
   auto hdr = closure->hdr();
-  MM().objFree(hdr, hdr->size());
+  tl_heap->objFree(hdr, hdr->size());
 }
 
 void PreClassEmitter::setClosurePreClass() {

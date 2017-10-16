@@ -291,7 +291,7 @@ MixedArray* MixedArray::CopyMixed(const MixedArray& other,
         throwRefInvalidArrayValueException(staticEmptyDictArray());
       }
     }
-    tvIncRefGen(&e.data);
+    tvIncRefGen(e.data);
   }
 
   assert(ad->m_used == other.m_used);
@@ -319,7 +319,7 @@ NEVER_INLINE MixedArray* MixedArray::copyMixed() const {
 //////////////////////////////////////////////////////////////////////
 
 ALWAYS_INLINE static bool UncountedMixedArrayOnHugePage() {
-#ifdef USE_JEMALLOC_CUSTOM_HOOKS
+#ifdef USE_JEMALLOC_EXTENT_HOOKS
   return high_huge1g_arena && RuntimeOption::EvalUncountedMixedArrayHuge;
 #else
   return false;
@@ -403,7 +403,7 @@ void MixedArray::Release(ArrayData* in) {
       free_strong_iterators(ad);
     }
   }
-  MM().objFree(ad, ad->heapSize());
+  tl_heap->objFree(ad, ad->heapSize());
   AARCH64_WALKABLE_FRAME();
 }
 
@@ -633,14 +633,14 @@ ArrayData* MixedArray::zInitVal(TypedValue& tv, RefData* v) {
 
 ALWAYS_INLINE
 MixedArray* MixedArray::initRef(TypedValue& tv, Variant& v) {
-  tvBoxIfNeeded(v.asTypedValue());
+  tvBoxIfNeeded(*v.asTypedValue());
   refDup(*v.asTypedValue(), tv);
   return this;
 }
 
 ALWAYS_INLINE
 MixedArray* MixedArray::initWithRef(TypedValue& tv, TypedValue v) {
-  tvWriteNull(&tv);
+  tvWriteNull(tv);
   tvAsVariant(&tv).setWithRef(v);
   return this;
 }
@@ -714,7 +714,7 @@ MixedArray::Grow(MixedArray* old, uint32_t newScale, bool copy) {
           continue;
         }
       }
-      tvIncRefGen(&elm->data);
+      tvIncRefGen(elm->data);
     }
   } else {
     if (UNLIKELY(strong_iterators_exist())) move_strong_iterators(ad, old);

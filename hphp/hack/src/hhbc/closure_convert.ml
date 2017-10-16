@@ -455,8 +455,8 @@ let rec convert_expr env st (p, expr_ as expr) =
     let st, el = convert_exprs env st el in
     st, (p, Xml(id, pairs, el))
   | Unsafeexpr e ->
-    let st, e = convert_expr env st e in
-    st, (p, Unsafeexpr e)
+    (* remove unsafe expressions from the AST, they are not used during codegen *)
+    convert_expr env st e
   | BracedExpr e ->
     let st, e = convert_expr env st e in
     st, (p, BracedExpr e)
@@ -490,6 +490,10 @@ and convert_lambda env st p fd use_vars_opt =
   let st = { st with total_count = total_count + 1; } in
   let st = enter_lambda st in
   let old_env = env in
+  Option.iter use_vars_opt
+    ~f:(List.iter ~f:(fun ((p, id), _) ->
+      if id = SN.SpecialIdents.this
+      then Emit_fatal.raise_fatal_parse p "Cannot use $this as lexical variable"));
   let env = if Option.is_some use_vars_opt
             then env_with_longlambda env false fd
             else env_with_lambda env fd in
@@ -614,11 +618,21 @@ and convert_stmt env st stmt =
     let st, cl = List.map_env st cl (convert_catch env) in
     let st, b2 = convert_block env st b2 in
     st, Try (b1, cl, b2)
-  | Def_inline (Class cd) ->
+  | Def_inline ((Class _) as d) ->
+    let cd =
+      (* propagate namespace information to nested classes *)
+      match Namespaces.elaborate_def st.namespace d with
+      | _, [Class cd] -> cd
+      | _ -> failwith "expected single class declaration" in
     let st, cd = convert_class env st cd in
     let st, stub_cd = add_class env st cd in
     st, Def_inline (Class stub_cd)
-  | Def_inline (Fun fd) ->
+  | Def_inline ((Fun _) as d) ->
+    let fd =
+      (* propagate namespace information to nested functions *)
+      match Namespaces.elaborate_def st.namespace d with
+      | _, [Fun fd] -> fd
+      | _ -> failwith "expected single function declaration" in
     let st, fd = convert_fun env st fd in
     let st, stub_fd = add_function env st fd in
     st, Def_inline (Fun stub_fd)

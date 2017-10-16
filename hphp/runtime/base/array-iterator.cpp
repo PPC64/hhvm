@@ -586,13 +586,11 @@ Variant ArrayIter::iterValue(VersionableSparse) {
 
 //////////////////////////////////////////////////////////////////////
 
-void MIterTable::Create(void* storage) {
-  new (storage) MIterTable();
-}
+THREAD_LOCAL_FLAT(MIterTable, tl_miter_table);
 
 void MIterTable::clear() {
-  if (TlsWrapper::isNull()) return;
-  auto t = TlsWrapper::getNoCheck();
+  if (!tl_miter_table) return;
+  auto t = tl_miter_table.get();
   t->ents.fill({nullptr, nullptr});
   if (!t->extras.empty()) {
     t->extras.release_if([](const MIterTable::Ent& /*e*/) { return true; });
@@ -630,7 +628,7 @@ X(6);
 // delegates to slow.
 ALWAYS_INLINE
 MIterTable::Ent* find_empty_strong_iter() {
-  auto& table = *MIterTable::TlsWrapper::getCheck();
+  auto& table = *tl_miter_table.getCheck();
   if (LIKELY(!table.ents[0].array)) {
     return &table.ents[0];
   }
@@ -670,7 +668,7 @@ void free_strong_iterator_impl(Cond cond) {
     }
   };
 
-  auto& table = miter_table();
+  auto& table = *tl_miter_table;
   if (cond(table.ents[0])) {
     table.ents[0].iter->setContainer(nullptr);
     table.ents[0].array = nullptr;
@@ -1531,8 +1529,8 @@ int64_t witer_next_key(Iter* iter, TypedValue* valOut, TypedValue* keyOut) {
         return 0;
       }
 
-      if (UNLIKELY(tvDecRefWillCallHelper(valOut)) ||
-          UNLIKELY(tvDecRefWillCallHelper(keyOut))) {
+      if (UNLIKELY(tvDecRefWillCallHelper(*valOut)) ||
+          UNLIKELY(tvDecRefWillCallHelper(*keyOut))) {
         goto cold;
       }
       tvDecRefGenNZ(valOut);
@@ -1561,8 +1559,8 @@ int64_t witer_next_key(Iter* iter, TypedValue* valOut, TypedValue* keyOut) {
       }
     } while (UNLIKELY(mixed->isTombstone(pos)));
 
-    if (UNLIKELY(tvDecRefWillCallHelper(valOut)) ||
-        UNLIKELY(tvDecRefWillCallHelper(keyOut))) {
+    if (UNLIKELY(tvDecRefWillCallHelper(*valOut)) ||
+        UNLIKELY(tvDecRefWillCallHelper(*keyOut))) {
       goto cold;
     }
     tvDecRefGenNZ(valOut);
@@ -1682,7 +1680,7 @@ int64_t iter_next_cold_inc_val(Iter* it,
    * So it's safe to just bump the refcount back up here, and pretend
    * like nothing ever happened.
    */
-  tvIncRefGen(valOut);
+  tvIncRefGen(*valOut);
   return iter_next_cold<false>(it, valOut, keyOut);
 }
 

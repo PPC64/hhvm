@@ -78,7 +78,7 @@ const StaticString
  */
 Array get_global_array(const String& name) {
   auto const globals = ArrNR(get_global_variables()->asArrayData());
-  return globals.asArray().rvalAt(name).toArray();
+  return tvCastToArrayLike(globals.asArray().rvalAt(name).tv());
 }
 
 /*
@@ -410,6 +410,7 @@ void XDebugServer::closeLog() {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+const StaticString s_memory_limit("memory_limit");
 
 void XDebugServer::onRequestInit() {
   if (!XDEBUG_GLOBAL(RemoteEnable)) {
@@ -458,7 +459,7 @@ void XDebugServer::onRequestInit() {
 
   // Remove the artificial memory limit for this request since there is a
   // debugger attached to it.
-  MM().setMemoryLimit(std::numeric_limits<int64_t>::max());
+  IniSetting::SetUser(s_memory_limit, std::numeric_limits<int64_t>::max());
 }
 
 bool XDebugServer::isNeeded() {

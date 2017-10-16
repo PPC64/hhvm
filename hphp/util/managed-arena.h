@@ -19,7 +19,7 @@
 
 #include "hphp/util/alloc.h"
 
-#ifdef USE_JEMALLOC_CUSTOM_HOOKS
+#ifdef USE_JEMALLOC_EXTENT_HOOKS
 
 #include <string>
 
@@ -38,47 +38,48 @@ namespace HPHP {
  */
 struct ManagedArena {
  public:
-  ManagedArena(void* base, size_t maxCap,
-               int nextNode = -1, int nodeMask = -1);
-
-  inline void* malloc(size_t size) {
-    if (m_base == nullptr || m_maxCapacity == 0) return nullptr;
-    return mallocx(size, MALLOCX_ARENA(m_arenaId) | MALLOCX_TCACHE_NONE);
-  }
-
-  inline void free(void* ptr) {
-    if (ptr) dallocx(ptr, MALLOCX_ARENA(m_arenaId) | MALLOCX_TCACHE_NONE);
-  }
+  ManagedArena(void* base, size_t maxCap, int nextNode = -1);
 
   inline unsigned id() const {
     return m_arenaId;
   }
 
+  // Number of bytes given to the underlying jemalloc arena
   inline size_t size() const {
     return m_size;
+  }
+
+  // Number of bytes actively used in the arena, excluding retained
+  size_t activeSize() const;
+
+  // Number of bytes in the mapped 1G pages but not actively used.  This helps
+  // to adjust the hugetlb mapping sizes to get the "real" usage by the
+  // application.
+  size_t unusedSize() const {
+    return m_currCapacity - activeSize();
   }
 
   // Report usage.
   static std::string reportStats();
 
-#ifdef USE_JEMALLOC_CHUNK_HOOKS
- private:
-  static void* chunk_alloc(void* chunk, size_t size, size_t alignment,
-                           bool* zero, bool* commit, unsigned arena_ind);
-#else
+  // jemalloc 5 allocation hooks.
   static void* extent_alloc(extent_hooks_t* extent_hooks, void *new_addr,
                             size_t size, size_t alignment, bool* zero,
                             bool* commit, unsigned arena_ind);
-#endif
+ private:
+  // Try to add a 1G huge page from `nextNode`.  Return whether we got enough
+  // space to make the arena at least `newSize` big.  Hold `s_lock` when calling
+  // this.
+  bool tryGrab1G(size_t newSize);
+
  private:
   char* const m_base{nullptr};
   size_t m_maxCapacity{0};
   size_t m_currCapacity{0};             // Change protected by s_lock
   std::atomic_size_t m_size{0};
-  int m_nextNode{-1};
-  int const m_nodeMask{-1};
+  std::atomic_int m_nextNode{-1};
   unsigned m_arenaId{static_cast<unsigned>(-1)};
-
+  bool m_outOf1GPages{false};
   // Hold this lock while adding new pages to any arena.  This is not a member
   // to each arena, because we don't want multiple threads to grab huge pages
   // simultaneously.
@@ -93,5 +94,5 @@ struct ManagedArena {
 };
 
 }
-#endif // USE_JEMALLOC_CUSTOM_HOOKS
+#endif // USE_JEMALLOC_EXTENT_HOOKS
 #endif

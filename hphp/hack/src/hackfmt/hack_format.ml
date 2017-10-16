@@ -605,6 +605,32 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
         handle_possible_compound_statement x.while_body;
         Newline;
       ]
+    | UsingStatementBlockScoped x ->
+      Concat [
+        t x.using_block_await_keyword;
+        when_present x.using_block_await_keyword space;
+        t x.using_block_using_keyword;
+        Space;
+        t x.using_block_left_paren;
+        Split;
+        WithRule (Rule.Parental, Concat [
+          Nest [handle_possible_list x.using_block_expressions];
+          Split;
+          t x.using_block_right_paren;
+        ]);
+        handle_possible_compound_statement x.using_block_body;
+        Newline;
+      ]
+    | UsingStatementFunctionScoped x ->
+      Concat [
+        t x.using_function_await_keyword;
+        when_present x.using_function_await_keyword space;
+        t x.using_function_using_keyword;
+        Space;
+        t x.using_function_expression;
+        t x.using_function_semicolon;
+        Newline;
+      ]
     | IfStatement x ->
       let (kw, left_p, condition, right_p, if_body,
         elseif_clauses, else_clause) = get_if_statement_children x in
@@ -1809,19 +1835,31 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
     | hd :: [] ->
       Concat [
         Span [t obj];
-        SplitWith Cost.SimpleMemberSelection;
+        if node_has_trailing_newline obj
+        then Newline
+        else SplitWith Cost.SimpleMemberSelection;
         Nest [transform_chain hd];
       ]
     | hd :: tl ->
-      WithLazyRule (Rule.Parental,
-        Concat [
-          t obj;
-          Split;
-        ],
-        Nest [
-          transform_chain hd;
-          Concat (List.map tl ~f:(fun x -> Concat [Split; transform_chain x]));
-        ])
+      let rule_type = match hd with
+        | (_, trailing, None)
+        | (_, _, Some (_, _, trailing)) ->
+          if node_has_trailing_newline trailing then Rule.Always else Rule.Parental
+      in
+      Span [
+        WithLazyRule (rule_type,
+          Concat [
+            t obj;
+            if node_has_trailing_newline obj
+            then Newline
+            else SplitWith Cost.Base;
+          ],
+          Concat [
+            (* This needs to be nested separately due to the above SplitWith *)
+            Nest [transform_chain hd];
+            Nest (List.map tl ~f:(fun x -> Concat [Split; transform_chain x]))
+          ])
+      ]
     | _ -> failwith "Expected a chain of at least length 1"
 
   and transform_fn_decl_name async coroutine kw amp name type_params leftp =
@@ -1984,10 +2022,7 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
 
   and transform_container_literal
       ?(spaces=false) ?allow_trailing kw left_p members right_p =
-    let force_newlines =
-      let trivia = trailing_trivia left_p in
-      List.exists trivia ~f:(fun x -> Trivia.kind x = TriviaKind.EndOfLine)
-    in
+    let force_newlines = node_has_trailing_newline left_p in
     Concat [
       t kw;
       if spaces then Space else Nothing;
@@ -2082,6 +2117,8 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
     let operator_has_surrounding_spaces op = not (is_concat op) in
     let operator_is_leading op =
       get_operator_type op = Full_fidelity_operator.PipeOperator in
+    let operator_preserves_newlines op =
+      get_operator_type op = Full_fidelity_operator.PipeOperator in
 
     let (left, operator, right) = get_binary_expression_children expr in
     let operator_t = get_operator_type operator in
@@ -2104,7 +2141,7 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
         Space;
         t operator;
         Space;
-        SplitWith Cost.Base;
+        SplitWith Cost.NoCost;
         Nest [t right];
       ]
     else
@@ -2136,6 +2173,7 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
           WithLazyRule (Rule.Parental,
             transform_operand hd,
             let expression =
+              let last_operand = ref hd in
               let last_op = ref (List.hd_exn tl) in
               List.mapi tl ~f:(fun i x ->
                 if i mod 2 = 0 then begin
@@ -2143,8 +2181,14 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
                   last_op := op;
                   let op_has_spaces = operator_has_surrounding_spaces op in
                   let op_is_leading = operator_is_leading op in
+                  let newline_before_op =
+                    operator_preserves_newlines op &&
+                    node_has_trailing_newline !last_operand
+                  in
                   Concat [
-                    if op_is_leading
+                    if newline_before_op then Newline
+                    else
+                      if op_is_leading
                       then (if op_has_spaces then space_split () else Split)
                       else (if op_has_spaces then Space else Nothing);
                     if is_concat op
@@ -2154,6 +2198,7 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
                 end
                 else begin
                   let operand = x in
+                  last_operand := x;
                   let op_has_spaces =
                     operator_has_surrounding_spaces !last_op
                   in
@@ -2278,8 +2323,17 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
         let tl = List.tl_exn delimited_lines in
         let hd = Comment (hd, (String.length hd)) in
 
+        let should_break =
+          match Trivia.kind triv with
+          | TriviaKind.UnsafeExpression
+          | TriviaKind.FixMe
+          | TriviaKind.IgnoreError
+            -> false
+          | _ -> !currently_leading
+        in
+
         last_comment := Some (Concat [
-          if !currently_leading then Newline
+          if should_break then Newline
           else if preceded_by_whitespace then Space
           else Nothing;
           Concat (hd :: List.map tl ~f:map_tail);
@@ -2358,6 +2412,10 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
       ignore_trailing_invisibles up_to_first_newline;
       transform_leading_invisibles after_newline;
     ]
+
+  and node_has_trailing_newline node =
+    let trivia = Syntax.trailing_trivia node in
+    List.exists trivia ~f:(fun x -> Trivia.kind x = TriviaKind.EndOfLine)
   in
 
   t node

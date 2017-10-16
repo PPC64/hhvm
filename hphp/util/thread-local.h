@@ -77,10 +77,9 @@ inline uintptr_t tlsBase() {
 // __thread on cygwin and mingw uses pthreads emulation not native tls so
 // the emulation for thread local must be used as well
 //
-// So we use __thread on gcc, icc and clang, unless we are on OSX. On OSX, we
-// use our own emulation. Use the DECLARE_THREAD_LOCAL() and
-// IMPLEMENT_THREAD_LOCAL() macros to access either __thread or the emulation
-// as appropriate.
+// So we use __thread on gcc, icc and clang, and OSX, falling back to
+// emulation on unsupported platforms. Use the THREAD_LOCAL() macro to
+// hide the decl details.
 //
 // See thread-local-emulate.h for the emulated versions; they're in a
 // separate header to avoid confusion; this is a long header file and it's
@@ -130,11 +129,11 @@ typedef struct __darwin_pthread_handler_rec darwin_pthread_handler;
  * between different threads (hence no locking) but those variables are not
  * on stack in local scope. To use it, just do something like this,
  *
- *   IMPLEMENT_THREAD_LOCAL(MyClass, static_object);
+ *   THREAD_LOCAL(MyClass, static_object);
  *     static_object->data_ = ...;
  *     static_object->doSomething();
  *
- *   IMPLEMENT_THREAD_LOCAL(int, static_number);
+ *   THREAD_LOCAL(int, static_number);
  *     int value = *static_number;
  *
  * So, syntax-wise it's similar to pointers. The type parameter can be a
@@ -274,102 +273,6 @@ template<typename T> using ThreadLocal = ThreadLocalImpl<true,T>;
 template<typename T> using ThreadLocalNoCheck = ThreadLocalImpl<false,T>;
 
 ///////////////////////////////////////////////////////////////////////////////
-// Singleton thread-local storage for T
-
-/*
- * T must define:
- *
- *   static void Create(void* storage)
- *     which should call new (storage) T, and is called on first getCheck.
- *
- *   static void Delete(T* singleton), and
- *   static void OnThreadExit(T* singleton)
- *     which should both call singleton->~T; Delete is called on manual
- *     destruction, while OnThreadExit is called automatically. The argument
- *     'singleton' is redundant (getters still work), but is for convenience.
- *     These are only called if the singleton was actually created.
- */
-template <typename T>
-struct ThreadLocalSingleton {
-  // Call once per process just to guarantee order of initialization.
-  ThreadLocalSingleton() { s_inited = true; }
-
-  NEVER_INLINE static T *getCheck();
-
-  static T* getNoCheck() {
-    assert(s_inited);
-    assert(singleton() == (T*)&s_storage);
-    return (T*)&s_storage;
-  }
-
-  static bool isNull() { return singleton() == nullptr; }
-
-  static void destroy() {
-    assert(!singleton() || singleton() == (T*)&s_storage);
-    T* p = singleton();
-    if (p) {
-      T::Delete(p);
-      s_node.m_p = nullptr;
-    }
-  }
-
-  T *operator->() const {
-    return getNoCheck();
-  }
-
-  T &operator*() const {
-    return *getNoCheck();
-  }
-
-private:
-  using NodeType = ThreadLocalNode<T>;
-
-  static T* singleton() {
-    return s_node.m_p;
-  }
-
-  static void OnThreadExit(void* p) {
-    NodeType* pNode = (NodeType*)p;
-    assert(pNode == &s_node);
-    if (pNode->m_p) {
-      T::OnThreadExit(pNode->m_p);
-      pNode->m_p = nullptr;
-    }
-  }
-
-  static __thread NodeType s_node;
-  typedef typename std::aligned_storage<sizeof(T), 16>::type
-          StorageType;
-  static __thread StorageType s_storage;
-  static bool s_inited; // no-fast-TLS requires construction so be consistent
-};
-
-template<typename T>
-bool ThreadLocalSingleton<T>::s_inited = false;
-
-template<typename T>
-T *ThreadLocalSingleton<T>::getCheck() {
-  assert(s_inited);
-  if (!singleton()) {
-    T* p = (T*) &s_storage;
-    T::Create(p);
-    s_node.m_p = p;
-    // Register exit hook at most once; doing it twice makes TLM's list cyclic.
-    if (!s_node.m_on_thread_exit_fn) {
-      s_node.m_on_thread_exit_fn = OnThreadExit;
-      ThreadLocalManager::PushTop(s_node);
-    }
-  }
-  return singleton();
-}
-
-template<typename T> __thread typename ThreadLocalSingleton<T>::NodeType
-                              ThreadLocalSingleton<T>::s_node;
-template<typename T> __thread typename ThreadLocalSingleton<T>::StorageType
-                              ThreadLocalSingleton<T>::s_storage;
-
-
-///////////////////////////////////////////////////////////////////////////////
 // some classes don't need new/delete at all
 
 template<typename T>
@@ -410,34 +313,72 @@ struct ThreadLocalProxy {
   TYPE_SCAN_IGNORE_FIELD(m_node);
 };
 
+// Wraps a __thread storage instance of T with a similar api to
+// ThreadLocalProxy. Importantly, inlining a method of T via operator-> or
+// operator* allows the C++ compiler to emit direct access to fields of
+// T using the native thread-local segment pointer.
+template<typename T>
+struct ThreadLocalFlat {
+  T* get() const { return (T*)&m_value; }
+  bool isNull() const { return !m_node.m_p; }
+  T* getNoCheck() const { return get(); }
+  T* operator->() const { return get(); }
+  T& operator*() const { return *get(); }
+  explicit operator bool() const { return !isNull(); }
+  static void onThreadExit(void* p) {
+    auto node = (ThreadLocalNode<ThreadLocalFlat<T>>*)p;
+    auto value = (T*)&node->m_p->m_value;
+    value->~T();
+    node->m_p = nullptr;
+  }
+  T* getCheck() {
+    if (!m_node.m_p) {
+      if (!m_node.m_on_thread_exit_fn) {
+        m_node.m_on_thread_exit_fn = onThreadExit;
+        ThreadLocalManager::PushTop(m_node);
+      }
+      new (&m_value) T();
+      m_node.m_p = this;
+    } else {
+      assert(m_node.m_p == this);
+      assert(m_node.m_on_thread_exit_fn);
+    }
+    return get();
+  }
+
+  void destroy() {
+    if (m_node.m_p) {
+      get()->~T();
+      m_node.m_p = nullptr;
+    }
+  }
+
+  // We manage initialization explicitly
+  typename std::aligned_storage<sizeof(T),alignof(T)>::type m_value;
+  ThreadLocalNode<ThreadLocalFlat<T>> m_node;
+  TYPE_SCAN_CUSTOM() {
+    scanner.scan(*get());
+  }
+};
+
 /*
  * How to use the thread-local macros:
  *
- * Use DECLARE_THREAD_LOCAL to declare a *static* class field as thread local:
+ * Use THREAD_LOCAL to declare a *static* class field or global as thread local:
  *   struct SomeClass {
- *     static DECLARE_THREAD_LOCAL(SomeFieldType, f);
- *   }
+ *     static THREAD_LOCAL(SomeFieldType, field);
+ *   };
+ *   extern THREAD_LOCAL(SomeGlobal, tl_myglobal);
  *
- * Use IMPLEMENT_THREAD_LOCAL in the cpp file to implement the field:
- *   IMPLEMENT_THREAD_LOCAL(SomeFieldType, SomeClass::f);
- *
- * Remember: *Never* write IMPLEMENT_THREAD_LOCAL in a header file.
+ * Use THREAD_LOCAL in the cpp file to implement the field:
+ *   THREAD_LOCAL(SomeFieldType, SomeClass::f);
+ *   THREAD_LOCAL(SomeGlobal, tl_myglobal);
  */
 
-#define DECLARE_THREAD_LOCAL(T, f) \
-  __thread HPHP::ThreadLocal<T> f
-#define IMPLEMENT_THREAD_LOCAL(T, f) \
-  __thread HPHP::ThreadLocal<T> f
-
-#define DECLARE_THREAD_LOCAL_NO_CHECK(T, f) \
-  __thread HPHP::ThreadLocalNoCheck<T> f
-#define IMPLEMENT_THREAD_LOCAL_NO_CHECK(T, f) \
-  __thread HPHP::ThreadLocalNoCheck<T> f
-
-#define DECLARE_THREAD_LOCAL_PROXY(T, f) \
-  __thread HPHP::ThreadLocalProxy<T> f
-#define IMPLEMENT_THREAD_LOCAL_PROXY(T, f) \
-  __thread HPHP::ThreadLocalProxy<T> f
+#define THREAD_LOCAL(T, f) __thread HPHP::ThreadLocal<T> f
+#define THREAD_LOCAL_NO_CHECK(T, f) __thread HPHP::ThreadLocalNoCheck<T> f
+#define THREAD_LOCAL_PROXY(T, f) __thread HPHP::ThreadLocalProxy<T> f
+#define THREAD_LOCAL_FLAT(T, f) __thread HPHP::ThreadLocalFlat<T> f
 
 } // namespace HPHP
 

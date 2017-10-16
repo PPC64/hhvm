@@ -115,6 +115,25 @@ let variadic_params_with_default_value params =
     | _ :: t -> aux t in
   aux (syntax_to_list_with_separators params)
 
+let param_missing_default_value params =
+  (* TODO: This error is also reported in the type checker; when we switch
+  over to the FFP, we can remove the error detection from the type checker. *)
+  let rec aux seen_default params =
+    match params with
+    | [] -> None
+    | x :: t ->
+      if is_variadic_parameter_declaration x then
+        None (* Stop looking. If this happens to not be the last parameter,
+          we'll give an error in a different check. *)
+      else
+        let has_default = is_parameter_with_default_value x in
+        if seen_default && not has_default then
+          Some x (* We saw a defaulted parameter, and this one has no
+            default value. Give an error, and stop looking for more. *)
+        else
+          aux has_default t in
+  aux false (syntax_to_list_no_separators params)
+
 (* True or false: the first item in this list matches the predicate? *)
 let matches_first f items =
   match items with
@@ -771,8 +790,30 @@ let methodish_errors node parents is_hack =
     errors
   | _ -> [ ]
 
-let params_errors params =
-  let errors = [] in
+let markup_errors node is_hack =
+  match syntax node with
+  | MarkupSection { markup_prefix; markup_text; _ }
+    (* only report the error on the first markup section of a hack file *)
+    when is_hack && (is_missing markup_prefix) && (width markup_text) > 0 ->
+    [ make_error_from_node node SyntaxError.error1001 ]
+  | MarkupSection { markup_prefix; markup_text; _ }
+    when is_hack && (token_kind markup_prefix) = Some TokenKind.QuestionGreaterThan ->
+    [ make_error_from_node node SyntaxError.error2067 ]
+  | MarkupSuffix { markup_suffix_less_than_question; markup_suffix_name; }
+    when not is_hack
+    && ((token_kind markup_suffix_less_than_question) = Some TokenKind.LessThanQuestion)
+    && ((PositionedSyntax.text markup_suffix_name) <> "php") ->
+    [ make_error_from_node node SyntaxError.error2068 ]
+  | _ -> []
+
+let default_value_params_errors params is_hack =
+  if not is_hack then []
+  else match param_missing_default_value params with
+  | None -> []
+  | Some param -> [ make_error_from_node param SyntaxError.error2066 ]
+
+let params_errors params is_hack =
+  let errors = default_value_params_errors params is_hack in
   let errors =
     match ends_with_variadic_comma params with
     | None -> errors
@@ -790,16 +831,16 @@ let params_errors params =
       (make_error_from_node default_argument SyntaxError.error2065) :: errors in
   errors
 
-let parameter_errors node parents is_strict =
+let parameter_errors node parents is_strict is_hack =
   match syntax node with
   | ParameterDeclaration { parameter_type; _}
     when is_strict && (is_missing parameter_type) &&
     (parameter_type_is_required parents) ->
       [ make_error_from_node node SyntaxError.error2001 ]
   | FunctionDeclarationHeader { function_parameter_list; _ } ->
-    params_errors function_parameter_list
+    params_errors function_parameter_list is_hack
   | AnonymousFunction { anonymous_parameters; _ } ->
-    params_errors anonymous_parameters
+    params_errors anonymous_parameters is_hack
   | _ -> []
 
 
@@ -1083,7 +1124,8 @@ let find_syntax_errors syntax_tree =
   let is_strict = SyntaxTree.is_strict syntax_tree in
   let is_hack = (SyntaxTree.language syntax_tree = "hh") in
   let folder acc node parents =
-    let param_errs = parameter_errors node parents is_strict in
+    let markup_errs = markup_errors node is_hack in
+    let param_errs = parameter_errors node parents is_strict is_hack in
     let func_errs = function_errors node parents is_strict in
     let xhp_errs = xhp_errors node parents in
     let statement_errs = statement_errors node parents in
@@ -1102,7 +1144,7 @@ let find_syntax_errors syntax_tree =
         abstract_final_class_nonstatic_method_error node parents in
     let mixed_namespace_acc =
       mixed_namespace_errors node acc.namespace_type in
-    let errors = acc.errors @ param_errs @ func_errs @
+    let errors = acc.errors @ markup_errs @ param_errs @ func_errs @
       xhp_errs @ statement_errs @ methodish_errs @ property_errs @
       expr_errs @ require_errs @ classish_errors @ type_errors @ alias_errors @
       group_use_errors @ const_decl_errors @

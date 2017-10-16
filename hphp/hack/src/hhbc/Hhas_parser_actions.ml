@@ -663,9 +663,20 @@ let switchkindofiarg arg =
     report_error
     @@ Printf.sprintf "bad switch kind: '%s'" @@ stringofiarg arg
 
+let to_inf_nan s =
+ match String.uppercase_ascii s with
+   | "NAN" -> Some "NAN"
+   | "INF" -> Some "INF"
+   | _ -> None
+
 let doubleofiarg arg =
  match arg with
   | IADouble sd -> sd
+  | IAId s -> (match to_inf_nan s with
+                | Some s -> s
+                | None -> report_error "bad double lit cst")
+  (* Remark: the way we use to_inf_nan in two different places is pretty nasty, but seems the
+     quickest way to deal with -INF and variants *)
   | IAInt64 n -> (Int64.to_string n) ^ "." (* ugh *)
   | _ -> report_error "bad double lit cst"
 
@@ -857,7 +868,7 @@ match s with
  | "FPushCtor" -> ICall (FPushCtor (intofiarg arg1, intofiarg arg2))
  | "FPushCtorD" -> ICall (FPushCtorD (intofiarg arg1, class_id_of_iarg arg2))
  | "FPushCtorI" -> ICall (FPushCtorI (intofiarg arg1, intofiarg arg2))
- | "DecodeCufIter" -> ICall (DecodeCufIter (intofiarg arg1, labelofiarg arg2))
+ | "DecodeCufIter" -> ICall (DecodeCufIter (iterofiarg arg1, labelofiarg arg2))
  | "FPushCufIter" -> ICall (FPushCufIter (intofiarg arg1, iterofiarg arg2))
  | "FPassC" -> ICall(FPassC (intofiarg arg1, fpasshintof arg2))
  | "FPassCW" -> ICall(FPassCW (intofiarg arg1, fpasshintof arg2))

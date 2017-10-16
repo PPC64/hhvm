@@ -55,18 +55,11 @@ ExpressionPtr NewObjectExpression::clone() {
 
 void NewObjectExpression::analyzeProgram(AnalysisResultConstRawPtr ar) {
   FunctionCall::analyzeProgram(ar);
-  if (ar->getPhase() == AnalysisResult::AnalyzeAll ||
-      ar->getPhase() == AnalysisResult::AnalyzeFinal) {
-    FunctionScopePtr func;
-    if (!m_origName.empty()) {
-      if (ClassScopePtr cls = resolveClass()) {
-        m_origName = m_origClassName;
-        func = cls->findConstructor(ar, true);
-      }
-    }
+  if (ar->getPhase() == AnalysisResult::AnalyzeAll) {
+    resolveClass();
 
     if (m_params) {
-      markRefParams(func, "");
+      m_params->markParams();
     }
   }
 }

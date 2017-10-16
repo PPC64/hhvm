@@ -9,13 +9,27 @@
 *)
 
 module SU = Hhbc_string_utils
+module SN = Naming_special_names
 
 open Core
 open Instruction_sequence
 
+let has_valid_access_modifiers kind_list =
+  let count_of_modifiers = List.fold_right kind_list
+    ~f:(fun x acc ->
+        if x = Ast.Private || x = Ast.Public || x = Ast.Protected
+        then acc + 1 else acc)
+    ~init:0
+  in
+  (* Either only one modifier or none *)
+  count_of_modifiers <= 1
+
 let from_ast_wrapper : bool -> _ ->
   Ast.class_ -> Ast.method_ -> Hhas_method.t =
   fun privatize make_name ast_class ast_method ->
+  if not (has_valid_access_modifiers ast_method.Ast.m_kind) then
+    Emit_fatal.raise_fatal_parse Pos.none
+      "Multiple access type modifiers are not allowed";
   let method_is_abstract =
     List.mem ast_method.Ast.m_kind Ast.Abstract ||
     ast_class.Ast.c_kind = Ast.Cinterface in
@@ -36,7 +50,7 @@ let from_ast_wrapper : bool -> _ ->
     Emit_attribute.ast_any_is_memoize ast_method.Ast.m_user_attributes in
   let deprecation_info = Hhas_attribute.deprecation_info method_attributes in
   let (pos, original_name) = ast_method.Ast.m_name in
-  let (_,class_name) = ast_class.Ast.c_name in
+  let (_, class_name) = ast_class.Ast.c_name in
   let class_name = SU.Xhp.mangle @@ Utils.strip_ns class_name in
   let ret = ast_method.Ast.m_ret in
   let method_id = make_name ast_method.Ast.m_name in
@@ -52,6 +66,39 @@ let from_ast_wrapper : bool -> _ ->
   then Emit_fatal.raise_fatal_parse pos
     ("Class " ^ class_name ^ " contains non-static method " ^ original_name
      ^ " and therefore cannot be declared 'abstract final'");
+ (* TODO: use something that can't be faked in user code *)
+ let method_is_closure_body =
+    original_name = "__invoke"
+    && String_utils.string_starts_with class_name "Closure$" in
+  if not (method_is_static || method_is_closure_body) then
+    List.iter ast_method.Ast.m_params (fun p ->
+      let pos, id = p.Ast.param_id in
+      if id = SN.SpecialIdents.this then
+      Emit_fatal.raise_fatal_parse pos "Cannot re-assign $this");
+  (* Restrictions on __construct methods with promoted parameters *)
+  if original_name = Naming_special_names.Members.__construct
+  && List.exists ast_method.Ast.m_params (fun p -> Option.is_some p.Ast.param_modifier)
+  then begin
+    List.iter ast_method.Ast.m_params (fun p ->
+      if List.length (
+        List.filter ast_class.Ast.c_body
+        (function
+         | Ast.ClassVars (_, _, cvl, _) ->
+             List.exists cvl (fun (_,id,_) ->
+               snd id = SU.Locals.strip_dollar (snd p.Ast.param_id))
+         | _ -> false)) > 1
+      then Emit_fatal.raise_fatal_parse pos
+        (Printf.sprintf "Cannot redeclare %s::%s" class_name (snd p.Ast.param_id)));
+    if ast_class.Ast.c_kind = Ast.Cinterface || ast_class.Ast.c_kind = Ast.Ctrait
+    then Emit_fatal.raise_fatal_parse pos
+      "Constructor parameter promotion not allowed on traits or interfaces";
+    if List.mem ast_method.Ast.m_kind Ast.Abstract
+    then Emit_fatal.raise_fatal_parse pos
+      "parameter modifiers not allowed on abstract __construct";
+    if not (List.is_empty ast_method.Ast.m_tparams)
+    then Emit_fatal.raise_fatal_parse pos
+      "parameter modifiers not supported with type variable annotation"
+  end;
   let default_dropthrough =
     if List.mem ast_method.Ast.m_kind Ast.Abstract
     then Some (Emit_fatal.emit_fatal_runtimeomitframe pos
@@ -62,10 +109,6 @@ let from_ast_wrapper : bool -> _ ->
   let scope =
     [Ast_scope.ScopeItem.Method ast_method;
      Ast_scope.ScopeItem.Class ast_class] in
-  (* TODO: use something that can't be faked in user code *)
-  let method_is_closure_body =
-   original_name = "__invoke"
-   && String_utils.string_starts_with class_name "Closure$" in
   let scope =
     if method_is_closure_body
     then Ast_scope.ScopeItem.Lambda :: scope else scope in

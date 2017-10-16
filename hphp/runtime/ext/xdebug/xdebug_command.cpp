@@ -967,13 +967,13 @@ struct StackGetCmd : XDebugCommand {
         // We need the function name in the parent frame, because in this
         // data structure, a frame's function name is actually the function
         // being called in that frame.
-        auto const& parent_frame = backtrace.rvalAt(depth + 1);
-        auto const& func_name = parent_frame.getArrayData()->get(s_function);
-        auto const& frame = backtrace.rvalAt(depth);
+        auto const parent_frame = backtrace.rvalAt(depth + 1).unboxed();
+        auto const func_name = parent_frame.val().parr->get(s_function);
+        auto const frame = backtrace.rvalAt(depth).unboxed();
         auto const xdebug_frame = getFrame(
-          frame.getArrayData(),
+          frame.val().parr,
           depth,
-          func_name.toString()
+          tvCastToString(func_name.tv())
         );
         xdebug_xml_add_child(&xml, xdebug_frame);
       }
@@ -997,11 +997,11 @@ private:
     xdebug_xml_add_attribute(node, "level", level);
     xdebug_xml_add_attribute(node, "type", "file");
 
-    const auto xdebug_file = xdebug_path_to_url(file.toString());
+    const auto xdebug_file = xdebug_path_to_url(tvCastToString(file.tv()));
 
     // Add the call file/line. Duplication is necessary due to xml api
     xdebug_xml_add_attribute_dup(node, "filename", xdebug_file.data());
-    xdebug_xml_add_attribute(node, "lineno", line.toInt64());
+    xdebug_xml_add_attribute(node, "lineno", tvCastToInt64(line.tv()));
     return node;
   }
 

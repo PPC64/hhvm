@@ -53,17 +53,11 @@ inline bool member_lval::has_ref() const {
   return !!m_ptr;
 }
 
-inline const Value& member_lval::val() const {
-  return *m_ptr.val;
-}
-inline Value& member_lval::val() {
+inline Value& member_lval::val() const {
   return *m_ptr.val;
 }
 
-inline const DataType& member_lval::type() const {
-  return m_ptr.tv->m_type;
-}
-inline DataType& member_lval::type() {
+inline DataType& member_lval::type() const {
   return m_ptr.tv->m_type;
 }
 
@@ -94,6 +88,15 @@ inline member_rval::member_rval(const HeapObject* base,
   , m_ptr(elem)
 {}
 
+inline bool member_rval::operator==(member_rval o) const {
+  return m_base == o.m_base &&
+         m_ptr.tv == o.m_ptr.tv;
+}
+
+inline const HeapObject* member_rval::base() const {
+  return m_base;
+}
+
 inline member_rval::operator bool() const {
   return !!m_ptr;
 }
@@ -120,6 +123,14 @@ inline TypedValue member_rval::tv() const {
 
 inline member_rval::ptr_u member_rval::elem() const {
   return m_ptr;
+}
+
+inline member_rval member_rval::dummy() {
+  return member_rval { nullptr, &immutable_uninit_base };
+}
+
+inline bool member_rval::is_dummy() const {
+  return *this == dummy();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
