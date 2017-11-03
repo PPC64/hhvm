@@ -8,23 +8,29 @@
  *
  *)
 
-module SyntaxError = Full_fidelity_syntax_error
-module Lexer = Full_fidelity_lexer
-module Operator = Full_fidelity_operator
-module Context = Full_fidelity_parser_context
+module WithSyntax(Syntax : Syntax_sig.Syntax_S) = struct
+module type Lexer_S = Full_fidelity_lexer_sig.WithToken(Syntax.Token).Lexer_S
+module Context = Full_fidelity_parser_context.WithToken(Syntax.Token)
+
+module WithLexer(Lexer : Lexer_S) = struct
+  module Lexer = Lexer
 
 type t = {
   lexer : Lexer.t;
-  errors : SyntaxError.t list;
+  errors : Full_fidelity_syntax_error.t list;
   context: Context.t;
-  precedence : int
+  precedence : int;
+  env : Full_fidelity_parser_env.t
 }
 
-let make lexer errors context =
-  { lexer; errors; context; precedence = 0 }
+let make env lexer errors context =
+  { lexer; errors; context; precedence = 0 ; env }
 
 let errors parser =
   parser.errors @ (Lexer.errors parser.lexer)
+
+let env parser =
+  parser.env
 
 let with_errors parser errors =
   { parser with errors }
@@ -89,7 +95,7 @@ let with_numeric_precedence parser new_precedence parse_function =
   (parser, result)
 
 let with_operator_precedence parser operator parse_function =
-  let new_precedence = Operator.precedence operator in
+  let new_precedence = Full_fidelity_operator.precedence operator in
   with_numeric_precedence parser new_precedence parse_function
 
 let with_reset_precedence parser parse_function =
@@ -105,3 +111,6 @@ let next_xhp_body_token parser =
   let (lexer, token) = Lexer.next_xhp_body_token parser.lexer in
   let parser = { parser with lexer } in
   (parser, token)
+
+end (* WithLexer *)
+end (* WithSyntax *)

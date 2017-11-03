@@ -41,8 +41,6 @@ let make_header comment_style (header_comment : string) : string =
  *
  *   buck run //hphp/hack/src:generate_full_fidelity
  *
- * This module contains the type describing the structure of a syntax tree.
- *
  **
  *%s
  *%c"
@@ -445,6 +443,83 @@ end (* MakeValidated *)
   }
 end (* GenerateFFSyntaxType *)
 
+module GenerateFFSyntaxSig = struct
+
+  let to_constructor_methods x =
+    let mapper1 (f,_) = " t ->" in
+    let fields1 = map_and_concat mapper1 x.fields in
+    sprintf "  val make_%s :%s t\n"
+      x.type_name fields1
+
+  let to_type_tests x =
+    sprintf ("  val is_%s : t -> bool\n") x.type_name
+
+  let to_parse_tree x =
+    let field_width = 50 - String.length x.prefix in
+    let fmt = sprintf "%s_%%-%ds: t\n" x.prefix field_width in
+    let mapper (f,_) = sprintf (Scanf.format_from_string fmt "%-1s") f in
+    let fields = map_and_concat_separated "    ; " mapper x.fields in
+    sprintf "  type %s =\n    { %s    }\n"
+      x.type_name fields
+
+  let to_syntax x =
+    sprintf ("  | " ^^ kind_name_fmt ^^ " of %s\n")
+      x.kind_name x.type_name
+
+  let full_fidelity_syntax_template : string = (make_header MLStyle "
+* This module contains a signature which can be used to describe the public
+* surface area of a constructable syntax tree.
+  ") ^ "
+
+module type Syntax_S = sig
+  module Token : Lexable_token_sig.LexableToken_S
+  type t
+PARSE_TREE
+  type syntax =
+  | Token                             of Token.t
+  | Missing
+  | SyntaxList                        of t list
+SYNTAX
+
+  val syntax_node_to_list : t -> t list
+  val full_width : t -> int
+  val trailing_width : t -> int
+  val leading_width : t -> int
+  val leading_token : t -> Token.t option
+  val children : t -> t list
+  val syntax : t -> syntax
+  val kind : t -> Full_fidelity_syntax_kind.t
+  val make_token : Token.t -> t
+  val get_token : t -> Token.t option
+  val make_missing : unit -> t
+  val make_list : t list -> t
+CONSTRUCTOR_METHODS
+
+  val is_abstract : t -> bool
+  val is_missing : t -> bool
+  val is_list : t -> bool
+TYPE_TESTS
+
+end (* Syntax_S *)
+"
+
+  let full_fidelity_syntax_sig =
+  {
+    filename = full_fidelity_path_prefix ^ "syntax_sig.ml";
+    template = full_fidelity_syntax_template;
+    transformations = [
+      { pattern = "PARSE_TREE"; func = to_parse_tree };
+      { pattern = "SYNTAX"; func = to_syntax };
+      { pattern = "CONSTRUCTOR_METHODS"; func = to_constructor_methods };
+      { pattern = "TYPE_TESTS"; func = to_type_tests };
+    ];
+    token_no_text_transformations = [];
+    token_given_text_transformations = [];
+    token_variable_text_transformations = [];
+    trivia_transformations = [];
+    aggregate_transformations = [];
+  }
+end (* GenerateFFSyntaxSig *)
 
 module GenerateFFSyntax = struct
 
@@ -480,6 +555,14 @@ module GenerateFFSyntax = struct
     sprintf "      | %s {\n%s      } -> [\n%s      ]\n"
       x.kind_name fields fields
 
+  let to_fold_from_syntax x =
+    let mapper (f,_) = sprintf "        %s_%s;\n" x.prefix f in
+    let fields = map_and_concat mapper x.fields in
+    let mapper2 (f, _) = sprintf "         let acc = f acc %s_%s in\n" x.prefix f in
+    let fields2 = map_and_concat mapper2 x.fields in
+    sprintf "      | %s {\n%s      } ->\n%s         acc\n"
+      x.kind_name fields fields2
+
   let to_children_names x =
     let mapper1 (f,_) = sprintf "        %s_%s;\n" x.prefix f in
     let mapper2 (f,_) = sprintf "        \"%s_%s\";\n" x.prefix f in
@@ -499,17 +582,19 @@ module GenerateFFSyntax = struct
       x.kind_name fields x.kind_name fields
 
   let to_constructor_methods x =
-    let mapper1 (f,_) = sprintf "      %s_%s\n" x.prefix f in
-    let mapper2 (f,_) = sprintf "        %s_%s;\n" x.prefix f in
+    let mapper1 (f,_) = sprintf "        %s_%s\n" x.prefix f in
     let fields1 = map_and_concat mapper1 x.fields in
+    let mapper2 (f,_) = sprintf "          %s_%s;\n" x.prefix f in
     let fields2 = map_and_concat mapper2 x.fields in
-    sprintf "    let make_%s
-%s    =
-      from_children SyntaxKind.%s [
-%s      ]
+    sprintf "      let make_%s
+%s      =
+        let syntax = %s {
+%s        } in
+        let value = ValueBuilder.value_from_syntax syntax in
+        make syntax value
 
 "
-      x.type_name fields1 x.kind_name fields2
+    x.type_name fields1 x.kind_name fields2
 
   let full_fidelity_syntax_template = make_header MLStyle "
  * With these factory methods, nodes can be built up from their child nodes. A
@@ -604,17 +689,29 @@ TYPE_TESTS
     let is_comma      = is_specific_token Full_fidelity_token_kind.Comma
     let is_array      = is_specific_token Full_fidelity_token_kind.Array
     let is_var        = is_specific_token Full_fidelity_token_kind.Var
+    let is_ampersand  = is_specific_token Full_fidelity_token_kind.Ampersand
+    let is_inout      = is_specific_token Full_fidelity_token_kind.Inout
 
 CHILD_LIST_FROM_TYPE
 
+    let fold_over_children f acc syntax =
+      match syntax with
+      | Missing -> acc
+      | Token _ -> acc
+      | SyntaxList _ -> acc
+FOLD_FROM_SYNTAX
+
     (* The order that the children are returned in should match the order
        that they appear in the source text *)
-    let children node =
-      match node.syntax with
+    let children_from_syntax s =
+      match s with
       | Missing -> []
       | Token _ -> []
       | SyntaxList x -> x
 CHILDREN
+
+    let children node =
+      children_from_syntax node.syntax
 
     let children_names node =
       match node.syntax with
@@ -703,6 +800,7 @@ SYNTAX_FROM_CHILDREN      | (SyntaxKind.Missing, []) -> Missing
       val value_from_children:
         Full_fidelity_syntax_kind.t -> t list -> SyntaxValue.t
       val value_from_token: Token.t -> SyntaxValue.t
+      val value_from_syntax: syntax -> SyntaxValue.t
     end
 
     module WithValueBuilder(ValueBuilder: ValueBuilderType) = struct
@@ -810,6 +908,7 @@ end (* WithToken *)
       { pattern = "TYPE_TESTS"; func = to_type_tests };
       { pattern = "CHILD_LIST_FROM_TYPE"; func = to_child_list_from_type };
       { pattern = "CHILDREN"; func = to_children };
+      { pattern = "FOLD_FROM_SYNTAX"; func = to_fold_from_syntax };
       { pattern = "CHILDREN_NAMES"; func = to_children_names };
       { pattern = "SYNTAX_FROM_CHILDREN"; func = to_syntax_from_children };
       { pattern = "CONSTRUCTOR_METHODS"; func = to_constructor_methods };
@@ -2507,10 +2606,10 @@ module GenerateFFPositionedSyntax = struct
 
 module SyntaxTree = Full_fidelity_syntax_tree
 module SourceText = Full_fidelity_source_text
-module PositionedToken = Full_fidelity_positioned_token
+module Token = Full_fidelity_positioned_token
 
 module SyntaxWithPositionedToken =
-  Full_fidelity_syntax.WithToken(PositionedToken)
+  Full_fidelity_syntax.WithToken(Token)
 
 module PositionedSyntaxValue = struct
   type t = {
@@ -2540,10 +2639,65 @@ module PositionedSyntaxValue = struct
     value.trailing_width
 end
 
-open Core
-include SyntaxWithPositionedToken.WithSyntaxValue(PositionedSyntaxValue)
+
+module PositionedWithValue =
+  SyntaxWithPositionedToken.WithSyntaxValue(PositionedSyntaxValue)
+
+open Hh_core
+include PositionedWithValue
+
+module PositionedValueBuilder = struct
+  let value_from_token token =
+    let source_text = Token.source_text token in
+    let offset = Token.leading_start_offset token in
+    let leading_width = Token.leading_width token in
+    let width = Token.width token in
+    let trailing_width = Token.trailing_width token in
+    PositionedSyntaxValue.make
+      source_text offset leading_width width trailing_width
+
+let value_from_outer_children first last =
+  match (first, last) with
+  | (Some first, Some last) ->
+    let source_text = PositionedSyntaxValue.source_text (value first) in
+    let offset = PositionedSyntaxValue.start_offset (value first) in
+    let leading_width = PositionedSyntaxValue.leading_width (value first) in
+    let trailing_width =
+      PositionedSyntaxValue.trailing_width (value last) in
+    let last_offset = PositionedSyntaxValue.start_offset (value last) in
+    let width = last_offset + trailing_width - offset in
+    PositionedSyntaxValue.make
+      source_text offset leading_width width trailing_width
+  | _ -> failwith \"How did we get a syntax node with only missing children?\"
+
+let value_from_children kind nodes =
+  if kind == Full_fidelity_syntax_kind.Missing then
+    let source_text = SourceText.empty in
+    let offset = 0 in
+    let leading_width = 0 in
+    let width = 0 in
+    let trailing_width = 0 in
+    PositionedSyntaxValue.make
+      source_text offset leading_width width trailing_width
+  else
+    let no_missing = List.filter ~f:(fun x -> not (is_missing x)) nodes in
+    let first = List.hd no_missing in
+    let last = List.last no_missing in
+    value_from_outer_children first last
+
+  let value_from_syntax syntax =
+    let f (first, last) node =
+      if is_missing node then (first, last)
+      else if first = None then (Some node, Some node)
+      else (first, Some node) in
+    let (first, last) = fold_over_children f (None, None) syntax in
+    value_from_outer_children first last
+end
+
+include PositionedWithValue.WithValueBuilder(PositionedValueBuilder)
+
 module Validated =
-  Full_fidelity_validated_syntax.Make(PositionedToken)(PositionedSyntaxValue)
+  Full_fidelity_validated_syntax.Make(Token)(PositionedSyntaxValue)
 
 let source_text node =
   PositionedSyntaxValue.source_text (value node)
@@ -2703,7 +2857,7 @@ BUILD_CASES
         )
     and convert (offset : int) (todo : todo) (results : t list) : M.t -> t = function
     | { M.syntax = M.Token token; _ } as minimal_t ->
-      let token = PositionedToken.from_minimal source_text token offset in
+      let token = Token.from_minimal source_text token offset in
       let syntax = Token token in
       let node = make_syntax minimal_t syntax offset in
       let offset = offset + M.full_width minimal_t in
@@ -2790,6 +2944,7 @@ end (* GenerateFFPositionedSyntax *)
 
 let () =
   generate_file GenerateFFSyntaxType.full_fidelity_syntax_type;
+  generate_file GenerateFFSyntaxSig.full_fidelity_syntax_sig;
   generate_file GenerateFFValidatedSyntax.full_fidelity_validated_syntax;
   generate_file GenerateFFTriviaKind.full_fidelity_trivia_kind;
   generate_file GenerateFFSyntax.full_fidelity_syntax;

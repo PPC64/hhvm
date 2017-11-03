@@ -8,7 +8,7 @@
  *
  *)
 
-open Core
+open Hh_core
 open Ide_api_types
 open Typing_defs
 open Utils
@@ -129,6 +129,7 @@ let incr_reason_stats r p reason_stats =
     | Rmap_append _ -> "Rmap_append"
     | Rvar_param _ -> "Rvar_param"
     | Runpack_param _ -> "Runpack_param"
+    | Rinout_param _ -> "Rinout_param"
     | Rinstantiate _ -> "Rinstantiate"
     | Rarray_filter _ -> "Rarray_filter"
     | Rtype_access _ -> "Rtype_access"
@@ -140,7 +141,9 @@ let incr_reason_stats r p reason_stats =
     | Rpredicated _ -> "Rpredicated"
     | Rinstanceof _ -> "Rinstanceof"
     | Rfinal_property _ -> "Rfinal_property"
-    | Rvarray_or_darray_key _ -> "Rvarray_or_darray_key" in
+    | Rvarray_or_darray_key _ -> "Rvarray_or_darray_key"
+    | Rusing _ -> "Rusing"
+    in
   let pos_stats_map = match SMap.get string_key reason_stats with
     | Some x -> x
     | None -> Pos.Map.empty in

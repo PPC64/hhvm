@@ -8,7 +8,7 @@
  *
 *)
 
-open Core
+open Hh_core
 open Hhbc_ast
 open Instruction_sequence
 open Emit_expression
@@ -235,6 +235,8 @@ let rec emit_stmt env st =
     emit_if env condition (A.Block consequence) (A.Block alternative)
   | A.While (e, b) ->
     emit_while env e (A.Block b)
+  | A.Using (has_await, e, b) ->
+    emit_using env has_await e (A.Block b)
   | A.Break (pos, level_opt) ->
     emit_break env pos (get_level pos "break" level_opt)
   | A.Continue (pos, level_opt) ->
@@ -278,17 +280,6 @@ and emit_break env pos level =
 
 and emit_continue env pos level =
   TFR.emit_break_or_continue ~is_break:false ~in_finally_epilogue:false env pos level
-
-and emit_await env e =
-  let after_await = Label.next_regular () in
-  gather [
-    emit_expr ~need_ref:false env e;
-    instr_dup;
-    instr_istypec OpNull;
-    instr_jmpnz after_await;
-    instr_await;
-    instr_label after_await;
-  ]
 
 and emit_if env condition consequence alternative =
   match alternative with
@@ -389,6 +380,57 @@ and emit_while env e b =
     instr_label break_label;
   ]
 
+and emit_using env has_await e b =
+  match snd e with
+  | A.Expr_list es ->
+    emit_stmt env @@ List.fold_right es
+      ~f:(fun e acc -> A.Using (has_await, e, [acc]))
+      ~init:b
+  | _ ->
+    let local, preamble = match snd e with
+      | A.Binop (A.Eq None, (_, A.Lvar (_, id)), _)
+      | A.Lvar (_, id) ->
+        Local.Named id, emit_ignored_expr env e
+      | _ ->
+        let l = Local.get_unnamed_local () in
+        l, gather [emit_expr ~need_ref:false env e; instr_setl l; instr_popc]
+    in
+    let fault_label = Label.next_fault () in
+    let body = emit_stmt env b in
+    let fn_name = Hhbc_id.Method.from_raw_string @@
+      if has_await then "__disposeAsync" else "__dispose"
+    in
+    let epilogue =
+      if has_await then
+        gather [
+          instr_unboxr;
+          instr_await;
+          instr_popc
+        ]
+      else
+        instr_popr
+    in
+    let finally = gather [
+        instr_cgetl local;
+        instr_fpushobjmethodd 0 fn_name A.OG_nullthrows;
+        instr_fcall 0;
+        epilogue;
+        (* TOOD: Only empty unset if this is a
+         * function scoped using statement *)
+        instr_unsetl local
+      ]
+    in
+    let fault = gather [ finally; instr_unwind ] in
+    let middle =
+      if is_empty_block b then empty
+      else instr_try_fault fault_label body fault
+    in
+    gather [
+      preamble;
+      middle;
+      finally;
+    ]
+
 and emit_do env b e =
   let cont_label = Label.next_regular () in
   let break_label = Label.next_regular () in
@@ -427,7 +469,7 @@ and emit_for env e1 e2 e3 b =
       | h1 :: t1 -> emit_ignored_expr env h :: expr_list h1 t1
     in
     match e2 with
-    | _, A.Expr_list [] -> empty
+    | _, A.Expr_list [] -> if jmpz then empty else instr_jmp label
     | _, A.Expr_list (h::t) -> gather @@ expr_list h t
     | cond -> final cond
   in
@@ -443,14 +485,21 @@ and emit_for env e1 e2 e3 b =
   ]
 
 and emit_switch env scrutinee_expr cl =
+  if List.is_empty cl
+  then
+    gather [
+      emit_expr ~need_ref:false env scrutinee_expr;
+      instr_popc
+    ]
+  else
   stash_in_local env scrutinee_expr
   begin fun local break_label ->
   (* If there is no default clause, add an empty one at the end *)
   let is_default c = match c with A.Default _ -> true | _ -> false in
-  let cl =
+  let cl, has_default =
     match List.count cl is_default with
-    | 0 -> cl @ [A.Default []]
-    | 1 -> cl
+    | 0 -> cl @ [A.Default []], false
+    | 1 -> cl, true
     | _ -> Emit_fatal.raise_fatal_runtime
       Pos.none "Switch statements may only contain one 'default' clause." in
   (* "continue" in a switch in PHP has the same semantics as break! *)
@@ -459,12 +508,22 @@ and emit_switch env scrutinee_expr cl =
       fun env -> List.map cl ~f:(emit_case env)
   in
   let bodies = gather @@ List.map cl ~f:snd in
+  let default_label_to_shift =
+    if has_default
+    then List.find_map cl ~f: (fun ((e, l), _) ->
+      if Option.is_none e then Some l else None)
+    else None in
   let init = gather @@ List.map cl
     ~f: begin fun x ->
           let (e_opt, l) = fst x in
           match e_opt with
           | None ->
-            instr_jmp l
+            (* jmp to default case should be emitted as the
+            very last 'else' case so do not emit it if it appear in the
+            middle of emitted if/elseif clauses *)
+            if Option.is_none default_label_to_shift
+            then instr_jmp l
+            else empty
           | Some e ->
             (* Special case for simple scrutinee *)
             match scrutinee_expr with
@@ -484,6 +543,7 @@ and emit_switch env scrutinee_expr cl =
   in
   gather [
     init;
+    Option.value_map default_label_to_shift ~default:empty ~f:instr_jmp;
     bodies;
   ]
   end
@@ -664,14 +724,14 @@ and get_id_of_simple_lvar_opt ~is_key v =
     when not (SN.Superglobals.is_superglobal id) -> Some id
   | _ -> None
 
-and emit_load_list_elements path vs =
+and emit_load_list_elements env path vs =
   let preamble, load_value =
-    List.mapi ~f:(emit_load_list_element path) vs
+    List.mapi ~f:(emit_load_list_element env path) vs
     |> List.unzip
   in
   List.concat preamble, List.concat load_value
 
-and emit_load_list_element path i v =
+and emit_load_list_element env path i v =
   let query_value = gather [
     gather @@ List.rev path;
     instr_querym 0 QueryOp.CGet (MemberKey.EI (Int64.of_int i));
@@ -710,11 +770,15 @@ and emit_load_list_element path i v =
     let dim_instr =
       instr_dim MemberOpMode.Warn (MemberKey.EI (Int64.of_int i))
     in
-    emit_load_list_elements (dim_instr::path) exprs
-  | _ -> failwith "impossible, expected variables or lists"
+    emit_load_list_elements env (dim_instr::path) exprs
+  | _ ->
+    let set_instrs = emit_lval_op_nonlist env LValOp.Set v query_value 1 in
+    let load_value = [set_instrs; instr_popc] in
+    [], [gather load_value]
 
 (* Assigns a location to store values for foreach-key and foreach-value and
    creates a code to populate them.
+   NOT suitable for foreach (... await ...) which uses different code-gen
    Returns: key_local_opt * value_local * key_preamble * value_preamble
    where:
    - key_local_opt - local variable to store a foreach-key value if it is
@@ -764,6 +828,35 @@ and emit_iterator_key_value_storage env iterator =
       None, value_local, value_preamble, value_load
     end
 
+(* Emit code for either the key or value l-value operation in foreach await.
+ * `indices` is the initial prefix of the array indices ([0] for key or [1] for
+ * value) that is prepended onto the indices needed for list destructuring
+ *)
+and emit_foreach_await_lvalue_storage env expr1 indices local =
+  let instrs1, instrs2 = emit_lval_op_list env (Some local) indices expr1 in
+    gather [
+      instrs1;
+      instrs2;
+    ]
+
+(* Emit code for the value and possibly key l-value operation in a foreach
+ * await statement. `local` is the temporary into which the result of invoking
+ * the `next` method has been stored. For example:
+ *   foreach (foo() await as $a->f => list($b[0], $c->g)) { ... }
+ * Here, we need to construct l-value operations that access the [0] (for $a->f)
+ * and [1;0] (for $b[0]) and [1;1] (for $c->g) indices of the array returned
+ * from the `next` method.
+ *)
+and emit_foreach_await_key_value_storage env iterator local =
+  match iterator with
+  | A.As_kv (expr_k, expr_v) ->
+    let key_instrs = emit_foreach_await_lvalue_storage env expr_k [0] local in
+    let value_instrs = emit_foreach_await_lvalue_storage env expr_v [1] local in
+    gather [key_instrs; value_instrs]
+
+  | A.As_v expr_v ->
+    emit_foreach_await_lvalue_storage env expr_v [1] local
+
 (*Generates a code to initialize a given foreach-* value.
   Returns: preamble * load_code
   where:
@@ -782,7 +875,7 @@ and emit_iterator_lvalue_storage env v local =
     Emit_fatal.raise_fatal_parse pos "Can't use return value in write context"
   | _, A.List exprs ->
     let preamble, load_values =
-      emit_load_list_elements [instr_basel local MemberOpMode.Warn] exprs
+      emit_load_list_elements env [instr_basel local MemberOpMode.Warn] exprs
     in
     let load_values = [
       gather @@ (List.rev load_values);
@@ -834,23 +927,9 @@ and emit_foreach_await env pos collection iterator block =
   let iter_temp_local = Local.get_unnamed_local () in
   let collection_expr = emit_expr ~need_ref:false env collection in
   let result_temp_local = Local.get_unnamed_local () in
-  let key_local_opt, value_local, key_preamble, value_preamble =
-    emit_iterator_key_value_storage env iterator in
   let next_meth = Hhbc_id.Method.from_raw_string "next" in
-  let fault_block_local local = gather [
-    instr_unsetl local;
-    instr_unwind
-  ] in
-  let set_from_result idx local preamble = gather [
-    instr_basel result_temp_local MemberOpMode.Warn;
-    instr_querym 0 QueryOp.CGet (MemberKey.EI (Int64.of_int idx));
-    instr_setl local;
-    instr_popc;
-    wrap_non_empty_block_in_fault empty preamble (fault_block_local local)
-  ] in
-  let set_key = match key_local_opt with
-  | Some (key_local) -> set_from_result 0 key_local key_preamble
-  | None -> empty in
+  let set_key_and_value =
+    emit_foreach_await_key_value_storage env iterator result_temp_local in
   gather [
     collection_expr;
     instr_setl iter_temp_local;
@@ -869,10 +948,7 @@ and emit_foreach_await env pos collection iterator block =
       instr_popc;
       instr_istypel result_temp_local OpNull;
       instr_jmpnz exit_label;
-      with_temp_local result_temp_local begin fun _ _ -> gather [
-        set_key;
-        set_from_result 1 value_local value_preamble;
-      ] end;
+      with_temp_local result_temp_local begin fun _ _ -> set_key_and_value end;
       instr_unsetl result_temp_local;
       (Emit_env.do_in_loop_body exit_label next_label env @@ fun env ->
         emit_stmt env block);

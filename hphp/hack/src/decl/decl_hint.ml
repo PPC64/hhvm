@@ -11,7 +11,7 @@
 (*****************************************************************************)
 (* Converts a type hint into a type  *)
 (*****************************************************************************)
-open Core
+open Hh_core
 open Nast
 open Typing_defs
 
@@ -57,7 +57,11 @@ and hint_ p env = function
     Toption h
   | Hfun (is_coroutine, hl, b, h) ->
     let paraml = List.map hl begin fun (p, _ as x) ->
-      { fp_pos = p; fp_name = None; fp_type = hint env x; fp_is_ref = false }
+      { fp_pos = p;
+        fp_name = None;
+        fp_type = hint env x;
+        fp_kind = FPnormal; (* TODO(mqian) implement *)
+      }
     end in
     let ret = hint env h in
     let arity_min = List.length paraml in
@@ -75,6 +79,7 @@ and hint_ p env = function
       ft_where_constraints = [];
       ft_params = paraml;
       ft_ret = ret;
+      ft_ret_by_ref = false;
     }
   | Happly ((p, "\\Tuple"), _)
   | Happly ((p, "\\tuple"), _) ->
@@ -93,9 +98,10 @@ and hint_ p env = function
     Ttuple tyl
   | Hshape { nsi_allows_unknown_fields; nsi_field_map } ->
     let optional_shape_fields_enabled =
-      TypecheckerOptions.experimental_feature_enabled
-        env.Decl_env.decl_tcopt
-        TypecheckerOptions.experimental_optional_shape_field in
+      not @@
+        TypecheckerOptions.experimental_feature_enabled
+          env.Decl_env.decl_tcopt
+          TypecheckerOptions.experimental_disable_optional_and_unknown_shape_fields in
     let shape_fields_known =
       match optional_shape_fields_enabled, nsi_allows_unknown_fields with
         | _, true

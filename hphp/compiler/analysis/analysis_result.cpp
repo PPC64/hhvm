@@ -67,7 +67,8 @@ using namespace HPHP;
 
 AnalysisResult::AnalysisResult()
   : BlockScope("Root", "", StatementPtr(), BlockScope::ProgramScope),
-    m_package(nullptr), m_parseOnDemand(false), m_phase(ParseAllFiles) {
+    m_package(nullptr), m_parseOnDemand(false), m_phase(ParseAllFiles),
+    m_asmCallbacks(this) {
 }
 
 AnalysisResult::~AnalysisResult() {
@@ -376,7 +377,7 @@ void AnalysisResult::addSystemClass(ClassScopeRawPtr cs) {
 
 void AnalysisResult::checkClassDerivations() {
   auto const ar = shared_from_this();
-  {
+  if (Option::FlattenTraits) {
     Timer timer(Timer::WallTime, "importUsedTraits");
     for (auto& pair : m_classDecs) {
       for (ClassScopePtr cls : pair.second) {

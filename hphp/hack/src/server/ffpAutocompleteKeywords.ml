@@ -14,17 +14,11 @@
  *   wishes to do, not just what is valid
  *)
 
-module MinToken = Full_fidelity_minimal_token
-module MinimalSyntax = Full_fidelity_minimal_syntax
-module TokenKind = Full_fidelity_token_kind
-module SyntaxKind = Full_fidelity_syntax_kind
-module SyntaxTree = Full_fidelity_syntax_tree
-
 open FfpAutocompleteContextParser
 open FfpAutocompleteContextParser.Container
 open FfpAutocompleteContextParser.Predecessor
 open FfpAutocompleteContextParser.ContextPredicates
-open Core
+open Hh_core
 
 (* Each keyword completion object has a list of keywords and a function that
    takes a context and returns whether or not the list of keywords is valid

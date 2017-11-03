@@ -30,6 +30,8 @@
 
 namespace HPHP { namespace HHBBC {
 
+struct LocalRange;
+
 //////////////////////////////////////////////////////////////////////
 
 TRACE_SET_MOD(hhbbc);
@@ -90,6 +92,13 @@ OPCODES
 #undef O
 
 }
+
+/*
+ * Find a contiguous local range which is equivalent to the given range and has
+ * a smaller starting id. Only returns the equivalent first local because the
+ * size doesn't change.
+ */
+LocalId equivLocalRange(ISS& env, const LocalRange& range);
 
 namespace {
 
@@ -726,10 +735,19 @@ void refineLocHelper(ISS& env, LocalId l, Type t) {
 
 template<typename F>
 void refineLocation(ISS& env, LocalId l, F fun) {
+  auto refine = [&] (Type t) {
+    auto r1 = fun(t);
+    auto r2 = intersection_of(r1, t);
+    // In unusual edge cases (mainly intersection of two unrelated
+    // interfaces) the intersection may not be a subtype of its inputs.
+    // In that case, always choose fun's type.
+    if (r2.subtypeOf(r1)) return r2;
+    return r1;
+  };
   if (l == StackDupId) {
     auto stk = &env.state.stack.back();
     while (true) {
-      stk->type = fun(std::move(stk->type));
+      stk->type = refine(std::move(stk->type));
       if (stk->equivLoc != StackDupId) break;
       assertx(stk != &env.state.stack.front());
       --stk;
@@ -740,11 +758,11 @@ void refineLocation(ISS& env, LocalId l, F fun) {
   auto equiv = findLocEquiv(env, l);
   if (equiv != NoLocalId) {
     do {
-      refineLocHelper(env, equiv, fun(peekLocRaw(env, equiv)));
+      refineLocHelper(env, equiv, refine(peekLocRaw(env, equiv)));
       equiv = findLocEquiv(env, equiv);
     } while (equiv != l);
   }
-  refineLocHelper(env, l, fun(peekLocRaw(env, l)));
+  refineLocHelper(env, l, refine(peekLocRaw(env, l)));
 }
 
 template<typename PreFun, typename PostFun>
@@ -979,19 +997,13 @@ bool thisAvailable(ISS& env) { return env.state.thisAvailable; }
 // you have to check thisIsAvailable() before assuming it can't be
 // null.
 folly::Optional<Type> thisTypeHelper(const Index& index, Context ctx) {
-  if (!ctx.cls) return folly::none;
-
   // Due to `bindTo`, we can't conclude the type of $this.
   if (RuntimeOption::EvalAllowScopeBinding && ctx.func->isClosureBody) {
     return folly::none;
   }
 
-  // Due to unflattened traits in non-repo mode, we can't conclude $this type.
-  if (!RuntimeOption::RepoAuthoritative && ctx.cls->attrs & AttrTrait) {
-    return folly::none;
-  }
-
-  return subObj(index.resolve_class(ctx.cls));
+  if (auto rcls = index.selfCls(ctx)) return subObj(*rcls);
+  return folly::none;
 }
 
 folly::Optional<Type> thisType(ISS& env) {

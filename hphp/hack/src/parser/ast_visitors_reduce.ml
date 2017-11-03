@@ -278,6 +278,9 @@ class virtual ['self] reduce =
       | Private -> self#on_Private env
       | Public -> self#on_Public env
       | Protected -> self#on_Protected env
+    method on_Pinout _ = self#e
+    method on_param_kind env = function
+      | Pinout -> self#on_Pinout env
     method on_OG_nullthrows _ = self#e
     method on_OG_nullsafe _ = self#e
     method on_og_null_flavor env = function
@@ -328,11 +331,12 @@ class virtual ['self] reduce =
       let r3 = self#on_id env this.param_id in
       let r4 = self#on_option self#on_expr env this.param_expr in
       let r5 = self#on_option self#on_kind env this.param_modifier in
-      let r6 =
+      let r6 = self#on_option self#on_param_kind env this.param_callconv in
+      let r7 =
         self#on_list self#on_user_attribute env
           this.param_user_attributes
       in
-      self#sum [ r0; r1; r2; r3; r4; r5; r6 ]
+      self#sum [ r0; r1; r2; r3; r4; r5; r6; r7 ]
     method on_fun_ env this =
       let r0 = self#on_FileInfo_mode env this.f_mode in
       let r1 = self#on_list self#on_tparam env this.f_tparams in
@@ -440,6 +444,10 @@ class virtual ['self] reduce =
       let r0 = self#on_expr env c0 in
       let r1 = self#on_block env c1 in
       self#add r0 r1
+    method on_Using env _c0 c1 c2 =
+      let r1 = self#on_expr env c1 in
+      let r2 = self#on_block env c2 in
+      self#add r1 r2
     method on_For env c0 c1 c2 c3 =
       let r0 = self#on_expr env c0 in
       let r1 = self#on_expr env c1 in
@@ -487,6 +495,7 @@ class virtual ['self] reduce =
       | Def_inline c0 ->
         self#on_Def_inline env c0
       | Noop -> self#on_Noop env
+      | Using (c0, c1, c2) -> self#on_Using env c0 c1 c2
     method on_As_v = self#on_expr
     method on_As_kv env c0 c1 =
       let r0 = self#on_expr env c0 in
@@ -548,11 +557,11 @@ class virtual ['self] reduce =
       let r1 = self#on_option self#on_expr env c1 in
       self#add r0 r1
     method on_Class_get env c0 c1 =
-      let r0 = self#on_id env c0 in
+      let r0 = self#on_expr env c0 in
       let r1 = self#on_expr env c1 in
       self#add r0 r1
     method on_Class_const env c0 c1 =
-      let r0 = self#on_id env c0 in
+      let r0 = self#on_expr env c0 in
       let r1 = self#on_pstring env c1 in
       self#add r0 r1
     method on_Call env c0 c1 c2 c3 =
@@ -602,6 +611,10 @@ class virtual ['self] reduce =
       let r0 = self#on_expr env c0 in
       let r1 = self#on_expr env c1 in
       self#add r0 r1
+    method on_Is env c0 c1 =
+      let r0 = self#on_expr env c0 in
+      let r1 = self#on_hint env c1 in
+      self#add r0 r1
     method on_New env c0 c1 c2 =
       let r0 = self#on_expr env c0 in
       let r1 = self#on_list self#on_expr env c1 in
@@ -641,6 +654,10 @@ class virtual ['self] reduce =
       let r0 = self#on_pstring env c0 in
       let r1 = self#on_option self#on_expr env c1 in
       self#add r0 r1
+    method on_Callconv env c0 c1 =
+      let r0 = self#on_param_kind env c0 in
+      let r1 = self#on_expr env c1 in
+      self#add r0 r1
     method on_expr_ env = function
       | Array c0 -> self#on_Array env c0
       | Darray c0 -> self#on_Darray env c0
@@ -678,6 +695,7 @@ class virtual ['self] reduce =
       | Eif (c0, c1, c2) -> self#on_Eif env c0 c1 c2
       | NullCoalesce (c0, c1) -> self#on_NullCoalesce env c0 c1
       | InstanceOf (c0, c1) -> self#on_InstanceOf env c0 c1
+      | Is (c0, c1) -> self#on_Is env c0 c1
       | BracedExpr c0 -> self#on_BracedExpr env c0
       | New (c0, c1, c2) -> self#on_New env c0 c1 c2
       | Efun (c0, c1) -> self#on_Efun env c0 c1
@@ -686,6 +704,7 @@ class virtual ['self] reduce =
       | Unsafeexpr c0 -> self#on_Unsafeexpr env c0
       | Import (c0, c1) -> self#on_Import env c0 c1
       | Omitted         -> self#on_Omitted env
+      | Callconv (c0, c1) -> self#on_Callconv env c0 c1
     method on_Include _ = self#e
     method on_Require _ = self#e
     method on_IncludeOnce _ = self#e

@@ -14,7 +14,7 @@
  * the methods defined in the class plus everything that was inherited.
  *)
 (*****************************************************************************)
-open Core
+open Hh_core
 open Decl_defs
 open Nast
 open Typing_defs
@@ -153,11 +153,12 @@ and make_param_ty env param =
       Reason.Rvar_param param.param_pos, t
     | x -> x
   in
+  let mode = get_param_mode param.param_is_reference param.param_callconv in
   {
-    fp_pos    = param.param_pos;
-    fp_name   = Some param.param_name;
-    fp_type   = ty;
-    fp_is_ref = param.param_is_reference;
+    fp_pos  = param.param_pos;
+    fp_name = Some param.param_name;
+    fp_type = ty;
+    fp_kind = mode;
   }
 
 and fun_decl f decl_tcopt =
@@ -215,6 +216,7 @@ and fun_decl_in_env env f =
     ft_where_constraints = where_constraints;
     ft_params      = params;
     ft_ret         = ret_ty;
+    ft_ret_by_ref  = f.f_ret_by_ref;
   } in
   ft
 
@@ -709,6 +711,7 @@ and method_decl env m =
     ft_where_constraints = where_constraints;
     ft_params   = params;
     ft_ret      = ret;
+    ft_ret_by_ref = m.m_ret_by_ref;
   }
 
 and method_check_override opt ~is_static c m acc  =

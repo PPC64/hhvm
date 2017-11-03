@@ -18,7 +18,8 @@
  *)
 
 module SourceText = Full_fidelity_source_text
-module Parser = Full_fidelity_parser
+module Env = Full_fidelity_parser_env
+module Parser = Minimal_parser
 module SyntaxError = Full_fidelity_syntax_error
 module TK = Full_fidelity_token_kind
 open Full_fidelity_minimal_syntax
@@ -46,7 +47,7 @@ let analyze_header text script =
     begin match syntax markup_suffix with
     | MarkupSuffix {
         markup_suffix_name = {
-          syntax = Missing | Token { MinimalToken.kind = TK.Equal; _ }
+          syntax = Missing | Token { Token.kind = TK.Equal; _ }
         ; _ }
       ; _ } -> "php", ""
     | MarkupSuffix {
@@ -101,8 +102,8 @@ let remove_duplicates errors equals =
   let result = aux errors [] in
   List.rev result
 
-let make text =
-  let parser = Parser.make text in
+let make ?(env = Env.default) text =
+  let parser = Parser.make env text in
   let (parser, root) = Parser.parse_script parser in
   (* We've got the lexical errors and the parser errors together, both
   with lexically later errors earlier in the list. We want to reverse the

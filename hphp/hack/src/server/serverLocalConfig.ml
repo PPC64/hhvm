@@ -9,7 +9,7 @@
  *)
 
 open Config_file.Getters
-open Core
+open Hh_core
 
 type t = {
   use_watchman: bool;
@@ -29,6 +29,7 @@ type t = {
   lazy_parse: bool;
   lazy_init: bool;
   incremental_init : bool;
+  load_tiny_state : bool;
   (** Limit the number of clients that can sit in purgatory waiting
    * for a server to be started because we don't want this to grow
    * unbounded. *)
@@ -38,6 +39,8 @@ type t = {
   cpu_priority: int;
   shm_dirs: string list;
   start_with_recorder_on : bool;
+  max_workers : int;
+  max_bucket_size : int;
   (** See HhMonitorInformant. *)
   use_dummy_informant : bool;
   informant_min_distance_restart: int;
@@ -61,11 +64,14 @@ let default = {
   lazy_parse = false;
   lazy_init = false;
   incremental_init = false;
+  load_tiny_state = false;
   max_purgatory_clients = 400;
   search_chunk_size = 0;
   io_priority = 7;
   cpu_priority = 10;
   shm_dirs = [GlobalConfig.shm_dir; GlobalConfig.tmp_dir;];
+  max_workers = GlobalConfig.nbr_procs;
+  max_bucket_size = Bucket.max_size ();
   start_with_recorder_on = false;
   use_dummy_informant = true;
   informant_min_distance_restart = 100;
@@ -105,13 +111,15 @@ let load_ fn ~silent =
     ~default:default.lazy_init config in
   let incremental_init = bool_ "incremental_init"
     ~default:default.incremental_init config in
+  let load_tiny_state = bool_ "load_tiny_state"
+    ~default:default.load_tiny_state config in
   let max_purgatory_clients = int_ "max_purgatory_clients"
     ~default:default.max_purgatory_clients config in
   let search_chunk_size = int_ "search_chunk_size"
     ~default:default.search_chunk_size config in
   let load_mini_script_timeout = int_ "load_mini_script_timeout"
     ~default:default.load_mini_script_timeout config in
-  let load_state_natively = bool_ "load_state_natively_v2"
+  let load_state_natively = bool_ "load_state_natively_v3"
     ~default:default.load_state_natively config in
   let use_hackfmt = bool_ "use_hackfmt"
     ~default:default.use_hackfmt config in
@@ -147,6 +155,14 @@ let load_ fn ~silent =
     ~default:default.shm_dirs
     config
   |> List.map ~f:(fun(dir) -> Path.(to_string @@ make dir)) in
+  let max_workers = int_ "max_workers"
+    ~default:default.max_workers config in
+  (* Do not allow max workers to exceed the number of processors *)
+  if max_workers > GlobalConfig.nbr_procs then
+    Hh_logger.log "Warning: max_workers is higher than the number of processors. Ignoring.";
+  let max_workers = min GlobalConfig.nbr_procs max_workers in
+  let max_bucket_size = int_ "max_bucket_size"
+    ~default:default.max_bucket_size config in
   let load_script_config = LoadScriptConfig.default in
   {
     use_watchman;
@@ -164,10 +180,13 @@ let load_ fn ~silent =
     lazy_parse;
     lazy_init;
     incremental_init;
+    load_tiny_state;
     search_chunk_size;
     io_priority;
     cpu_priority;
     shm_dirs;
+    max_workers;
+    max_bucket_size;
     start_with_recorder_on;
     use_dummy_informant;
     informant_min_distance_restart;

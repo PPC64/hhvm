@@ -159,6 +159,7 @@ type stmt =
   | If of expr * block * block
   | Do of block * expr
   | While of expr * block
+  | Using of bool (* await? *) * expr * block
   | For of expr * expr * expr * block
   | Switch of expr * case list
   (* Dropped the Pos.t option *)
@@ -229,9 +230,11 @@ and expr_ =
   | Eif of expr * expr option * expr
   | NullCoalesce of expr * expr
   | InstanceOf of expr * class_id
+  | Is of expr * hint
   | New of class_id * expr list * expr list
   | Efun of fun_ * id list
   | Xml of sid * (pstring * expr) list * expr list
+  | Callconv of Ast.param_kind * expr
 
   (* None of these constructors exist in the AST *)
   | Lplaceholder of Pos.t
@@ -280,6 +283,7 @@ and fun_param = {
   param_pos : Pos.t;
   param_name : string;
   param_expr : expr option;
+  param_callconv : Ast.param_kind option;
 }
 
 and fun_variadicity = (* does function take varying number of args? *)
@@ -298,6 +302,7 @@ and fun_ = {
   f_body     : func_body;
   f_fun_kind : Ast.fun_kind;
   f_user_attributes : user_attribute list;
+  f_ret_by_ref : bool;
 }
 
 and func_body =
@@ -397,6 +402,7 @@ and method_ = {
   m_fun_kind        : Ast.fun_kind        ;
   m_user_attributes : user_attribute list ;
   m_ret             : hint option         ;
+  m_ret_by_ref      : bool                ;
 }
 
 and typedef = {
@@ -465,9 +471,11 @@ let expr_to_string expr =
   | Eif _  -> "Eif"
   | NullCoalesce _  -> "NullCoalesce"
   | InstanceOf _  -> "InstanceOf"
+  | Is _ -> "Is"
   | New _  -> "New"
   | Efun _  -> "Efun"
   | Xml _  -> "Xml"
+  | Callconv _ -> "Callconv"
   | Assert _  -> "Assert"
   | Clone _  -> "Clone"
   | Typename _  -> "Typename"
@@ -520,6 +528,7 @@ class type ['a] visitor_type = object
   method on_throw : 'a -> is_terminal -> expr -> 'a
   method on_try : 'a -> block -> catch list -> block -> 'a
   method on_while : 'a -> expr -> block -> 'a
+  method on_using : 'a -> bool -> expr -> block -> 'a
   method on_as_expr : 'a -> as_expr -> 'a
   method on_array : 'a -> afield list -> 'a
   method on_shape : 'a -> expr ShapeMap.t -> 'a
@@ -562,15 +571,32 @@ class type ['a] visitor_type = object
   method on_nullCoalesce : 'a -> expr -> expr -> 'a
   method on_typename : 'a -> sid -> 'a
   method on_instanceOf : 'a -> expr -> class_id -> 'a
+  method on_is : 'a -> expr -> hint -> 'a
   method on_class_id : 'a -> class_id -> 'a
   method on_new : 'a -> class_id -> expr list -> expr list -> 'a
   method on_efun : 'a -> fun_ -> id list -> 'a
   method on_xml : 'a -> sid -> (pstring * expr) list -> expr list -> 'a
+  method on_param_kind : 'a -> Ast.param_kind -> 'a
+  method on_callconv : 'a -> Ast.param_kind -> expr -> 'a
   method on_assert : 'a -> assert_expr -> 'a
   method on_clone : 'a -> expr -> 'a
   method on_field: 'a -> field -> 'a
   method on_afield: 'a -> afield -> 'a
 
+  method on_func_named_body: 'a -> func_named_body -> 'a
+  method on_func_unnamed_body: 'a -> func_unnamed_body -> 'a
+  method on_func_body: 'a -> func_body -> 'a
+  method on_method_: 'a -> method_ -> 'a
+
+  method on_fun_: 'a -> fun_ -> 'a
+  method on_class_: 'a -> class_ -> 'a
+  method on_gconst: 'a -> gconst -> 'a
+  method on_typedef: 'a -> typedef -> 'a
+
+  method on_hint: 'a -> hint -> 'a
+
+  method on_def: 'a -> def -> 'a
+  method on_program: 'a -> program -> 'a
 end
 
 (*****************************************************************************)
@@ -611,6 +637,11 @@ class virtual ['a] visitor: ['a] visitor_type = object(this)
     acc
 
   method on_while acc e b =
+    let acc = this#on_expr acc e in
+    let acc = this#on_block acc b in
+    acc
+
+  method on_using acc _has_await e b =
     let acc = this#on_expr acc e in
     let acc = this#on_block acc b in
     acc
@@ -675,6 +706,7 @@ class virtual ['a] visitor: ['a] visitor_type = object(this)
     | If      (e, b1, b2)     -> this#on_if acc e b1 b2
     | Do      (b, e)          -> this#on_do acc b e
     | While   (e, b)          -> this#on_while acc e b
+    | Using   (has_await, e, b) -> this#on_using acc has_await e b
     | For     (e1, e2, e3, b) -> this#on_for acc e1 e2 e3 b
     | Switch  (e, cl)         -> this#on_switch acc e cl
     | Foreach (e, ae, b)      -> this#on_foreach acc e ae b
@@ -733,10 +765,12 @@ class virtual ['a] visitor: ['a] visitor_type = object(this)
    | Eif         (e1, e2, e3)     -> this#on_eif acc e1 e2 e3
    | NullCoalesce (e1, e2)     -> this#on_nullCoalesce acc e1 e2
    | InstanceOf  (e1, e2)         -> this#on_instanceOf acc e1 e2
+   | Is          (e, h)           -> this#on_is acc e h
    | Typename n -> this#on_typename acc n
    | New         (cid, el, uel)   -> this#on_new acc cid el uel
    | Efun        (f, idl)         -> this#on_efun acc f idl
    | Xml         (sid, attrl, el) -> this#on_xml acc sid attrl el
+   | Callconv    (kind, e)        -> this#on_callconv acc kind e
    | ValCollection    (s, el)     ->
        this#on_valCollection acc s el
    | KeyValCollection (s, fl)     ->
@@ -858,6 +892,8 @@ class virtual ['a] visitor: ['a] visitor_type = object(this)
     let acc = this#on_class_id acc e2 in
     acc
 
+  method on_is acc e _ = this#on_expr acc e
+
   method on_class_id acc = function
     | CIexpr e -> this#on_expr acc e
     | _ -> acc
@@ -880,6 +916,13 @@ class virtual ['a] visitor: ['a] visitor_type = object(this)
     let acc = List.fold_left this#on_expr acc el in
     acc
 
+  method on_param_kind acc _ = acc
+
+  method on_callconv acc kind e =
+    let acc = this#on_param_kind acc kind in
+    let acc = this#on_expr acc e in
+    acc
+
   method on_assert acc = function
     | AE_assert e -> this#on_expr acc e
 
@@ -896,6 +939,72 @@ class virtual ['a] visitor: ['a] visitor_type = object(this)
         let acc = this#on_expr acc e1 in
         let acc = this#on_expr acc e2 in
         acc
+
+  method on_hint acc _ = acc
+
+  method on_fun_ acc f =
+    let acc = this#on_id acc f.f_name in
+    let acc = this#on_func_body acc f.f_body in
+    let acc = match f.f_ret with
+      | Some h -> this#on_hint acc h
+      | None -> acc in
+    acc
+
+  method on_func_named_body acc fnb =
+    this#on_block acc fnb.fnb_nast
+
+  method on_func_unnamed_body acc _ = acc
+
+  method on_func_body acc = function
+    | UnnamedBody unb -> this#on_func_unnamed_body acc unb
+    | NamedBody nb -> this#on_func_named_body acc nb
+
+  method on_method_ acc m =
+    let acc = this#on_id acc m.m_name in
+    let acc = this#on_func_body acc m.m_body in
+    acc
+
+  method on_class_ acc c =
+    let acc = this#on_id acc c.c_name in
+    let acc = List.fold_left this#on_hint acc c.c_extends in
+    let acc = List.fold_left this#on_hint acc c.c_uses in
+    let acc = List.fold_left this#on_hint acc c.c_implements in
+
+    let acc = match c.c_constructor with
+      | Some ctor -> this#on_method_ acc ctor
+      | None -> acc in
+    let acc = List.fold_left this#on_method_ acc c.c_methods in
+    let acc = List.fold_left this#on_method_ acc c.c_static_methods in
+    acc
+
+  method on_gconst acc g =
+    let acc = this#on_id acc g.cst_name in
+    let acc = match g.cst_value with
+      | Some e -> this#on_expr acc e
+      | None -> acc in
+    let acc = match g.cst_type with
+      | Some h -> this#on_hint acc h
+      | None -> acc in
+    acc
+
+  method on_typedef acc t =
+    let acc = this#on_id acc t.t_name in
+    let acc = this#on_hint acc t.t_kind in
+    let acc = match t.t_constraint with
+      | Some c -> this#on_hint acc c
+      | None -> acc in
+    acc
+
+  method on_def acc = function
+    | Fun f -> this#on_fun_ acc f
+    | Class c -> this#on_class_ acc c
+    | Typedef t -> this#on_typedef acc t
+    | Constant g -> this#on_gconst acc g
+
+  method on_program acc p =
+    let acc = List.fold_left begin fun acc d ->
+      this#on_def acc d end acc p in
+    acc
 end
 
 (*****************************************************************************)

@@ -8,7 +8,7 @@
  *
  *)
 
-open Core
+open Hh_core
 open Utils
 
 (* The reason why something is expected to have a certain type *)
@@ -60,6 +60,7 @@ type t =
   | Rmap_append      of Pos.t
   | Rvar_param       of Pos.t
   | Runpack_param    of Pos.t
+  | Rinout_param     of Pos.t
   | Rinstantiate     of t * string * t
   | Rarray_filter    of Pos.t * t
   | Rtype_access     of t * string list * t
@@ -72,6 +73,7 @@ type t =
   | Rinstanceof      of Pos.t * string
   | Rfinal_property  of Pos.t
   | Rvarray_or_darray_key of Pos.t
+  | Rusing           of Pos.t
 
 and expr_dep_type_reason =
   | ERexpr of int
@@ -133,6 +135,7 @@ let rec to_string prefix r =
   | Ryield_send      _ -> [(p, prefix ^ " ($generator->send() can always send a null back to a \"yield\")")]
   | Rvar_param       _ -> [(p, prefix ^ " (variadic argument)")]
   | Runpack_param    _ -> [(p, prefix ^ " (it is unpacked with '...')")]
+  | Rinout_param     _ -> [(p, prefix ^ " (inout parameter)")]
   | Rnullsafe_op     _ -> [(p, prefix ^ " (use of ?-> operator)")]
   | Rcoerced     (_, p2, s)  ->
       [
@@ -200,6 +203,8 @@ let rec to_string prefix r =
         "This is varray_or_darray, which requires arraykey-typed keys when \
         used with an array (used like a hashtable)"
       )]
+  | Rusing p ->
+    [(p, prefix ^ " because it was assigned in a 'using' clause")]
 
 
 and to_pos = function
@@ -248,6 +253,7 @@ and to_pos = function
   | Rmap_append p -> p
   | Rvar_param p -> p
   | Runpack_param p -> p
+  | Rinout_param p -> p
   | Rinstantiate (_, _, r) -> to_pos r
   | Rarray_filter (p, _) -> p
   | Rtype_access (r, _, _) -> to_pos r
@@ -260,6 +266,7 @@ and to_pos = function
   | Rinstanceof (p, _) -> p
   | Rvarray_or_darray_key p
   | Rfinal_property p -> p
+  | Rusing p -> p
 
 (* This is a mapping from internal expression ids to a standardized int.
  * Used for outputting cleaner error messages to users
@@ -293,6 +300,7 @@ type ureason =
   | URnone
   | URassign
   | URassign_branch
+  | URassign_inout
   | URhint
   | URreturn
   | URforeach
@@ -307,6 +315,7 @@ type ureason =
   | URxhp of string * string
   | URindex of string
   | URparam
+  | URparam_inout
   | URarray_value
   | URarray_key
   | URtuple_access
@@ -321,6 +330,7 @@ type ureason =
   | URsubsume_tconst_assign
   | URfinal_property
   | URclone
+  | URusing
 
 let index_array = URindex "array"
 let index_tuple = URindex "tuple"
@@ -332,6 +342,7 @@ let string_of_ureason = function
   | URhint -> "Wrong type hint"
   | URassign -> "Invalid assignment"
   | URassign_branch -> "Invalid assignment in this branch"
+  | URassign_inout -> "Invalid assignment to an inout parameter"
   | URforeach -> "Invalid foreach"
   | URthrow -> "Invalid exception"
   | URvector -> "Some elements in this Vector are incompatible"
@@ -344,6 +355,7 @@ let string_of_ureason = function
       "Invalid xhp value for attribute " ^ attr ^ " in " ^ (strip_ns cls)
   | URindex s -> "Invalid index type for this " ^ s
   | URparam -> "Invalid argument"
+  | URparam_inout -> "Invalid argument to an inout parameter"
   | URarray_value -> "Incompatible field values"
   | URarray_key -> "Incompatible array keys"
   | URtuple_access ->
@@ -368,6 +380,7 @@ let string_of_ureason = function
   | URfinal_property ->
       "Property cannot be declared final"
   | URclone -> "Clone cannot be called on non-object"
+  | URusing -> "Using cannot be used on non-disposable expression"
 
 let compare r1 r2 =
   let get_pri = function

@@ -8,6 +8,7 @@
  *
  *)
 
+module SourceText = Full_fidelity_source_text
 module SyntaxKind = Full_fidelity_syntax_kind
 module SyntaxTree = Full_fidelity_syntax_tree
 module TriviaKind = Full_fidelity_trivia_kind
@@ -17,9 +18,29 @@ module MinimalToken = Full_fidelity_minimal_token
 module MinimalTrivia = Full_fidelity_minimal_trivia
 module Rewriter = Full_fidelity_rewriter.WithSyntax(MinimalSyntax)
 
-open Core
+module EditableSyntax = Full_fidelity_editable_syntax
+module EditableToken = Full_fidelity_editable_token
+module EditableRewriter = Full_fidelity_rewriter.WithSyntax(EditableSyntax)
+
+open Hh_core
 
 let identity x = x
+
+let rewrite_editable_tree_no_trivia node =
+  let trivia = ref [] in
+  let rewrite n =
+    match EditableSyntax.syntax n with
+    | EditableSyntax.Token t ->
+      let kind = EditableToken.kind t in
+      let text = EditableToken.text t in
+      let leading = EditableToken.leading t in
+      let trailing = EditableToken.trailing t in
+      let token = EditableToken.make kind text [] [] in
+      trivia := !trivia @ leading @ trailing;
+      EditableRewriter.Replace (EditableSyntax.make_token token)
+    | _ -> EditableRewriter.Keep in
+  let no_trivia_tree = EditableRewriter.rewrite_post rewrite node in
+  (no_trivia_tree, !trivia)
 
 let rewrite_tree_no_trivia node =
   let rewrite n =
@@ -27,7 +48,7 @@ let rewrite_tree_no_trivia node =
     | MinimalSyntax.Token t ->
       let kind = MinimalToken.kind t in
       let width = MinimalToken.width t in
-      let token = MinimalToken.make kind width [] [] in
+      let token = MinimalToken.make kind SourceText.empty 0 width [] [] in
       Rewriter.Replace (MinimalSyntax.make_token token)
     | _ -> Rewriter.Keep in
   Rewriter.rewrite_post rewrite node
@@ -56,6 +77,8 @@ let rewrite_tree_no_whitespace node =
     | MinimalSyntax.Token t ->
       let token = MinimalToken.(make
         (kind t)
+        SourceText.empty
+        0
         (width t)
         (filter_whitespace (leading t))
         (filter_whitespace (trailing t))

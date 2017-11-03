@@ -8,7 +8,7 @@
  *
 *)
 
-open Core
+open Hh_core
 open Hhbc_ast
 
 module A = Ast
@@ -278,12 +278,12 @@ let instr_contUnsetDelegate_ignore iter =
 let instr_trigger_sampled_error =
   instr_fcallbuiltin 3 3 "trigger_sampled_error"
 
-(* Functions on instr_seq that correspond to existing Core.List functions *)
+(* Functions on instr_seq that correspond to existing Hh_core.List functions *)
 module InstrSeq = struct
 
   (* f takes an instruction and produces an instruction list to replace it. *)
   let rec flat_map instrseq ~f =
-    let flat_map_list items ~f = Core.List.bind items f in
+    let flat_map_list items ~f = Hh_core.List.bind items f in
     match instrseq with
     | Instr_empty -> Instr_empty
     | Instr_one x ->
@@ -571,6 +571,8 @@ let rewrite_class_refs instrseq =
           | _ -> false)
       | _ -> false
       end
+    | A.Call ((_, A.Id (_, "tuple")), _, es, []) ->
+      List.for_all es ~f:can_initialize_static_var
     | _ -> false
 
   let rewrite_static_instrseq static_var_map emit_expr env instrseq =

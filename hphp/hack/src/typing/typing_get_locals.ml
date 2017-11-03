@@ -9,7 +9,7 @@
  *)
 
 open Ast
-open Core
+open Hh_core
 open Utils
 
 module FuncTerm = Typing_func_terminality
@@ -43,8 +43,7 @@ and terminal_ tcopt nsenv ~in_try = function
   | Expr (_, Call ((_, Id fun_id), _, _, _)) ->
     let _, fun_name = NS.elaborate_id nsenv NS.ElaborateFun fun_id in
     FuncTerm.(raise_exit_if_terminal (get_fun tcopt fun_name))
-  | Expr (_, Call ((_, Class_const (cls_id, (_, meth_name))), _, _, _))
-    when (snd cls_id).[0] <> '$' ->
+  | Expr (_, Call ((_, Class_const ((_, Id cls_id), (_, meth_name))), _, _, _)) ->
     let _, cls_name = NS.elaborate_id nsenv NS.ElaborateClass cls_id in
     FuncTerm.(raise_exit_if_terminal
       (get_static_meth tcopt cls_name meth_name))
@@ -61,6 +60,7 @@ and terminal_ tcopt nsenv ~in_try = function
   | Markup _
   | Do _
   | While _
+  | Using _
   | For _
   | Foreach _
   | Def_inline _
@@ -137,7 +137,7 @@ let rec stmt tcopt (acc:(Namespace_env.env * Pos.t SMap.t)) st =
   | Fallthrough
   | Markup _
   | Expr _ | Break _ | Continue _ | Throw _
-  | Do _ | While _ | For _ | Foreach _
+  | Do _ | While _ | Using _ | For _ | Foreach _
   | Return _ | GotoLabel _ | Goto _ | Static_var _
   | Global_var _ | Def_inline _ | Noop -> acc
   | Block b -> block tcopt acc b

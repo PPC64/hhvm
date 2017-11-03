@@ -553,7 +553,7 @@ void promoteBaseElemD(ISS& env) {
   if (mustBeArrLike(ty)) return;
 
   if (elemMustPromoteToArr(ty)) {
-    ty = counted_aempty();
+    ty = some_aempty();
     return;
   }
 
@@ -561,12 +561,12 @@ void promoteBaseElemD(ISS& env) {
   // which promotes to array. So for any string here we can assume it promoted
   // to an empty array.
   if (ty.subtypeOf(TStr)) {
-    ty = counted_aempty();
+    ty = some_aempty();
     return;
   }
 
   if (elemCouldPromoteToArr(ty)) {
-    ty = promote_emptyish(ty, counted_aempty());
+    ty = promote_emptyish(ty, some_aempty());
     return;
   }
 
@@ -1168,7 +1168,7 @@ void miFinalSetElem(ISS& env, int32_t nDiscard, const Type& key) {
   // general handleBaseElemD, since operates on strings as if this
   // was an intermediate ElemD.
   if (env.state.mInstrState.base.type.subtypeOf(sempty())) {
-    env.state.mInstrState.base.type = counted_aempty();
+    env.state.mInstrState.base.type = some_aempty();
   } else {
     auto& ty = env.state.mInstrState.base.type;
     if (ty.couldBe(TStr)) {
@@ -1177,7 +1177,7 @@ void miFinalSetElem(ISS& env, int32_t nDiscard, const Type& key) {
       // becomes an array.  Do it conservatively for now:
       ty = union_of(
         loosen_staticness(loosen_values(std::move(ty))),
-        counted_aempty()
+        some_aempty()
       );
     }
     if (!ty.subtypeOf(TStr)) promoteBaseElemD(env);
@@ -1679,9 +1679,12 @@ void in(ISS& env, const bc::QueryM& op) {
         discard(env, nDiscard);
         push(env, TBool);
         break;
+      case QueryMOp::InOut:
+        always_assert(false);
     }
   } else if (mcodeIsElem(op.mkey.mcode)) {
     switch (op.subop2) {
+      case QueryMOp::InOut:
       case QueryMOp::CGet:
         miFinalCGetElem(env, nDiscard, *key, false,
                         [](Type t) { return t; });
@@ -1817,48 +1820,6 @@ void in(ISS& env, const bc::FPassM& op) {
   );
 }
 
-namespace {
-
-// Find a contiguous local range which is equivalent to the given range and has
-// a smaller starting id. Only returns the equivalent first local because the
-// size doesn't change.
-LocalId equivLocalRange(ISS& env, const LocalRange& range) {
-  auto bestRange = range.first;
-  auto equivFirst = findLocEquiv(env, range.first);
-  if (equivFirst == NoLocalId) return bestRange;
-  do {
-    if (equivFirst < bestRange) {
-      auto equivRange = [&] {
-        // local equivalency includes differing by Uninit, so we need
-        // to check the types.
-        if (peekLocRaw(env, equivFirst) != peekLocRaw(env, range.first)) {
-          return false;
-        }
-
-        for (uint32_t i = 1; i <= range.restCount; ++i) {
-          if (!locsAreEquiv(env, equivFirst + i, range.first + i) ||
-              peekLocRaw(env, equivFirst + i) !=
-              peekLocRaw(env, range.first + i)) {
-            return false;
-          }
-        }
-
-        return true;
-      }();
-
-      if (equivRange) {
-        bestRange = equivFirst;
-      }
-    }
-    equivFirst = findLocEquiv(env, equivFirst);
-    assert(equivFirst != NoLocalId);
-  } while (equivFirst != range.first);
-
-  return bestRange;
-}
-
-}
-
 void in(ISS& env, const bc::MemoGet& op) {
   always_assert(env.ctx.func->isMemoizeWrapper);
   always_assert(op.locrange.first + op.locrange.restCount
@@ -1913,8 +1874,7 @@ void in(ISS& env, const bc::MemoSet& op) {
 
   auto const t1 = popC(env);
 
-  // The cache set always writes a counted non-empty dict to the base.
-  env.state.mInstrState.base.type = TCDictN;
+  env.state.mInstrState.base.type = TDictN;
   endBase(env);
   discard(env, op.arg1);
   push(env, t1);

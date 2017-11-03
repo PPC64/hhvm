@@ -14,7 +14,6 @@ module A = Ast
 module SS = String_sequence
 module SU = Hhbc_string_utils
 module SN = Naming_special_names
-module TV = Typed_value
 module ULS = Unique_list_string
 open H
 
@@ -1044,22 +1043,29 @@ and string_of_param_default_value ?(use_single_quote=false) expr =
     ^ "("
     ^ String.concat ", " es
     ^ ")"
-  | A.Class_get ((_, s1), e2)
+  | A.Class_get ((_, A.Id (_, s1)), e2)
     when s1 = SN.Classes.cSelf ||
          s1 = SN.Classes.cParent ||
          s1 = SN.Classes.cStatic ->
     let s2 = string_of_param_default_value e2 in
     s1 ^ "::" ^ s2
-  | A.Class_const ((_, s1), (_, s2))
+  | A.Class_const ((_, A.Id (_, s1)), (_, s2))
     when s1 = SN.Classes.cSelf ||
          s1 = SN.Classes.cParent ||
          s1 = SN.Classes.cStatic ->
     s1 ^ "::" ^ s2
-  | A.Class_get ((_, s1), e2) ->
+  | A.Class_get ((_, A.Id (_, s1)), e2) ->
     let s2 = string_of_param_default_value e2 in
     "\\\\" ^ (Php_escaping.escape (SU.strip_global_ns s1)) ^ "::" ^ s2
-  | A.Class_const ((_, s1), (_, s2)) ->
+  | A.Class_get (e1, e2) ->
+    let s1 = string_of_param_default_value e1 in
+    let s2 = string_of_param_default_value e2 in
+    s1 ^ "::" ^ s2
+  | A.Class_const ((_, A.Id (_, s1)), (_, s2)) ->
     "\\\\" ^ (Php_escaping.escape (SU.strip_global_ns s1)) ^ "::" ^ s2
+  | A.Class_const (e1, (_, s2)) ->
+    let s1 = string_of_param_default_value e1 in
+    s1 ^ "::" ^ s2
   | A.Unop (uop, e) -> begin
     let e = string_of_param_default_value e in
     match uop with
@@ -1101,6 +1107,10 @@ and string_of_param_default_value ?(use_single_quote=false) expr =
   | A.Pipe (e1, e2) -> middle_aux e1 " |> " e2
   | A.NullCoalesce (e1, e2) -> middle_aux e1 " \\?\\? " e2
   | A.InstanceOf (e1, e2) -> middle_aux e1 " instanceof " e2
+  | A.Is (e, h) ->
+    let e = string_of_param_default_value e in
+    let h = string_of_hint ~ns:true h in
+      e ^ " is " ^ h
   | A.Varray es ->
     let index i = p, A.Int (p, string_of_int i) in
     string_of_param_default_value @@
@@ -1124,6 +1134,7 @@ and string_of_param_default_value ?(use_single_quote=false) expr =
   | A.Suspend _
   | A.List _
   | A.Omitted
+  | A.Callconv _
   | A.Expr_list _ -> failwith "illegal default value"
 
 let string_of_param_default_value_option = function
@@ -1181,7 +1192,7 @@ let add_static_default_value_option buf indent label =
   add_indented_line buf indent (".static " ^ label ^ ";")
 
 let add_static_values buf indent lst =
-  Core.List.iter lst
+  Hh_core.List.iter lst
     (fun label -> add_static_default_value_option buf indent label)
 
 let add_doc buf indent doc_comment =
@@ -1441,7 +1452,7 @@ let add_uses buf c =
 
 let add_class_def buf class_def =
   let class_name = Hhas_class.name class_def in
-  (* TODO: user attribuqtes *)
+  (* TODO: user attributes *)
   B.add_string buf "\n.class ";
   B.add_string buf (class_special_attributes class_def);
   B.add_string buf (Hhbc_id.Class.to_raw_string class_name);
@@ -1495,32 +1506,48 @@ let add_typedef buf typedef =
   | None ->
     B.add_string buf ";"
 
-let add_program_content buf hhas_prog =
+let add_symbol_ref_regions buf symbol_refs =
+  let add_region name refs =
+    if not (SSet.is_empty refs) then begin
+      B.add_string buf ("\n." ^ name);
+      B.add_string buf " {";
+      SSet.iter (fun s -> B.add_string buf ("\n  " ^ s)) refs;
+      B.add_string buf "\n}\n";
+    end
+  in
+  add_region "includes" symbol_refs.Hhas_symbol_refs.includes;
+  add_region "constant_refs" symbol_refs.Hhas_symbol_refs.constants;
+  add_region "function_refs" symbol_refs.Hhas_symbol_refs.functions;
+  add_region "class_refs" symbol_refs.Hhas_symbol_refs.classes
+
+let add_program_content dump_symbol_refs buf hhas_prog =
   let functions = Hhas_program.functions hhas_prog in
   let top_level_body = Hhas_program.main hhas_prog in
   let classes = Hhas_program.classes hhas_prog in
   let adata = Hhas_program.adata hhas_prog in
+  let symbol_refs = Hhas_program.symbol_refs hhas_prog in
   add_data_region buf adata;
   add_top_level buf top_level_body;
   List.iter (add_fun_def buf) functions;
   List.iter (add_class_def buf) classes;
-  List.iter (add_typedef buf) (Hhas_program.typedefs hhas_prog)
+  List.iter (add_typedef buf) (Hhas_program.typedefs hhas_prog);
+  if dump_symbol_refs then add_symbol_ref_regions buf symbol_refs
 
-let add_program ?path buf hhas_prog =
+let add_program ?path dump_symbol_refs buf hhas_prog =
   match path with
   | Some path ->
       let path = Relative_path.to_absolute path in
       B.add_string
         buf
         (Printf.sprintf "# %s starts here\n\n .filepath \"%s\";\n" path path);
-      add_program_content buf hhas_prog;
+      add_program_content dump_symbol_refs buf hhas_prog;
       B.add_string buf (Printf.sprintf "\n# %s ends here\n" path)
   | None ->
       B.add_string buf "#starts here\n";
-      add_program_content buf hhas_prog;
+      add_program_content dump_symbol_refs buf hhas_prog;
       B.add_string buf "\n#ends here\n"
 
-let to_string ?path hhas_prog =
+let to_string ?path ?(dump_symbol_refs=false) hhas_prog =
   let buf = Buffer.create 1024 in
-  add_program ?path buf hhas_prog;
+  add_program ?path dump_symbol_refs buf hhas_prog;
   B.contents buf

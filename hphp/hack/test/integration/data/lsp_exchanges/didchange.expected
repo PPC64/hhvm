@@ -39,34 +39,10 @@
   },
   {
     "jsonrpc": "2.0",
-    "method": "window/progress",
+    "method": "telemetry/event",
     "params": {
-      "id": 1,
-      "label": "Hack: preparing to check edits"
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "window/progress",
-    "params": {
-      "id": 1,
-      "label": "Hack: checking edits"
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "window/actionRequired",
-    "params": {
-      "id": 2,
-      "label": "Hack: save any file to do a whole-program check"
-    }
-  },
-  {
-    "jsonrpc": "2.0",
-    "method": "window/progress",
-    "params": {
-      "id": 1,
-      "label": null
+      "type": 4,
+      "message": "Version in hhconfig=[NoVersion]"
     }
   },
   {
@@ -78,18 +54,18 @@
         {
           "range": {
             "start": {
-              "line": 2,
-              "character": 9
+              "line": 7,
+              "character": 11
             },
             "end": {
-              "line": 2,
-              "character": 11
+              "line": 7,
+              "character": 12
             }
           },
           "severity": 1,
           "code": 1002,
           "source": "Hack",
-          "message": "Expected identifier",
+          "message": "Expected ;",
           "relatedLocations": []
         }
       ]

@@ -111,6 +111,7 @@ struct Vunit;
   O(defvmretdata, Inone, Un, D(data))\
   O(defvmrettype, Inone, Un, D(type))\
   O(syncvmret, Inone, U(data) U(type), Dn)\
+  O(syncvmrettype, Inone, U(type), Dn)\
   O(phplogue, Inone, U(fp), Dn)\
   O(phpret, Inone, U(fp) U(args), D(d))\
   O(callphp, I(stub), U(args), Dn)\
@@ -140,6 +141,7 @@ struct Vunit;
   O(addlm, I(fl), U(s0) UM(m), D(sf)) \
   O(addlim, I(s0) I(fl), UM(m), D(sf)) \
   O(addq, I(fl), U(s0) U(s1), D(d) D(sf)) \
+  O(addqmr, I(fl), UA(m) UH(s1,d), DH(d,s1) D(sf))  \
   O(addqi, I(s0) I(fl), UH(s1,d), DH(d,s1) D(sf)) \
   O(addqim, I(s0) I(fl), UM(m), D(sf)) \
   O(addsd, Inone, U(s0) U(s1), D(d))\
@@ -340,6 +342,7 @@ struct Vunit;
  *    sd  double
  *    i   immediate
  *    m   Vptr
+ *    mr  m is src, r is dest
  *    p   RIPRelativeRef
  *    d   VdataPtr
  *    s   smashable
@@ -530,14 +533,15 @@ struct funcguard { const Func* func; TCA* watch; };
 
 /*
  * Marks the entry block of an inlined function, func, in the current unit,
- * whose Vcost was computed to be cost.
+ * whose Vcost was computed to be cost. Id is a post computed index into a table
+ * of frames stored on Vunit.
  */
-struct inlinestart { const Func* func; int cost; Vlabel target; };
+struct inlinestart { const Func* func; int cost; int id; };
 
 /*
  * Marks a return target or exit from the current inlined frame.
  */
-struct inlineend { Vlabel target; };
+struct inlineend {};
 
 ///////////////////////////////////////////////////////////////////////////////
 // Native function ABI.
@@ -704,11 +708,18 @@ struct defvmretdata { Vreg data; };
 struct defvmrettype { Vreg type; };
 
 /*
- * Copy a PHP return value into the return registers (rreg(0) and rreg(1)).
+ * Copy a PHP return value into the rret_data() and rret_type() registers.
  *
  * This should be used right before we execute a phpret{}.
  */
 struct syncvmret { Vreg data; Vreg type; };
+
+/*
+ * Copy a PHP return type into the rret_type() register.
+ *
+ * This should be used right before we execute a phpret{}.
+ */
+struct syncvmrettype { Vreg type; };
 
 /*
  * PHP function prologue.
@@ -910,6 +921,7 @@ struct addlm  { Vreg32 s0; Vptr m; VregSF sf; Vflags fl; };
 struct addlim { Immed s0; Vptr m; VregSF sf; Vflags fl; };
 struct addq  { Vreg64 s0, s1, d; VregSF sf; Vflags fl; };
 struct addqi { Immed s0; Vreg64 s1, d; VregSF sf; Vflags fl; };
+struct addqmr { Vptr m; Vreg64 s1; Vreg64 d; VregSF sf; Vflags fl; };
 struct addqim { Immed s0; Vptr m; VregSF sf; Vflags fl; };
 struct addsd  { VregDbl s0, s1, d; };
 // and: s0 & {s1|m} => {d|m}, sf

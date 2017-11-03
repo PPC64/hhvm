@@ -10,7 +10,7 @@
 
 open Instruction_sequence
 open Hhbc_ast
-open Core
+open Hh_core
 module A = Ast
 module SN = Naming_special_names
 module SU = Hhbc_string_utils
@@ -29,9 +29,9 @@ let rec expr_requires_deep_init (_, expr_) =
   | A.Varray fields -> List.exists fields expr_requires_deep_init
   | A.Darray fields -> List.exists fields expr_pair_requires_deep_init
   | A.Id(_, ("__FILE__" | "__DIR__")) -> false
-  | A.Call((_, A.Id(_, "tuple")), _, args, []) ->
+  | A.Call((_, A.Id(_, "tuple")), _, args, []) when Emit_env.is_hh_syntax_enabled () ->
     List.exists args expr_requires_deep_init
-  | A.Class_const ((_, s), (_, p)) ->
+  | A.Class_const ((_, A.Id (_, s)), (_, p)) ->
     class_const_requires_deep_init s p
   | A.Shape fields ->
     List.exists fields shape_field_requires_deep_init
@@ -65,12 +65,12 @@ let from_ast ast_class cv_kind_list type_hint tparams namespace doc_comment_opt
   (* TODO: Hack allows a property to be marked final, which is nonsensical.
   HHVM does not allow this.  Fix this in the Hack parser? *)
   let pid = Hhbc_id.Prop.from_ast_name cv_name in
-  let is_private = Core.List.mem cv_kind_list Ast.Private in
-  let is_protected = Core.List.mem cv_kind_list Ast.Protected in
+  let is_private = Hh_core.List.mem cv_kind_list Ast.Private in
+  let is_protected = Hh_core.List.mem cv_kind_list Ast.Protected in
   let is_public =
     List.mem cv_kind_list Ast.Public
     || (not is_private && not is_protected) in
-  let is_static = Core.List.mem cv_kind_list Ast.Static in
+  let is_static = Hh_core.List.mem cv_kind_list Ast.Static in
   if not is_static
     && ast_class.Ast.c_final
     && ast_class.Ast.c_kind = Ast.Cabstract

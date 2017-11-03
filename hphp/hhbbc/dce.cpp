@@ -31,7 +31,7 @@
 
 #include "hphp/runtime/base/array-iterator.h"
 
-#include "hphp/util/bitops.h"
+#include "hphp/util/bitset-utils.h"
 #include "hphp/util/dataflow-worklist.h"
 #include "hphp/util/trace.h"
 
@@ -191,15 +191,6 @@ bool setCouldHaveSideEffects(const Type& t) {
   return
     t.couldBe(TRef) ||
     could_run_destructor(t);
-}
-
-bool couldBeCowType(const Type& t) {
-  return
-    t.couldBe(TCStr) ||
-    t.couldBe(TCArrN) ||
-    t.couldBe(TCVecN) ||
-    t.couldBe(TCDictN) ||
-    t.couldBe(TCKeysetN);
 }
 
 // Some reads could raise warnings and run arbitrary code.
@@ -1249,7 +1240,7 @@ void cgetImpl(Env& env, LocalId loc, bool quiet) {
         return PushFlags::MarkUnused;
       }
       if (!isLocLive(env, loc) &&
-          couldBeCowType(locRaw(env, loc)) &&
+          could_copy_on_write(locRaw(env, loc)) &&
           !setCouldHaveSideEffects(locRaw(env, loc)) &&
           !readCouldHaveSideEffects(locRaw(env, loc))) {
         // note: PushL does not deal with Uninit, so we need the

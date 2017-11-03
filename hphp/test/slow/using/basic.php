@@ -113,7 +113,7 @@ main();
 HH\Asio\join(mainAsync());
 
 echo "In pseudomain\n";
-using (new Logger) {
+using (new Logger()) {
   echo "Inside using\n";
 }
 echo "Outside using\n";

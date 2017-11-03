@@ -8,7 +8,7 @@
  *
  *)
 open Ast
-open Core
+open Hh_core
 open Lexer_hack
 open Prim_defs
 
@@ -265,7 +265,7 @@ let rec check_lvalue env = function
   | String _ | String2 _ | Yield _ | Yield_break | Yield_from _
   | Await _ | Suspend _ | Expr_list _ | Cast _ | Unop _
   | Binop _ | Eif _ | NullCoalesce _ | InstanceOf _ | New _ | Efun _ | Lfun _
-  | Xml _ | Import _ | Pipe _) ->
+  | Xml _ | Import _ | Pipe _ | Callconv _ | Is _) ->
       error_at env pos "Invalid lvalue"
 
 (* The bound variable of a foreach can be a reference (but not inside
@@ -315,6 +315,7 @@ let priorities = [
   (Right, [Tsuspend]);
   (Right, [Tem]);
   (NonAssoc, [Tinstanceof]);
+  (Left, [Tis]);
   (Right, [Ttild; Tincr; Tdecr; Tcast]);
   (Right, [Tstarstar]);
   (Right, [Tat; Tref]);
@@ -2067,6 +2068,22 @@ and statement_list env =
       then L.next_newline_or_close_cb env.lb;
       stmt :: statement_list env
 
+and using_statement_list env =
+  match L.token env.file env.lb with
+  | Trcb | Teof -> []
+  | Tlcb ->
+      let block = statement_list env in
+      Block block :: statement_list env
+  | Tsc ->
+      using_statement_list env
+  | _ ->
+      L.back env.lb;
+      let error_state = !(env.errors) in
+      let stmt = statement env in
+      if !(env.errors) != error_state
+      then L.next_newline_or_close_cb env.lb;
+      stmt :: using_statement_list env
+
 and statement env =
   match L.token env.file env.lb with
   | Tword ->
@@ -2116,6 +2133,8 @@ and statement_word env = function
   | "if"       -> statement_if env
   | "do"       -> statement_do env
   | "while"    -> statement_while env
+  | "await"    -> statement_await env
+  | "using"    -> statement_using false env
   | "for"      -> statement_for env
   | "switch"   -> statement_switch env
   | "foreach"  -> statement_foreach env
@@ -2374,6 +2393,69 @@ and statement_while env =
   let st = statement env in
   While (e, [st])
 
+(* Comma-separated expression list between parentheses *)
+and using_expr_list_rest env =
+  match L.token env.file env.lb with
+  | Trp ->
+      Pos.make env.file env.lb, []
+  | Tcomma ->
+    let e = expr env in
+    let last, el = using_expr_list_rest env in
+    last, e :: el
+  | _ ->
+    error_expect env ", or )";
+    Pos.make env.file env.lb, []
+
+(* Await is followed by a statement or a using construct *)
+and statement_await env =
+  let start = Pos.make env.file env.lb in
+  match L.token env.file env.lb with
+  | Tword when Lexing.lexeme env.lb = "using" ->
+    statement_using true env
+  | _ ->
+    L.back env.lb;
+    let e = expr_await env start in
+    expect env Tsc;
+    Expr e
+
+(* Block-scoped or function-scoped using, optionally prefixed by `await`. At
+ * this point we have lexed `await using` or `using`.
+ *)
+and statement_using has_await env =
+  (* If there is an opening `(` then this could be either block-scoped or
+   * function-scoped. If no opening `(` then it's definitely function-scoped.
+   *)
+  let start = Pos.make env.file env.lb in
+  match L.token env.file env.lb with
+  | Tlp ->
+    let e = expr env in
+    (* Parse the remaining comma-separated expression list enclosed in parentheses *)
+    let last, el = using_expr_list_rest env in
+    let e = Pos.btw start last, Expr_list (e::el) in
+    statement_using_block_or_rest has_await e env
+  | _ ->
+    L.back env.lb;
+    let e = expr env in
+    let st = using_statement_list env in
+    (* Step back over closing brace *)
+    L.back env.lb;
+    Using (has_await, e, st)
+
+
+and statement_using_block_or_rest has_await e env =
+    match L.token env.file env.lb with
+    | Tlcb ->
+      (* Block-scoped using *)
+      Using (has_await, e, statement_list env)
+    | Tsc ->
+      let st = using_statement_list env in
+      (* Step back over closing brace *)
+      L.back env.lb;
+      Using (has_await, e, st)
+    | _ ->
+      error_expect env "{";
+      Noop
+
 (*****************************************************************************)
 (* For statement *)
 (*****************************************************************************)
@@ -2565,12 +2647,18 @@ and parameter_list_remain env =
       | _ ->
           error_expect env ")"; [p]
 
-and parameter_default_with_variadic is_variadic env =
+and parameter_default_with_checks param_kind is_variadic env =
   let default = parameter_default env in
-  if default <> None && is_variadic then begin
-    error env "A variadic parameter cannot have a default value."
-  end;
-  if is_variadic then None else default
+  match default, param_kind, is_variadic with
+  | None, _, _ -> None
+  | _, _, true ->
+      error env "A variadic parameter cannot have a default value.";
+      None
+  | _, Some pk, _ ->
+      error env (Printf.sprintf "An %s parameter cannot have a default value."
+        (string_of_param_kind pk));
+      None
+  | _ -> default
 
 and parameter_varargs env =
   (* We were looking for a parameter; we got "...".  We are now expecting
@@ -2582,7 +2670,7 @@ and parameter_varargs env =
     | _ ->
       L.back env.lb;
       let param_id = variable env in
-      let _ = parameter_default_with_variadic true env in
+      let _ = parameter_default_with_checks None true env in
       expect env Trp;
       make_param_ellipsis param_id
     )
@@ -2594,6 +2682,7 @@ and make_param_ellipsis param_id =
     param_id;
     param_expr = None;
     param_modifier = None;
+    param_callconv = None;
     param_user_attributes = [];
   }
 
@@ -2606,14 +2695,26 @@ and param env =
   *)
   let param_user_attributes = attribute env in
   let param_modifier = parameter_modifier env in
+  let param_callconv = parameter_call_modifier env in
   let param_hint = parameter_hint env in
   let param_is_reference = ref_opt env in
+  if param_is_reference then begin
+    Option.iter param_callconv ~f:(fun pk ->
+      error env (Printf.sprintf
+        "An %s parameter cannot be passed by reference."
+        (string_of_param_kind pk)))
+  end;
   let param_is_variadic = ellipsis_opt env in
-  if param_is_reference && param_is_variadic then begin
-    error env "A variadic parameter may not be passed by reference."
+  if param_is_variadic then begin
+    if param_is_reference then
+      error env "A variadic parameter may not be passed by reference.";
+    Option.iter param_callconv ~f:(fun pk ->
+      error env (Printf.sprintf "A variadic parameter cannot be marked %s."
+        (string_of_param_kind pk)))
   end;
   let param_id = variable env in
-  let param_expr = parameter_default_with_variadic param_is_variadic env in
+  let param_expr =
+    parameter_default_with_checks param_callconv param_is_variadic env in
   if param_is_variadic then begin
     expect env Trp;
     L.back env.lb
@@ -2624,6 +2725,7 @@ and param env =
     param_id;
     param_expr;
     param_modifier;
+    param_callconv;
     param_user_attributes;
   }
 
@@ -2634,6 +2736,15 @@ and parameter_modifier env =
       | "private" -> Some Private
       | "public" -> Some Public
       | "protected" -> Some Protected
+      | _ -> L.back env.lb; None
+      )
+  | _ -> L.back env.lb; None
+
+and parameter_call_modifier env =
+  match L.token env.file env.lb with
+  | Tword ->
+      (match Lexing.lexeme env.lb with
+      | "inout" -> Some Pinout
       | _ -> L.back env.lb; None
       )
   | _ -> L.back env.lb; None
@@ -2831,6 +2942,8 @@ and expr_remain env e1 =
       expr_null_coalesce env e1
   | Tword when Lexing.lexeme env.lb = "instanceof" ->
       expr_instanceof env e1
+  | Tword when Lexing.lexeme env.lb = "is" ->
+      expr_is env e1
   | Tword when Lexing.lexeme env.lb = "and" ->
       error env ("Do not use \"and\", it has surprising precedence. "^
         "Use \"&&\" instead");
@@ -2952,6 +3065,7 @@ and make_lambda_param : id -> fun_param = fun var_id ->
     param_id = var_id;
     param_expr = None;
     param_modifier = None;
+    param_callconv = None;
     param_user_attributes = [];
   }
 
@@ -3129,6 +3243,8 @@ and expr_atomic_word ~allow_class ~class_const env pos = function
       expr_yield env pos
   | "clone" ->
       expr_clone env pos
+  | "inout" ->
+      expr_callconv env pos ~flavor:Pinout
   | "list" ->
       expr_php_list env pos
   | r when is_import r ->
@@ -3245,12 +3361,12 @@ and expr_colcol env e1 =
     )
   end
 
-and expr_colcol_remain ~allow_class env e1 cname =
+and expr_colcol_remain ~allow_class env e1 (p_name, _ as cname) =
   match expr_atomic env ~allow_class ~class_const:true with
   | (_, Lvar x) as p ->
-      btw e1 x, Class_get (cname, p)
+      btw e1 x, Class_get ((p_name, Id cname), p)
   | _, Id x ->
-      btw e1 x, Class_const (cname, x)
+      btw e1 x, Class_const ((p_name, Id cname), x)
   | pos, _ ->
       error_at env pos "Expected identifier";
       e1
@@ -3283,6 +3399,20 @@ and expr_call_list env =
   expect env Tlp;
   expr_call_list_remain env
 
+and expr_call_list_element env =
+  let error_state = !(env.errors) in
+  let e = expr { env with priority = 0 } in
+  match L.token env.file env.lb with
+    | Trp -> [e], []
+    | Tcomma ->
+      if !(env.errors) != error_state
+      then [e], []
+      else begin
+        let reg, unpack = expr_call_list_remain env
+        in e :: reg, unpack
+      end
+    | _ -> error_expect env ")"; [e], []
+
 and expr_call_list_remain env =
   match L.token env.file env.lb with
     | Trp -> [], []
@@ -3297,18 +3427,7 @@ and expr_call_list_remain env =
         | _ -> error_expect env ")"; [], [unpack_e])
     | _ ->
       L.back env.lb;
-      let error_state = !(env.errors) in
-      let e = expr { env with priority = 0 } in
-      match L.token env.file env.lb with
-        | Trp -> [e], []
-        | Tcomma ->
-          if !(env.errors) != error_state
-          then [e], []
-          else begin
-            let reg, unpack = expr_call_list_remain env
-            in e :: reg, unpack
-          end
-        | _ -> error_expect env ")"; [e], []
+      expr_call_list_element env
 
 (*****************************************************************************)
 (* Collections *)
@@ -3379,6 +3498,16 @@ and expr_instanceof env e1 =
   reduce env e1 Tinstanceof begin fun e1 env ->
     let e2 = expr env in
     btw e1 e2, InstanceOf (e1, e2)
+  end
+
+(*****************************************************************************)
+(* Is *)
+(*****************************************************************************)
+
+and expr_is env e =
+  reduce env e Tis begin fun e env ->
+    let h = hint env in
+    btw e h, Is (e, h)
   end
 
 (*****************************************************************************)
@@ -4077,7 +4206,7 @@ and shape_field_name env =
   let pos, e = expr env in
   match e with
   | String p -> SFlit p
-  | Class_const (id, ps) -> SFclass_const (id, ps)
+  | Class_const ((_, Id id), ps) -> SFclass_const (id, ps)
   | _ -> error_expect env "string literal or class constant";
     SFlit (pos, "")
 
@@ -4098,6 +4227,27 @@ and expr_array_get env e1 =
         expect env Trb;
         let end_ = Pos.make env.file env.lb in
         Pos.btw (fst e1) end_, Array_get (e1, Some e2)
+  end
+
+(*****************************************************************************)
+(* Parameter calling convention modifiers *)
+(*****************************************************************************)
+
+and expr_callconv env start ~(flavor:param_kind) =
+  with_base_priority env begin fun env ->
+    let pos, _ as e = match expr env with
+      | p, Unop (Uref, e1) -> error_at env p "Unexpected reference"; e1
+      | x -> x in
+    begin match snd e with
+      | Call _ | Omitted ->
+        error_at env pos "Invalid lvalue"
+      | List _ ->
+        error_at env pos (Printf.sprintf
+          "Cannot pass list intrinsic for an %s parameter"
+          (string_of_param_kind flavor))
+      | _ -> check_lvalue env e
+    end;
+    Pos.btw start pos, Callconv (flavor, e)
   end
 
 (*****************************************************************************)
@@ -4305,14 +4455,6 @@ and typedef_constraint env =
       L.back env.lb;
       None
 
-and promote_nullable_to_optional_in_shapes env =
-  (* To maintain compatibility with open source, we always promote the
-     definitions in Shapes.hhi. *)
-  String_utils.string_ends_with (Relative_path.suffix env.file) "Shapes.hhi" ||
-  TypecheckerOptions.experimental_feature_enabled
-    env.popt
-    TypecheckerOptions.experimental_promote_nullable_to_optional_in_shapes
-
 and hint_shape_info env shape_keyword_pos =
   match L.token env.file env.lb with
   | Tlp -> hint_shape_info_remain env
@@ -4321,7 +4463,7 @@ and hint_shape_info env shape_keyword_pos =
     error_at env shape_keyword_pos "\"shape\" is an invalid type; you need to \
     declare and use a specific shape type.";
     {
-      si_allows_unknown_fields = promote_nullable_to_optional_in_shapes env;
+      si_allows_unknown_fields = false;
       si_shape_field_list = [];
     }
 
@@ -4329,7 +4471,7 @@ and hint_shape_info_remain env =
   match L.token env.file env.lb with
   | Trp ->
       {
-        si_allows_unknown_fields = promote_nullable_to_optional_in_shapes env;
+        si_allows_unknown_fields = false;
         si_shape_field_list = [];
       }
   | Tellipsis ->
@@ -4345,15 +4487,13 @@ and hint_shape_info_remain env =
       match L.token env.file env.lb with
       | Trp ->
           {
-            si_allows_unknown_fields =
-              promote_nullable_to_optional_in_shapes env;
+            si_allows_unknown_fields = false;
             si_shape_field_list = [fd];
           }
       | Tcomma ->
           if !(env.errors) != error_state
           then {
-            si_allows_unknown_fields =
-              promote_nullable_to_optional_in_shapes env;
+            si_allows_unknown_fields = false;
             si_shape_field_list = [fd];
           }
           else
@@ -4364,8 +4504,7 @@ and hint_shape_info_remain env =
       | _ ->
           error_expect env ")";
           {
-            si_allows_unknown_fields =
-              promote_nullable_to_optional_in_shapes env;
+            si_allows_unknown_fields = false;
             si_shape_field_list = [fd]
           }
 

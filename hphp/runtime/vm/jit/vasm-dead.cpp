@@ -185,6 +185,7 @@ bool effectful(Vinstr& inst) {
 
     case Vinstr::addlm:
     case Vinstr::addlim:
+    case Vinstr::addqmr:
     case Vinstr::addqim:
     case Vinstr::andbim:
     case Vinstr::bindaddr:
@@ -266,6 +267,7 @@ bool effectful(Vinstr& inst) {
     case Vinstr::stubunwind:
     case Vinstr::syncpoint:
     case Vinstr::syncvmret:
+    case Vinstr::syncvmrettype:
     case Vinstr::syncvmsp:
     case Vinstr::tailcallphp:
     case Vinstr::tailcallstub:

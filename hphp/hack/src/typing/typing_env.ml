@@ -9,12 +9,11 @@
  *)
 
 include Typing_env_types
-open Core
+open Hh_core
 open Decl_env
 open Typing_defs
 open Nast
 
-module SN = Naming_special_names
 module Dep = Typing_deps.Dep
 module TLazyHeap = Typing_lazy_heap
 module LEnvC = Typing_lenv_cont
@@ -95,6 +94,7 @@ let make_ft p is_coroutine params ret_ty =
     ft_where_constraints = [];
     ft_params   = params;
     ft_ret      = ret_ty;
+    ft_ret_by_ref = false;
   }
 
 let get_shape_field_name = function
@@ -260,6 +260,7 @@ let empty_local tpenv = {
   tpenv = tpenv;
   fake_members = empty_fake_members;
   local_types = Typing_continuations.Map.empty;
+  local_using_vars = Local_id.Set.empty;
   local_type_history = Local_id.Map.empty;
 }
 
@@ -279,7 +280,8 @@ let empty tcopt file ~droot = {
   };
   genv    = {
     tcopt   = tcopt;
-    return  = fresh_type();
+    return  = (fresh_type(), false);
+    params  = Local_id.Map.empty;
     self_id = "";
     self    = Reason.none, Tany;
     static  = false;
@@ -439,10 +441,27 @@ let set_return env x =
   let genv = { genv with return = x } in
   { env with genv = genv }
 
-let with_return env f =
+let get_params env =
+  env.genv.params
+
+let set_params env params =
+  { env with genv = { env.genv with params = params } }
+
+let set_param env x param =
+  let params = get_params env in
+  let params = Local_id.Map.add x param params in
+  set_params env params
+
+let clear_params env =
+  set_params env Local_id.Map.empty
+
+let with_env env f =
   let ret = get_return env in
+  let params = get_params env in
   let env, result = f env in
-  set_return env ret, result
+  let env = set_params env params in
+  let env = set_return env ret in
+  env, result
 
 let is_static env = env.genv.static
 let get_self env = env.genv.self
@@ -592,7 +611,7 @@ let rec lost_info fake_name env ty =
       env, (info r, ty)
 
 let forget_members env call_pos =
-  let {fake_members; local_types; local_type_history; tpenv} = env.lenv in
+  let fake_members = env.lenv.fake_members in
   let old_invalid = fake_members.invalid in
   let new_invalid = fake_members.valid in
   let new_invalid = SSet.union new_invalid old_invalid in
@@ -601,7 +620,7 @@ let forget_members env call_pos =
     invalid = new_invalid;
     valid = SSet.empty;
   } in
-  { env with lenv = {fake_members; local_types; local_type_history; tpenv } }
+  { env with lenv = { env.lenv with fake_members } }
 
 module FakeMembers = struct
 
@@ -645,10 +664,10 @@ module FakeMembers = struct
     SSet.mem (make_static_id cid member_name) env.lenv.fake_members.invalid
 
   let add_member env fake_id =
-    let {fake_members; local_types; local_type_history; tpenv} = env.lenv in
+    let fake_members = env.lenv.fake_members in
     let valid = SSet.add fake_id fake_members.valid in
     let fake_members = { fake_members with valid = valid } in
-    { env with lenv = {fake_members; local_types; local_type_history; tpenv } }
+    { env with lenv = { env.lenv with fake_members } }
 
   let make _ env obj_name member_name =
     let my_fake_local_id = make_id obj_name member_name in
@@ -693,7 +712,7 @@ let unbind = unbind []
  * the last assignment to this local.
  *)
 let set_local env x new_type =
-  let {fake_members; local_types ; local_type_history; tpenv} = env.lenv in
+  let {fake_members; local_types; local_type_history; local_using_vars; tpenv} = env.lenv in
   let env, new_type = unbind env new_type in
   let next_cont = LEnvC.get_cont Cont.Next local_types in
   let all_types, expr_id =
@@ -714,7 +733,24 @@ let set_local env x new_type =
   let local_types = LEnvC.add_to_cont Cont.Next x local local_types in
   let local_type_history = Local_id.Map.add x all_types local_type_history in
   let env = { env with
-    lenv = {fake_members; local_types; local_type_history; tpenv} }
+    lenv = {fake_members; local_types; local_type_history; local_using_vars; tpenv} }
+  in
+  env
+
+let is_using_var env x =
+  Local_id.Set.mem x env.lenv.local_using_vars
+
+let set_using_var env x =
+  { env with lenv = {
+    env.lenv with local_using_vars = Local_id.Set.add x env.lenv.local_using_vars } }
+
+let unset_local env local =
+  let {fake_members; local_types ; local_type_history; local_using_vars; tpenv} = env.lenv in
+  let local_types = LEnvC.remove_from_cont Cont.Next local local_types in
+  let local_using_vars = Local_id.Set.remove local local_using_vars in
+  let local_type_history = Local_id.Map.remove local local_type_history in
+  let env = { env with
+    lenv = {fake_members; local_types; local_type_history; local_using_vars; tpenv} }
   in
   env
 
@@ -722,18 +758,17 @@ let get_local env x =
   let next_cont = LEnvC.get_cont Cont.Next env.lenv.local_types in
   let lcl = Local_id.Map.get x next_cont in
   match lcl with
-  | None -> env, (Reason.Rnone, Tany)
-  | Some (x, _) -> env, x
+  | None -> (Reason.Rnone, Tany)
+  | Some (x, _) -> x
 
 let set_local_expr_id env x new_eid =
-  let {fake_members; local_types; local_type_history; tpenv} = env.lenv in
+  let local_types = env.lenv.local_types in
   let next_cont = LEnvC.get_cont Cont.Next local_types in
   match Local_id.Map.get x next_cont with
   | Some (type_, eid) when eid <> new_eid ->
       let local = type_, new_eid in
       let local_types = LEnvC.add_to_cont Cont.Next x local local_types in
-      let env ={ env with
-        lenv = {fake_members; local_types; local_type_history; tpenv} }
+      let env ={ env with lenv = { env.lenv with local_types } }
       in
       env
   | _ -> env
@@ -790,12 +825,14 @@ let anon anon_lenv env f =
   (* Setting up the environment. *)
   let old_lenv = env.lenv in
   let old_return = get_return env in
+  let old_params = get_params env in
   let outer_fun_kind = get_fn_kind env in
   let env = { env with lenv = anon_lenv } in
   (* Typing *)
   let env, tfun, result = f env in
   (* Cleaning up the environment. *)
   let env = { env with lenv = old_lenv } in
+  let env = set_params env old_params in
   let env = set_return env old_return in
   let env = set_fn_kind env outer_fun_kind in
   env, tfun, result

@@ -23,7 +23,7 @@
 
 
 open Autocomplete
-open Core
+open Hh_core
 open Nast
 open String_utils
 open Typing_defs
@@ -33,6 +33,7 @@ open Typing_subtype
 module Env = Typing_env
 module Inst = Decl_instantiate
 module Phase = Typing_phase
+module SN = Naming_special_names
 module TGenConstraint = Typing_generic_constraint
 module Subst = Decl_subst
 module TUtils = Typing_utils
@@ -99,6 +100,10 @@ module CheckFunctionBody = struct
         expr f_type env e;
         block f_type env b;
         ()
+    | _, Using (_has_await, e, b) ->
+        expr_allow_await_list f_type env e;
+        block f_type env b;
+        ()
     | _, For (init, cond, incr, b) ->
         expr f_type env init;
         expr f_type env cond;
@@ -143,6 +148,13 @@ module CheckFunctionBody = struct
 
   and expr f_type env (p, e) =
     expr_ p f_type env e
+
+  and expr_allow_await_list f_type env ((_, exp) as e) =
+    match exp with
+    | Expr_list el ->
+      List.iter el (expr_allow_await f_type env)
+    | _ ->
+      expr_allow_await f_type env e
 
   and expr_allow_await f_type env (p, exp) = match f_type, exp with
     | Ast.FAsync, Await e
@@ -242,6 +254,9 @@ module CheckFunctionBody = struct
     | _, InstanceOf (e, _) ->
         expr f_type env e;
         ()
+    | _, Is (e, _) ->
+        expr f_type env e;
+        ()
     | _, Cast (_, e) ->
         expr f_type env e;
         ()
@@ -288,6 +303,9 @@ module CheckFunctionBody = struct
         List.iter attrl (fun (_, e) -> expr f_type env e);
         List.iter el (expr f_type env);
         ()
+    | _, Callconv (_, e) ->
+        expr f_type env e;
+        ()
     | _, Assert (AE_assert e) ->
         expr f_type env e;
         ()
@@ -300,12 +318,12 @@ end
 let is_magic =
   let h = Hashtbl.create 23 in
   let a x = Hashtbl.add h x true in
-  a Naming_special_names.Members.__set;
-  a Naming_special_names.Members.__isset;
-  a Naming_special_names.Members.__get;
-  a Naming_special_names.Members.__unset;
-  a Naming_special_names.Members.__call;
-  a Naming_special_names.Members.__callStatic;
+  a SN.Members.__set;
+  a SN.Members.__isset;
+  a SN.Members.__get;
+  a SN.Members.__unset;
+  a SN.Members.__call;
+  a SN.Members.__callStatic;
   fun (_, s) ->
     Hashtbl.mem h s
 
@@ -322,7 +340,7 @@ let rec fun_ tenv f named_body =
 
 and func env f named_body =
   let p, fname = f.f_name in
-  if String.lowercase (strip_ns fname) = Naming_special_names.Members.__construct
+  if String.lowercase (strip_ns fname) = SN.Members.__construct
   then Errors.illegal_function_name p fname;
   check_coroutines_enabled (f.f_fun_kind = Ast.FCoroutine) env p;
   (* Add type parameters to typing environment and localize the bounds *)
@@ -336,7 +354,18 @@ and func env f named_body =
   } in
   maybe hint env f.f_ret;
   List.iter f.f_tparams (tparam env);
-  List.iter f.f_params (fun_param env);
+  let byref = List.find f.f_params ~f:(fun x -> x.param_is_reference) in
+  List.iter f.f_params (fun_param env f.f_name f.f_fun_kind byref);
+  let inout = List.find f.f_params ~f:(
+    fun x -> x.param_callconv = Some Ast.Pinout) in
+  (match inout with
+    | Some param ->
+      if Attributes.mem SN.UserAttributes.uaMemoize f.f_user_attributes
+      then Errors.inout_params_memoize p param.param_pos;
+      if f.f_ret_by_ref then Errors.inout_params_ret_by_ref p param.param_pos;
+      ()
+    | _ -> ()
+  );
   block env named_body.fnb_nast;
   CheckFunctionBody.block
     f.f_fun_kind
@@ -373,7 +402,7 @@ and hint_ env p = function
     begin match Typing_lazy_heap.get_typedef (Env.get_options env.tenv) x with
       | Some {td_tparams; _} ->
         check_happly env.typedef_tparams env.tenv (p, h);
-        check_params env p x td_tparams hl
+        check_tparams env p x td_tparams hl
       | None -> ()
     end
   | Happly ((_, x), hl) as h ->
@@ -381,24 +410,17 @@ and hint_ env p = function
       | None -> ()
       | Some class_ ->
           check_happly env.typedef_tparams env.tenv (p, h);
-          check_params env p x class_.tc_tparams hl
+          check_tparams env p x class_.tc_tparams hl
       );
       ()
   | Hshape { nsi_allows_unknown_fields=_; nsi_field_map } ->
-      let optional_shape_field_enabled =
-        TypecheckerOptions.experimental_feature_enabled
-          (Env.get_options env.tenv)
-          TypecheckerOptions.experimental_optional_shape_field in
-
-      let compute_hint_for_shape_field_info _ { sfi_optional; sfi_hint } =
-        (if sfi_optional && not optional_shape_field_enabled
-        then Errors.optional_shape_fields_not_supported p);
+      let compute_hint_for_shape_field_info _ { sfi_hint; _; } =
         hint env sfi_hint in
 
       ShapeMap.iter compute_hint_for_shape_field_info nsi_field_map
 
-and check_params env p x params hl =
-  let arity = List.length params in
+and check_tparams env p x tparams hl =
+  let arity = List.length tparams in
   check_arity env p x arity (List.length hl);
   List.iter hl (hint env);
 
@@ -499,6 +521,14 @@ and class_ tenv c =
     (check_is_interface (env, "require implementation of"));
   List.iter c.c_req_extends (check_is_class env);
   List.iter c.c_uses (check_is_trait env);
+  let disallow_static_memoized = TypecheckerOptions.experimental_feature_enabled
+    (Env.get_options env.tenv)
+    TypecheckerOptions.experimental_disallow_static_memoized in
+  if disallow_static_memoized && not c.c_final then
+    begin
+    List.iter c.c_static_methods (check_static_memoized_function);
+    maybe (fun _ m -> check_static_memoized_function m) () c.c_constructor
+    end
   end;
   ()
 
@@ -614,7 +644,8 @@ and check_class_property_initialization prop =
       | Method_id _
       | Method_caller _ | Smethod_id _ | Obj_get _ | Array_get _ | Class_get _
       | Call _ | Special_func _ | Yield_break | Yield _ | Suspend _
-      | Await _ | InstanceOf _ | New _ | Efun _ | Xml _ | Assert _ | Clone _ ->
+      | Await _ | InstanceOf _ | Is _ | New _ | Efun _ | Xml _ | Callconv _
+      | Assert _ | Clone _ ->
         Errors.class_property_only_static_literal (fst e)
     and assert_static_literal_for_field_list (expr1, expr2) =
       rec_assert_static_literal expr1;
@@ -727,7 +758,7 @@ and class_var env cv =
   ()
 
 and check__toString m is_static =
-  if snd m.m_name = Naming_special_names.Members.__toString
+  if snd m.m_name = SN.Members.__toString
   then begin
     if m.m_visibility <> Public || is_static
     then Errors.toString_visibility (fst m.m_name);
@@ -743,9 +774,15 @@ and add_constraint pos tenv (ty1, ck, ty2) =
 and add_constraints pos tenv (cstrs: locl where_constraint list) =
   List.fold_left cstrs ~init:tenv ~f:(add_constraint pos)
 
+and check_static_memoized_function m =
+  if Attributes.mem SN.UserAttributes.uaMemoize m.m_user_attributes then
+    Errors.static_memoized_function (fst m.m_name);
+  ()
+
 and method_ (env, is_static) m =
   let named_body = assert_named_body m.m_body in
   check__toString m is_static;
+
   let p, _ = m.m_name in
   check_coroutines_enabled (m.m_fun_kind = Ast.FCoroutine) env p;
   (* Add method type parameters to environment and localize the bounds *)
@@ -754,7 +791,18 @@ and method_ (env, is_static) m =
                ~ety_env:(Phase.env_with_self env.tenv) in
   let tenv = add_constraints (fst m.m_name) tenv constraints in
   let env = { env with tenv = tenv } in
-  List.iter m.m_params (fun_param env);
+  let byref = List.find m.m_params ~f:(fun x -> x.param_is_reference) in
+  List.iter m.m_params (fun_param env m.m_name m.m_fun_kind byref);
+  let inout = List.find m.m_params ~f:(
+    fun x -> x.param_callconv = Some Ast.Pinout) in
+  (match inout with
+    | Some param ->
+      if Attributes.mem SN.UserAttributes.uaMemoize m.m_user_attributes
+      then Errors.inout_params_memoize p param.param_pos;
+      if m.m_ret_by_ref then Errors.inout_params_ret_by_ref p param.param_pos;
+      ()
+    | _ -> ()
+  );
   List.iter m.m_tparams (tparam env);
   block env named_body.fnb_nast;
   maybe hint env m.m_ret;
@@ -776,15 +824,30 @@ and method_ (env, is_static) m =
   | None -> assert false);
   ()
 
-and fun_param env param =
+and inout_params_enabled env =
+  TypecheckerOptions.experimental_feature_enabled
+    (Env.get_options env.tenv)
+    TypecheckerOptions.experimental_inout_params
+
+and require_inout_params_enabled env p =
+  let enabled = inout_params_enabled env in
+  if not enabled then Errors.experimental_feature p "inout parameters";
+  enabled
+
+and fun_param env (_, name) f_type byref param =
   maybe hint env param.param_hint;
   maybe expr env param.param_expr;
-  ()
-
-and fun_param_opt env (h, _, e) =
-  maybe hint env h;
-  maybe expr env e;
-  ()
+  match param.param_callconv with
+  | None -> ()
+  | Some Ast.Pinout ->
+    let pos = param.param_pos in
+    if require_inout_params_enabled env pos
+    then begin
+      if f_type <> Ast.FSync then Errors.inout_params_outside_of_sync pos;
+      if SSet.mem name SN.Members.as_set then Errors.inout_params_special pos;
+      Option.iter byref ~f:(fun param ->
+        Errors.inout_params_mix_byref pos param.param_pos)
+    end
 
 and stmt env = function
   | Return (p, _) when env.t_is_finally ->
@@ -823,6 +886,10 @@ and stmt env = function
   | While (e, b) ->
       expr env e;
       block { env with imm_ctrl_ctx = LoopContext } b;
+      ()
+  | Using (_has_await, e, b) ->
+      expr env e;
+      block env b;
       ()
   | For (e1, e2, e3, b) ->
       expr env e1;
@@ -985,6 +1052,10 @@ and expr_ env p = function
   | InstanceOf (e, _) ->
       expr env e;
       ()
+  | Is (e, h) ->
+      expr env e;
+      hint env h;
+      ()
   | New (_, el, uel) ->
       List.iter el (expr env);
       List.iter uel (expr env);
@@ -997,6 +1068,10 @@ and expr_ env p = function
   | Xml (_, attrl, el) ->
       List.iter attrl (attribute env);
       List.iter el (expr env);
+      ()
+  | Callconv (_, e) ->
+      let _ = require_inout_params_enabled env p in
+      expr env e;
       ()
   | Shape fdm ->
       ShapeMap.iter (fun _ v -> expr env v) fdm

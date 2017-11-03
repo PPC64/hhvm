@@ -1707,23 +1707,21 @@ void VariableSerializer::serializeObjectImpl(const ObjectData* obj) {
         }
 
         auto const lookup = obj_cls->getDeclPropIndex(ctx, memberName.get());
-        auto const propIdx = lookup.prop;
+        auto const slot = lookup.prop;
 
-        if (propIdx != kInvalidSlot) {
-          if (lookup.accessible) {
-            auto const prop = &obj->propVec()[propIdx];
-            if (prop->m_type != KindOfUninit) {
-              auto const attrs = obj_cls->declProperties()[propIdx].attrs;
-              if (attrs & AttrPrivate) {
-                memberName = concat4(s_zero, ctx->nameStr(),
-                                     s_zero, memberName);
-              } else if (attrs & AttrProtected) {
-                memberName = concat(s_protected_prefix, memberName);
-              }
-              if (!attrMask || (attrMask & attrs) == attrMask) {
-                wanted.set(memberName, tvAsCVarRef(prop));
-                continue;
-              }
+        if (slot != kInvalidSlot && lookup.accessible) {
+          auto const prop = obj->propRvalAtOffset(slot);
+          if (prop.type() != KindOfUninit) {
+            auto const attrs = obj_cls->declProperties()[slot].attrs;
+            if (attrs & AttrPrivate) {
+              memberName = concat4(s_zero, ctx->nameStr(),
+                                   s_zero, memberName);
+            } else if (attrs & AttrProtected) {
+              memberName = concat(s_protected_prefix, memberName);
+            }
+            if (!attrMask || (attrMask & attrs) == attrMask) {
+              wanted.set(memberName, prop.tv());
+              continue;
             }
           }
         }
@@ -1776,9 +1774,9 @@ void VariableSerializer::serializeObjectImpl(const ObjectData* obj) {
         }
 
         // If we have a DebugDisplay prop saved, use it.
-        auto const debugDispVal = obj->o_realProp(s_PHP_DebugDisplay, 0);
-        if (debugDispVal) {
-          serializeVariant(*debugDispVal, false, false, true);
+        auto const debugDisp = obj->getProp(nullptr, s_PHP_DebugDisplay.get());
+        if (debugDisp.has_val()) {
+          serializeVariant(tvAsCVarRef(debugDisp.tv_ptr()), false, false, true);
           return;
         }
         // Otherwise compute it if we have a __toDebugDisplay method.
@@ -1793,9 +1791,12 @@ void VariableSerializer::serializeObjectImpl(const ObjectData* obj) {
            type == VariableSerializer::Type::APCSerialize ||
            type == VariableSerializer::Type::DebuggerSerialize ||
            type == VariableSerializer::Type::DebuggerDump)) {
-        auto const cname = obj->o_realProp(s_PHP_Incomplete_Class_Name, 0);
-        if (cname && cname->isString()) {
-          pushObjectInfo(cname->toCStrRef(), obj->getId(), 'O');
+        auto const cname = obj->getProp(
+          nullptr,
+          s_PHP_Incomplete_Class_Name.get()
+        ).unboxed();
+        if (cname.has_val() && isStringType(cname.type())) {
+          pushObjectInfo(StrNR(cname.val().pstr), obj->getId(), 'O');
           properties.remove(s_PHP_Incomplete_Class_Name, true);
           serializeArray(properties, true);
           popObjectInfo();

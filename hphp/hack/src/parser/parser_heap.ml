@@ -8,7 +8,7 @@
  *
  *)
 
-open Core
+open Hh_core
 
 (*****************************************************************************)
 (* Table containing all the Abstract Syntax Trees (cf ast.ml) for each file.*)
@@ -46,6 +46,7 @@ let get_from_local_cache ~full popt file_name =
           contents else "" in
         let { Parser_hack.ast;
           _ } = Parser_hack.program ~quick:(not full) popt file_name contents in
+        let ast = Ast_utils.deregister_ignored_attributes ast in
         if full then LocalParserCache.add file_name ast;
         ast
 

@@ -44,16 +44,9 @@
 namespace HPHP {
 
 struct APCLocalArray;
-struct MemoryManager;
-struct ObjectData;
-struct ResourceData;
 
 namespace req {
 struct root_handle;
-void* malloc_big(size_t, type_scan::Index);
-void* calloc_big(size_t, type_scan::Index);
-void* realloc_big(void*, size_t);
-void  free_big(void*);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -462,7 +455,8 @@ struct NativeNode : HeapObject,
   uint32_t obj_offset; // byte offset from this to ObjectData*
   uint16_t& typeIndex() { return m_aux16; }
   uint16_t typeIndex() const { return m_aux16; }
-  uint32_t arOff() const { return m_count; } // from this to ActRec, or 0
+  uint32_t& arOff() { return m_aux32; }
+  uint32_t arOff() const { return m_aux32; } // from this to ActRec, or 0
 };
 
 // POD type for tracking arbitrary memory ranges
@@ -665,20 +659,14 @@ struct MemoryManager {
   // Allocation.
 
   /*
-   * Return the size class for a given requested small-allocation size.
+   * Return the size class for a given requested allocation size.
    *
    * The return value is greater than or equal to the parameter, and
-   * less than or equal to kMaxSmallSize.
+   * less than or equal to kMaxSizeClass.
    *
-   * Pre: requested <= kMaxSmallSize
+   * Pre: requested <= kMaxSizeClass
    */
-  static size_t smallSizeClass(size_t requested);
-
-  /*
-   * Return a lower bound estimate of the capacity that will be returned for
-   * the requested size.
-   */
-  static size_t estimateCap(size_t requested);
+  static size_t sizeClass(size_t requested);
 
   /*
    * Allocate/deallocate a small memory block in a given small size class.
@@ -757,7 +745,6 @@ struct MemoryManager {
    */
   static size_t computeSize2Index(size_t size);
   static size_t lookupSmallSize2Index(size_t size);
-  static size_t smallSize2Index(size_t size);
   static size_t size2Index(size_t size);
   static size_t sizeIndex2Size(size_t index);
 
@@ -1052,15 +1039,10 @@ private:
   /////////////////////////////////////////////////////////////////////////////
 
 private:
-  void storeTail(void* tail, uint32_t tailBytes);
-  void splitTail(void* tail, uint32_t tailBytes, unsigned nSplit,
-                 uint32_t splitUsable, unsigned splitInd);
-  void* slabAlloc(uint32_t bytes, size_t index);
-  void* newSlab(uint32_t nbytes);
+  void* slabAlloc(size_t bytes, size_t index);
+  void* newSlab(size_t nbytes);
   void* mallocSmallSizeSlow(size_t bytes, size_t index);
   void  updateBigStats();
-
-  static size_t bsrq(size_t x);
 
   static void threadStatsInit();
   static void threadStats(uint64_t*&, uint64_t*&);
@@ -1126,6 +1108,7 @@ private:
 };
 
 extern THREAD_LOCAL_FLAT(MemoryManager, tl_heap);
+extern __thread size_t tl_heap_id; // current heap instance id
 
 //////////////////////////////////////////////////////////////////////
 

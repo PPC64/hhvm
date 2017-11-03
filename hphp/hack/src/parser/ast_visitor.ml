@@ -32,12 +32,13 @@ class type ['a] ast_visitor_type = object
   method on_block : 'a -> block -> 'a
   method on_break : 'a -> Pos.t -> expr option -> 'a
   method on_call : 'a -> expr -> hint list -> expr list -> expr list -> 'a
+  method on_callconv : 'a -> param_kind -> expr -> 'a
   method on_case : 'a -> case -> 'a
   method on_cast : 'a -> hint -> expr -> 'a
   method on_catch : 'a -> catch -> 'a
   method on_markup: 'a -> pstring -> expr option -> 'a
-  method on_class_const : 'a -> id -> pstring -> 'a
-  method on_class_get : 'a -> id -> expr -> 'a
+  method on_class_const : 'a -> expr -> pstring -> 'a
+  method on_class_get : 'a -> expr -> expr -> 'a
   method on_clone : 'a -> expr -> 'a
   method on_collection: 'a -> id -> afield list -> 'a
   method on_continue : 'a -> Pos.t -> expr option -> 'a
@@ -69,6 +70,7 @@ class type ['a] ast_visitor_type = object
   method on_includeOnce: 'a -> 'a
   method on_instanceOf : 'a -> expr -> expr -> 'a
   method on_int : 'a -> pstring -> 'a
+  method on_is : 'a -> expr -> hint -> 'a
   method on_lfun: 'a -> fun_ -> 'a
   method on_list : 'a -> expr list -> 'a
   method on_lvar : 'a -> id -> 'a
@@ -77,6 +79,7 @@ class type ['a] ast_visitor_type = object
   method on_noop : 'a -> 'a
   method on_null : 'a -> 'a
   method on_obj_get : 'a -> expr -> expr -> 'a
+  method on_param_kind : 'a -> param_kind -> 'a
   method on_pstring : 'a -> pstring -> 'a
   method on_require: 'a -> 'a
   method on_requireOnce: 'a -> 'a
@@ -97,6 +100,7 @@ class type ['a] ast_visitor_type = object
   method on_try : 'a -> block -> catch list -> block -> 'a
   method on_unop : 'a -> uop -> expr -> 'a
   method on_unsafe: 'a -> 'a
+  method on_using: 'a -> bool -> expr -> block -> 'a
   method on_varray : 'a -> expr list -> 'a
   method on_while : 'a -> expr -> block -> 'a
   method on_xml : 'a -> id -> (pstring * expr) list -> expr list -> 'a
@@ -227,6 +231,11 @@ class virtual ['a] ast_visitor: ['a] ast_visitor_type = object(this)
     let acc = this#on_block acc b in
     acc
 
+  method on_using acc has_await e b =
+    let acc = this#on_expr acc e in
+    let acc = this#on_block acc b in
+    acc
+
   method on_switch acc e cl =
     let acc = this#on_expr acc e in
     let acc = List.fold_left this#on_case acc cl in
@@ -301,6 +310,7 @@ class virtual ['a] ast_visitor: ['a] ast_visitor_type = object(this)
     | Static_var el           -> this#on_static_var acc el
     | Global_var el           -> this#on_global_var acc el
     | Markup (s, e)           -> this#on_markup acc s e
+    | Using (has_await, e, b) -> this#on_using acc has_await e b
 
   method on_def_inline acc d =
     this#on_def acc d
@@ -348,8 +358,8 @@ class virtual ['a] ast_visitor: ['a] ast_visitor_type = object(this)
    | Expr_list el    -> this#on_expr_list acc el
    | Obj_get     (e1, e2, _) -> this#on_obj_get acc e1 e2
    | Array_get   (e1, e2)    -> this#on_array_get acc e1 e2
-   | Class_get   (id, p)   -> this#on_class_get acc id p
-   | Class_const (id, pstr)   -> this#on_class_const acc id pstr
+   | Class_get   (e1, p)   -> this#on_class_get acc e1 p
+   | Class_const (e1, pstr)   -> this#on_class_const acc e1 pstr
    | Call        (e, hl, el, uel) -> this#on_call acc e hl el uel
    | String2     el           -> this#on_string2 acc el
    | Cast        (hint, e)   -> this#on_cast acc hint e
@@ -359,12 +369,14 @@ class virtual ['a] ast_visitor: ['a] ast_visitor_type = object(this)
    | Eif         (e1, e2, e3)     -> this#on_eif acc e1 e2 e3
    | NullCoalesce (e1, e2)     -> this#on_nullCoalesce acc e1 e2
    | InstanceOf  (e1, e2)         -> this#on_instanceOf acc e1 e2
+   | Is          (e, h) -> this#on_is acc e h
    | BracedExpr e -> this#on_expr acc e
    | New         (e, el, uel) -> this#on_new acc e el uel
    | Efun        (f, idl)         -> this#on_efun acc f idl
    | Xml         (id, attrl, el) -> this#on_xml acc id attrl el
    | Omitted                     -> this#on_omitted  acc
    | Suspend e  -> this#on_suspend acc e
+   | Callconv    (kind, e)   -> this#on_callconv acc kind e
 
   method on_array acc afl =
     List.fold_left this#on_afield acc afl
@@ -407,13 +419,13 @@ class virtual ['a] ast_visitor: ['a] ast_visitor_type = object(this)
     in
     acc
 
-  method on_class_get acc id p =
-    let acc = this#on_id acc id in
+  method on_class_get acc e p =
+    let acc = this#on_expr acc e in
     let acc = this#on_expr acc p in
     acc
 
-  method on_class_const acc id pstr =
-    let acc = this#on_id acc id in
+  method on_class_const acc e pstr =
+    let acc = this#on_expr acc e in
     let acc = this#on_pstring acc pstr in
     acc
 
@@ -493,6 +505,11 @@ class virtual ['a] ast_visitor: ['a] ast_visitor_type = object(this)
     let acc = this#on_expr acc e2 in
     acc
 
+  method on_is acc e h =
+    let acc = this#on_expr acc e in
+    let acc = this#on_hint acc h in
+    acc
+
   method on_new acc e el uel =
     let acc = this#on_expr acc e in
     let acc = List.fold_left this#on_expr acc el in
@@ -532,7 +549,8 @@ class virtual ['a] ast_visitor: ['a] ast_visitor_type = object(this)
     | SFclass_const (id, pstr) -> this#on_sfclass_const acc id pstr
 
   method on_sflit acc pstr = this#on_pstring acc pstr
-  method on_sfclass_const acc id c = this#on_class_const acc id c
+  method on_sfclass_const acc (p, _ as id) c =
+    this#on_class_const acc (p, Id id) c
 
   method on_collection acc i afl =
     let acc = this#on_id acc i in
@@ -551,6 +569,13 @@ class virtual ['a] ast_visitor: ['a] ast_visitor_type = object(this)
     | RequireOnce -> this#on_requireOnce acc
 
   method on_lfun acc l = this#on_fun_ acc l
+
+  method on_param_kind acc _ = acc
+
+  method on_callconv acc kind e =
+    let acc = this#on_param_kind acc kind in
+    let acc = this#on_expr acc e in
+    acc
 
 
 

@@ -8,7 +8,7 @@
  *
  *)
 
-open Core
+open Hh_core
 open Ide_api_types
 open String_utils
 open Sys_utils
@@ -128,6 +128,8 @@ let parse_options () =
   let safe_vector_array = ref false in
   let forbid_nullable_cast = ref false in
   let safe_pass_by_ref = ref false in
+  let deregister_attributes = ref false in
+  let disable_optional_and_unknown_shape_fields = ref false in
   let options = [
     "--ai",
       Arg.String (set_ai),
@@ -135,6 +137,9 @@ let parse_options () =
     "--all-errors",
       Arg.Unit (set_mode AllErrors),
       " List all errors not just the first one";
+    "--deregister-attributes",
+      Arg.Set deregister_attributes,
+      " Ignore all functions with attribute '__PHPStdLib'";
     "--auto-complete",
       Arg.Unit (set_mode Autocomplete),
       " Produce autocomplete suggestions";
@@ -150,6 +155,9 @@ let parse_options () =
     "--coverage",
       Arg.Unit (set_mode Coverage),
       " Produce coverage output";
+    "--disable_optional_and_unknown_shape_fields",
+      Arg.Set disable_optional_and_unknown_shape_fields,
+      "Disables optional and unknown shape fields syntax and typechecking.";
     "--dump-symbol-info",
       Arg.Unit (set_mode Dump_symbol_info),
       " Dump all symbol information";
@@ -249,6 +257,7 @@ let parse_options () =
     GlobalOptions.default with
       GlobalOptions.tco_safe_array = !safe_array;
       GlobalOptions.tco_safe_vector_array = !safe_vector_array;
+      GlobalOptions.po_deregister_php_stdlib = !deregister_attributes;
   } in
   let tcopt = {
     tcopt with
@@ -257,6 +266,8 @@ let parse_options () =
         then !forbid_nullable_cast
         else if x = GlobalOptions.tco_experimental_safe_pass_by_ref
         then !safe_pass_by_ref
+        else if x = GlobalOptions.tco_experimental_disable_optional_and_unknown_shape_fields
+        then !disable_optional_and_unknown_shape_fields
         else true
       end tcopt.GlobalOptions.tco_experimental_features;
   } in
@@ -400,13 +411,13 @@ let check_errors opts errors files_info =
   end ~init:errors
 
 let create_nasts opts files_info =
-  let open Result in
+  let open Core_result in
   let open Nast in
   let build_nast fn {FileInfo.funs; classes; typedefs; consts; _} =
-    List.map ~f:Result.ok_or_failwith (
+    List.map ~f:Core_result.ok_or_failwith (
       List.map funs begin fun (_, x) ->
         Parser_heap.find_fun_in_file ~full:true opts fn x
-        |> Result.of_option ~error:(Printf.sprintf "Couldn't find function %s" x)
+        |> Core_result.of_option ~error:(Printf.sprintf "Couldn't find function %s" x)
         >>| Naming.fun_ opts
         >>| (fun f -> {f with f_body = (NamedBody (Typing_naming_body.func_body opts f))})
         >>| (fun f -> Nast.Fun f)
@@ -414,7 +425,7 @@ let create_nasts opts files_info =
       @
       List.map classes begin fun (_, x) ->
         Parser_heap.find_class_in_file ~full:true opts fn x
-        |> Result.of_option ~error:(Printf.sprintf "Couldn't find class %s" x)
+        |> Core_result.of_option ~error:(Printf.sprintf "Couldn't find class %s" x)
         >>| Naming.class_ opts
         >>| Typing_naming_body.class_meth_bodies opts
         >>| (fun c -> Nast.Class c)
@@ -422,39 +433,19 @@ let create_nasts opts files_info =
       @
       List.map typedefs begin fun (_, x) ->
         Parser_heap.find_typedef_in_file ~full:true opts fn x
-        |> Result.of_option ~error:(Printf.sprintf "Couldn't find typedef %s" x)
+        |> Core_result.of_option ~error:(Printf.sprintf "Couldn't find typedef %s" x)
         >>| Naming.typedef opts
         >>| (fun t -> Nast.Typedef t)
       end
       @
       List.map consts begin fun (_, x) ->
         Parser_heap.find_const_in_file ~full:true opts fn x
-        |> Result.of_option ~error:(Printf.sprintf "Couldn't find const %s" x)
+        |> Core_result.of_option ~error:(Printf.sprintf "Couldn't find const %s" x)
         >>| Naming.global_const opts
         >>| fun g -> Nast.Constant g
       end
     )
   in Relative_path.Map.mapi (build_nast) files_info
-
-let nast_to_tast_tenv opts nast =
-  let open Result in
-  let open Nast in
-  let def_conv = function
-    | Fun f -> Ok f
-      >>| Typing.fun_def opts
-      >>| (fun (f, tenv) -> Tast.Fun f, tenv)
-    | Class c -> Ok c
-      >>| Typing.class_def opts
-      >>= of_option ~error:(Printf.sprintf "Error with class %s definition" (snd c.c_name))
-      >>| (fun (c, tenv) -> Tast.Class c, tenv)
-    | Constant gc -> Ok gc
-      >>| (fun x -> Typing.gconst_def x opts)
-      >>| (fun (gc, tenv) -> Tast.Constant gc, tenv)
-    | Typedef td -> Ok td
-      >>| Typing.typedef_def opts
-      >>| (fun (td, tenv) -> Tast.Typedef td, tenv)
-  in
-  List.map nast (Fn.compose Result.ok_or_failwith def_conv)
 
 let with_named_body opts n_fun =
   (** In the naming heap, the function bodies aren't actually named yet, so
@@ -491,10 +482,16 @@ let parse_name_and_decl popt files_contents tcopt =
     let files_info =
       Relative_path.Map.mapi begin fun fn parsed_file ->
         let {Parser_hack.file_mode; comments; ast; _} = parsed_file in
+        let ast = if ParserOptions.deregister_php_stdlib popt then
+          Ast_utils.deregister_ignored_attributes ast else ast in
+
         Parser_heap.ParserHeap.add fn (ast, Parser_heap.Full);
+        (* If the feature is turned on, deregister functions with attribute
+        __PHPStdLib. This does it for all functions, not just hhi files *)
         let funs, classes, typedefs, consts = Ast_utils.get_defs ast in
         { FileInfo.
           file_mode; funs; classes; typedefs; consts; comments = Some comments;
+          hash = None;
         }
       end parsed_files in
 
@@ -601,7 +598,7 @@ let filter_positions s = (Str.global_replace
 let get_tast_tenv opts filename files_info =
   let nasts = create_nasts opts files_info in
   let nast = Relative_path.Map.find filename nasts in
-  nast_to_tast_tenv opts nast
+  Typing.nast_to_tast_tenv opts nast
 
 let handle_mode mode filename opts popt files_contents files_info errors =
   let filter_output =
@@ -833,9 +830,8 @@ let decl_and_run_mode ({filename; mode; no_builtins; tcopt; _} as opts) popt =
   handle_mode mode filename opts popt files_contents files_info
     (Errors.get_error_list errors)
 
-let main_hack ({filename; mode; no_builtins; _} as opts) =
+let main_hack ({filename; mode; no_builtins; tcopt; _} as opts) =
   (* TODO: We should have a per file config *)
-  let popt = ParserOptions.default in
   Sys_utils.signal Sys.sigusr1
     (Sys.Signal_handle Typing.debug_print_last_pos);
   EventLogger.init EventLogger.Event_logger_fake 0.0;
@@ -846,7 +842,7 @@ let main_hack ({filename; mode; no_builtins; _} as opts) =
   | Ai ai_options ->
     Ai.do_ Typing_check_utils.check_defs filename ai_options
   | _ ->
-    decl_and_run_mode opts popt
+    decl_and_run_mode opts tcopt
 
 (* command line driver *)
 let _ =

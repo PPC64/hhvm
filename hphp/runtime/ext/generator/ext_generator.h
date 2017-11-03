@@ -173,7 +173,6 @@ struct Generator final : BaseGenerator {
   ~Generator();
   Generator& operator=(const Generator& other);
 
-  template <bool clone>
   static ObjectData* Create(const ActRec* fp, size_t numSlots,
                             jit::TCA resumeAddr, Offset resumeOffset);
   static Class* getClass() {
@@ -185,16 +184,6 @@ struct Generator final : BaseGenerator {
   }
   static Generator* fromObject(ObjectData *obj) {
     return Native::data<Generator>(obj);
-  }
-  static ObjectData* allocClone(ObjectData *obj) {
-    auto const genDataSz = Native::getNativeNode(
-                             obj, getClass()->getNativeDataInfo())->obj_offset;
-    auto const clone = BaseGenerator::Alloc<Generator>(
-        getClass(), genDataSz + sizeof(ObjectData)
-    );
-    UNUSED auto const genData = new (Native::data<Generator>(clone))
-                                Generator();
-    return clone;
   }
 
   void yield(Offset resumeOffset, const Cell* key, Cell value);
@@ -218,25 +207,6 @@ public:
   static Class* s_class;
   static const StaticString s_className;
 };
-
-template <bool clone>
-ObjectData* Generator::Create(const ActRec* fp, size_t numSlots,
-                              jit::TCA resumeAddr, Offset resumeOffset) {
-  assert(fp);
-  assert(fp->resumed() == clone);
-  assert(fp->func()->isNonAsyncGenerator());
-  const size_t frameSz = Resumable::getFrameSize(numSlots);
-  const size_t genSz = genSize(sizeof(Generator), frameSz);
-  auto const obj = BaseGenerator::Alloc<Generator>(s_class, genSz);
-  auto const genData = new (Native::data<Generator>(obj)) Generator();
-  genData->resumable()->initialize<clone>(fp,
-                                          resumeAddr,
-                                          resumeOffset,
-                                          frameSz,
-                                          genSz);
-  genData->setState(State::Created);
-  return obj;
-}
 
 ///////////////////////////////////////////////////////////////////////////////
 }

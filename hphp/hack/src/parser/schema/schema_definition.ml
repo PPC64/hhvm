@@ -469,6 +469,7 @@ let schema : schema_node list =
     ; fields =
       [ "attribute", ZeroOrOne (Just "AttributeSpecification")
       ; "visibility", ZeroOrOne Token
+      ; "call_convention", ZeroOrOne Token
       ; "type", ZeroOrOne (Aggregate Specifier)
       ; "name", Aggregate Expression
       ; "default_value", ZeroOrOne (Just "SimpleInitializer")
@@ -480,7 +481,10 @@ let schema : schema_node list =
     ; description = "variadic_parameter"
     ; prefix      = "variadic_parameter"
     ; aggregates  = [ Specifier; Parameter ]
-    ; fields      = [ "ellipsis", Token ]
+    ; fields      =
+      [ "type", ZeroOrOne (Just "SimpleTypeSpecifier")
+      ; "ellipsis", Token
+      ]
     }
   ; { kind_name   = "AttributeSpecification"
     ; type_name   = "attribute_specification"
@@ -1193,6 +1197,18 @@ let schema : schema_node list =
       ; "right_operand", Aggregate Expression
       ]
     }
+  ; { kind_name   = "IsExpression"
+    ; type_name   = "is_expression"
+    ; func_name   = "is_expression"
+    ; description = "is_expression"
+    ; prefix      = "is"
+    ; aggregates  = [ Expression; ConstructorExpression; LambdaBody ]
+    ; fields =
+      [ "left_operand", Aggregate Expression
+      ; "operator", Token
+      ; "right_operand", Aggregate Specifier
+      ]
+    }
   ; { kind_name   = "ConditionalExpression"
     ; type_name   = "conditional_expression"
     ; func_name   = "conditional_expression"
@@ -1342,7 +1358,7 @@ let schema : schema_node list =
     ; prefix      = "collection_literal"
     ; aggregates  = [ Expression; ConstructorExpression; LambdaBody ]
     ; fields =
-      [ "name", Token
+      [ "name",  Aggregate Specifier
       ; "left_brace", Token
       ; "initializers", ZeroOrMore (Aggregate ConstructorExpression)
       ; "right_brace", Token

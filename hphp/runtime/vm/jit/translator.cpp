@@ -392,6 +392,8 @@ static const struct {
                    {Stack1,           Stack1,       OutSameAsInput1  }},
   { OpVerifyRetTypeC,
                    {Stack1,           Stack1,       OutSameAsInput1  }},
+  { OpVerifyOutType,
+                   {Stack1,           Stack1,       OutSameAsInput1  }},
   { OpOODeclExists,
                    {StackTop2,        Stack1,       OutBoolean      }},
   { OpSelf,        {None,             None,         OutNone         }},
@@ -438,6 +440,7 @@ static const struct {
 
   { OpWHResult,    {Stack1,           Stack1,       OutUnknown      }},
   { OpAwait,       {Stack1,           Stack1,       OutUnknown      }},
+  { OpAwaitAll,    {LocalRange,       Stack1,       OutNull         }},
 
   /*** 16. Member instructions ***/
 
@@ -627,6 +630,7 @@ bool isAlwaysNop(Op op) {
 #define BLA(n)
 #define SLA(n)
 #define ILA(n)
+#define I32LA(n)
 #define IVA(n)
 #define I64A(n)
 #define IA(n)
@@ -674,6 +678,7 @@ size_t memberKeyImmIdx(Op op) {
 #undef BLA
 #undef SLA
 #undef ILA
+#undef I32LA
 #undef IVA
 #undef I64A
 #undef IA
@@ -890,6 +895,7 @@ bool dontGuardAnyInputs(Op op) {
   case Op::ContRaise:
   case Op::CreateCont:
   case Op::Await:
+  case Op::AwaitAll:
   case Op::BitAnd:
   case Op::BitOr:
   case Op::BitXor:
@@ -1029,6 +1035,7 @@ bool dontGuardAnyInputs(Op op) {
   case Op::VerifyParamType:
   case Op::VerifyRetTypeC:
   case Op::VerifyRetTypeV:
+  case Op::VerifyOutType:
   case Op::WHResult:
   case Op::Xor:
   case Op::BaseNC:
@@ -1130,6 +1137,7 @@ bool dontGuardAnyInputs(Op op) {
 bool instrBreaksProfileBB(const NormalizedInstruction* inst) {
   if (instrIsNonCallControlFlow(inst->op()) ||
       inst->op() == OpAwait || // may branch to scheduler and suspend execution
+      inst->op() == OpAwaitAll || // similar to Await
       inst->op() == OpFCallAwait || // similar to Await
       inst->op() == OpClsCnsD) { // side exits if misses in the RDS
     return true;
@@ -1149,6 +1157,7 @@ bool instrBreaksProfileBB(const NormalizedInstruction* inst) {
 #define IMM_BLA(n)     ni.immVec
 #define IMM_SLA(n)     ni.immVec
 #define IMM_ILA(n)     ni.immVec
+#define IMM_I32LA(n)   ni.immVec
 #define IMM_VSA(n)     ni.immVec
 #define IMM_IVA(n)     ni.imm[n].u_IVA
 #define IMM_I64A(n)    ni.imm[n].u_I64A
@@ -1188,6 +1197,7 @@ static void translateDispatch(irgen::IRGS& irgs,
 #undef IMM_BLA
 #undef IMM_SLA
 #undef IMM_ILA
+#undef IMM_I32LA
 #undef IMM_IVA
 #undef IMM_I64A
 #undef IMM_LA

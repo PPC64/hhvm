@@ -8,7 +8,7 @@
  *
 *)
 
-(* TODO: change this over to Core *)
+(* TODO: change this over to Hh_core *)
 
 module EA = Emit_adata
 module Log = Semdiff_logging
@@ -601,7 +601,7 @@ let permute_property_list perm ps =
   let offset = List.length ps - List.length perm in
   let sorted_perm = List.sort (fun (a,_) (b,_) -> compare a b) perm in
   let permuted_tail = List.map (fun (_,i) -> List.nth ps (offset+i)) sorted_perm in
-  Core.List.take ps offset @ permuted_tail
+  Hh_core.List.take ps offset @ permuted_tail
 
 let property_list_comparer perm =
   let lc = list_comparer property_comparer "\n" in
@@ -649,7 +649,7 @@ let permute_decl_list perm ds =
   if perm = [] then ds
   else let sorted_perm = List.sort (fun (a,_) (b,_) -> compare a b) perm in
     let sorted_section = List.map (fun (_,i) -> List.nth ds (1+i)) sorted_perm in
-    (List.hd ds) :: (sorted_section @ Core.List.drop ds (List.length perm + 1))
+    (List.hd ds) :: (sorted_section @ Hh_core.List.drop ds (List.length perm + 1))
 
 let decl_list_comparer perm =
   let lc = list_comparer string_comparer "," in
@@ -692,29 +692,10 @@ let instruct_comparer = primitive_comparer my_string_of_instruction
 
 let instruct_list_comparer = list_comparer instruct_comparer "\n"
 
-
-(* Try the semantic differ; if it fails, drop back to syntactic one *)
-let instruct_list_comparer_with_semdiff = {
-  comparer = (fun l1 l2 ->
-    match Rhl.equiv l1 l2 [] with
-    | None -> (Log.debug (Tty.Normal Tty.White) "Semdiff succeeded";
-        (0, (List.length l1, [])))
-    | Some (pc,pc',asn,assumed,todo) ->
-      (Log.debug (Tty.Normal Tty.White) "Semdiff failed";
-       Log.debug (Tty.Normal Tty.White) @@ Printf.sprintf
-         "pc=%s, pc'=%s, i=%s i'=%s asn=%s\nAssumed=\n%s\nTodo=%s"
-         (Rhl.string_of_pc pc) (Rhl.string_of_pc pc')
-         (my_string_of_instruction
-            (List.nth l1 (Rhl.ip_of_pc pc)))
-         (my_string_of_instruction
-            (List.nth l2 (Rhl.ip_of_pc pc' )))
-         (Rhl.asntostring asn) (Rhl.labasnsmaptostring assumed)
-         (Rhl.labasnlisttostring todo);
-       instruct_list_comparer.comparer l1 l2)
-  );
-  size_of = instruct_list_comparer.size_of;
-  string_of = instruct_list_comparer.string_of;
-}
+let string_of_nth_instruction l pc =
+  let i = Rhl.ip_of_pc pc in
+  if i= -1 then "THROWN"
+  else my_string_of_instruction @@ List.nth l i
 
 let option_get o = match o with | Some v -> v | None -> failwith "option"
 let option_is_some o = match o with Some _ -> true | None -> false
@@ -724,7 +705,7 @@ let option_is_some o = match o with Some _ -> true | None -> false
 *)
 let body_instrs_comparer = {
   comparer = (fun b b' ->
-    let todo = match Core.List.zip (Hhas_body.params b) (Hhas_body.params b') with
+    let todo = match Hh_core.List.zip (Hhas_body.params b) (Hhas_body.params b') with
       | None -> [] (* different lengths so just look at initial entry point *)
       | Some param_pairs ->
         let params_with_defaults = List.filter
@@ -744,10 +725,8 @@ let body_instrs_comparer = {
        Log.debug (Tty.Normal Tty.White) @@ Printf.sprintf
          "pc=%s, pc'=%s, i=%s i'=%s asn=%s\nAssumed=\n%s\nTodo=%s"
          (Rhl.string_of_pc pc) (Rhl.string_of_pc pc')
-         (my_string_of_instruction
-            (List.nth inss (Rhl.ip_of_pc pc)))
-         (my_string_of_instruction
-            (List.nth inss' (Rhl.ip_of_pc pc' )))
+         (string_of_nth_instruction inss pc)
+         (string_of_nth_instruction inss' pc')
          (Rhl.asntostring asn) (Rhl.labasnsmaptostring assumed)
          (Rhl.labasnlisttostring todo);
        instruct_list_comparer.comparer inss inss'));

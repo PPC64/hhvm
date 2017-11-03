@@ -16,6 +16,7 @@
 #include "hphp/runtime/vm/jit/irgen-ret.h"
 
 
+#include "hphp/runtime/vm/resumable.h"
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/vm/jit/irgen.h"
 #include "hphp/runtime/vm/jit/irgen-exit.h"
@@ -45,7 +46,7 @@ void retSurpriseCheck(IRGS& env, SSATmp* retVal) {
   ifThen(
     env,
     [&] (Block* taken) {
-      auto const ptr = resumed(env) ? sp(env) : fp(env);
+      auto const ptr = resumeMode(env) != ResumeMode::None ? sp(env) : fp(env);
       gen(env, CheckSurpriseFlags, taken, ptr);
     },
     [&] {
@@ -98,9 +99,10 @@ void normalReturn(IRGS& env, SSATmp* retval) {
   // If we're on the eager side of an async function, we have to zero-out the
   // TV aux of the return value, because it might be used as a flag if we were
   // called with FCallAwait.
-  auto const aux = curFunc(env)->isAsyncFunction() && !resumed(env)
-    ? folly::make_optional(AuxUnion{0})
-    : folly::none;
+  auto const aux =
+    (curFunc(env)->isAsyncFunction() && resumeMode(env) == ResumeMode::None)
+      ? folly::make_optional(AuxUnion{0})
+      : folly::none;
 
   auto const data = RetCtrlData { offsetToReturnSlot(env), false, aux };
   gen(env, RetCtrl, data, sp(env), fp(env), retval);
@@ -113,23 +115,15 @@ void emitAsyncRetSlow(IRGS& env, SSATmp* retVal) {
   gen(env, StAsyncArResult, fp(env), retVal);
   gen(env, ABCUnblock, parentChain);
 
-  // We don't really pass a return value via the stack, but enterTCHelper is
-  // going to want to store the rret() regs to the top of the stack, so we need
-  // the stack depth to be one deeper here.  The resumeAsyncFunc() entry point
-  // in ExecutionContext doesn't care what we put here, but also won't try to
-  // decref it, so we use a null.  (This push doesn't actually get the value
-  // into memory---we're going to put it in the return value for AsyncRetCtrl
-  // and let enterTCHelper store it to memory.)
-  auto const ret = cns(env, TInitNull);
-  push(env, ret);
-
   // Must load this before FreeActRec, which adjusts fp(env).
   auto const resumableObj = gen(env, LdResumableArObj, fp(env));
   gen(env, FreeActRec, fp(env));
   decRef(env, resumableObj);
 
-  gen(env, AsyncRetCtrl, RetCtrlData { spOffBCFromIRSP(env), false },
-      sp(env), fp(env), ret);
+  // Transfer control back to the asio scheduler. Make uninitialized space
+  // on the stack for null "return value" to be written by the enterTCExit stub.
+  auto const spAdjust = offsetFromIRSP(env, BCSPRelOffset{-1});
+  gen(env, AsyncRetCtrl, IRSPRelOffsetData { spAdjust }, sp(env), fp(env));
 }
 
 void asyncRetSurpriseCheck(IRGS& env, SSATmp* retVal) {
@@ -162,7 +156,7 @@ void asyncRetSurpriseCheck(IRGS& env, SSATmp* retVal) {
 }
 
 void asyncFunctionReturn(IRGS& env, SSATmp* retVal) {
-  if (!resumed(env)) {
+  if (resumeMode(env) == ResumeMode::None) {
     retSurpriseCheck(env, retVal);
 
     // Return from an eagerly-executed async function: wrap the return value in
@@ -192,10 +186,12 @@ void asyncFunctionReturn(IRGS& env, SSATmp* retVal) {
   // when debugging the fast return path.
   asyncRetSurpriseCheck(env, retVal);
 
-  // Unblock parents and possibly take fast path to resume parent.
+  // Call stub that will mark this AFWH as finished, unblock parents and
+  // possibly take fast path to resume parent. Leave SP pointing to a single
+  // uninitialized cell which will be filled by the stub.
   auto const spAdjust = offsetFromIRSP(env, BCSPRelOffset{-1});
-  gen(env, AsyncRetFast, RetCtrlData { spAdjust, false },
-      sp(env), fp(env), retVal);
+  gen(env, AsyncRetFast, IRSPRelOffsetData { spAdjust }, sp(env), fp(env),
+      retVal);
 }
 
 void generatorReturn(IRGS& env, SSATmp* retval) {
@@ -251,10 +247,11 @@ void implRet(IRGS& env) {
 
   retSurpriseCheck(env, retval);
 
-  if (resumed(env)) {
+  if (resumeMode(env) == ResumeMode::GenIter) {
     assertx(curFunc(env)->isNonAsyncGenerator());
     return generatorReturn(env, retval);
   }
+  assertx(resumeMode(env) == ResumeMode::None);
   return normalReturn(env, retval);
 }
 
@@ -271,7 +268,7 @@ void emitRetC(IRGS& env) {
   if (curFunc(env)->isAsyncGenerator()) PUNT(RetC-AsyncGenerator);
 
   if (isInlining(env)) {
-    assertx(!resumed(env));
+    assertx(resumeMode(env) == ResumeMode::None);
     retFromInlined(env);
   } else {
     implRet(env);
@@ -279,7 +276,7 @@ void emitRetC(IRGS& env) {
 }
 
 void emitRetV(IRGS& env) {
-  assertx(!resumed(env));
+  assertx(resumeMode(env) == ResumeMode::None);
   assertx(!curFunc(env)->isResumable());
   if (isInlining(env)) {
     retFromInlined(env);

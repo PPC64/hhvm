@@ -46,24 +46,10 @@ module Revision_map = struct
         let future = Hg.get_closest_svn_ancestor hg_rev (Path.to_string root) in
         Hashtbl.add t.svn_queries hg_rev future
 
-    (** Wrap Future.get. If process exits abnormally, returns 0. *)
-    let svn_rev_of_future future =
-      let parse_svn_rev svn_rev =
-        try int_of_string svn_rev
-        with Failure "int_of_string" ->
-          Hh_logger.log "Revision_tracker failed to parse svn_rev: %s" svn_rev;
-          0
-      in
-      try begin
-        let result = Future.get future in
-        parse_svn_rev result
-      end with
-      | Future_sig.Process_failure _ -> 0
-
     let find_svn_rev hg_rev t =
       let future = Hashtbl.find t.svn_queries hg_rev in
       if Future.is_ready future then
-        Some (svn_rev_of_future future)
+        Some (Future.get future)
       else
         None
 
@@ -87,12 +73,15 @@ module Revision_map = struct
              * Just return a fake empty list of XDB results. *)
             Future.of_value []
           | Some hhconfig_hash ->
+            let local_config = ServerLocalConfig.load ~silent:true in
+            let tiny = local_config.ServerLocalConfig.load_tiny_state in
             Xdb.find_nearest
               ~db:Xdb.hack_db_name
               ~db_table:Xdb.mini_saved_states_table
               ~svn_rev
               ~hh_version:Build_id.build_revision
               ~hhconfig_hash
+              ~tiny
           end in
           let () = Hashtbl.add t.xdb_queries svn_rev future in
           None
@@ -229,8 +218,11 @@ module Revision_tracker = struct
       Hg.current_working_copy_base_rev (Path.to_string root))
 
   let set_base_revision svn_rev env =
-    let () = Hh_logger.log "Revision_tracker setting base rev: %d" svn_rev in
-    env.current_base_revision := svn_rev
+    if svn_rev = !(env.current_base_revision) then
+      ()
+    else
+      let () = Hh_logger.log "Revision_tracker setting base rev: %d" svn_rev in
+      env.current_base_revision := svn_rev
 
   let active_env init_settings base_svn_rev =
     {
@@ -252,7 +244,13 @@ module Revision_tracker = struct
   let cached_svn_rev revision_map hg_rev =
     Revision_map.find hg_rev revision_map
 
-  let form_decision ~use_xdb is_significant transition server_state xdb_results =
+  (** Form a decision about whether or not we'd like to start a new server.
+   * transition: The state transition for which we are forming a decision
+   * svn_rev: The corresponding SVN rev for this transition's hg rev.
+   * xdb_results: The nearest saved states for this svn_rev provided by the XDB table.
+   *)
+  let form_decision is_significant transition server_state xdb_results svn_rev env =
+    let use_xdb = env.inits.use_xdb in
     let open Informant_sig in
     match is_significant, transition, server_state, xdb_results with
     | _, State_leave _, Server_not_yet_started, _ ->
@@ -262,11 +260,11 @@ module Revision_tracker = struct
       * slow init. *)
       Hh_logger.log "Hit unreachable Server_not_yet_started match in %s"
         "Revision_tracker.form_decision";
-      Restart_server
+      Restart_server None
     | _, State_leave _, Server_dead, _ ->
       (** Regardless of whether we had a significant change or not, when the
        * server is not alive, we restart it on a state leave.*)
-      Restart_server
+      Restart_server None
     | false, _, _, _ ->
       Move_along
     | true, State_enter _, _, _
@@ -279,8 +277,19 @@ module Revision_tracker = struct
       (** No XDB results, so w don't restart. *)
       let () = Printf.eprintf "Got no XDB results on merge base change\n" in
       Move_along
+    | true, Changed_merge_base _, _, (nearest_xdb_result :: _) when use_xdb ->
+      let state_distance = abs @@ nearest_xdb_result.Xdb.svn_rev - svn_rev in
+      let incremental_distance = abs @@ svn_rev - !(env.current_base_revision) in
+      if incremental_distance > state_distance then
+        let target_state = {
+          ServerMonitorUtils.mini_state_everstore_handle = nearest_xdb_result.Xdb.everstore_handle;
+          target_svn_rev = nearest_xdb_result.Xdb.svn_rev;
+        } in
+        Restart_server (Some target_state)
+      else
+        Move_along
     | true, Changed_merge_base _, _, _ ->
-      Restart_server
+      Restart_server None
 
   (**
    * If we have a cached svn_rev for this hg_rev, make a decision on
@@ -303,8 +312,8 @@ module Revision_tracker = struct
       let significant = is_significant
         ~min_distance_restart:env.inits.min_distance_restart
         distance elapsed_t in
-      Some (form_decision ~use_xdb:env.inits.use_xdb significant
-        transition server_state xdb_results, svn_rev)
+      Some (form_decision significant
+        transition server_state xdb_results svn_rev env, svn_rev)
 
   (**
    * Keep popping state_changes queue until we reach a non-ready result.
@@ -347,9 +356,10 @@ module Revision_tracker = struct
       Move_along
     else
       let decisions = churn_ready_changes ~acc:[] env server_state in
+      (** left is more recent transition, so we prefer its saved state target. *)
       let select_relevant left right = match left, right with
-        | Restart_server, _ -> Restart_server
-        | _, Restart_server -> Restart_server
+        | Restart_server target, _ -> Restart_server target
+        | _, Restart_server target -> Restart_server target
         | _, _ -> Move_along
       in
       List.fold_left select_relevant Move_along decisions
@@ -441,13 +451,13 @@ module Revision_tracker = struct
      *
      * Otherwise, we continue as per usual. *)
     let report = match early_decision with
-      | Some (Restart_server, svn_rev) ->
+      | Some (Restart_server target, svn_rev) ->
         (** Early decision to restart, so the prior state changes don't
          * matter anymore. *)
         Hh_logger.log "Informant early decision: restart server";
         let () = Queue.clear env.state_changes in
         let () = set_base_revision svn_rev env in
-        Restart_server
+        Restart_server target
       | Some (Move_along, _) | None ->
         handle_change_then_churn server_state change env
     in
@@ -471,9 +481,9 @@ module Revision_tracker = struct
     let reports = process (server_state, env, []) in
     (** We fold through the reports and take the "most active" one. *)
     let max_report a b = match a, b with
-      | Restart_server, _
-      | _, Restart_server ->
-        Restart_server
+      | Restart_server target, _
+      | _, Restart_server target->
+        Restart_server target
       | _, _ ->
         Move_along
     in
@@ -483,7 +493,7 @@ module Revision_tracker = struct
     | Initializing (init_settings, future) ->
       if Future.is_ready future
       then
-        let svn_rev = Revision_map.svn_rev_of_future future in
+        let svn_rev = Future.get future in
         let () = Hh_logger.log "Initialized Revision_tracker to SVN rev: %d"
           svn_rev in
         let env = active_env init_settings svn_rev in
@@ -532,9 +542,11 @@ let init {
   use_xdb;
 } =
   if use_dummy then
+    let () = Printf.eprintf "Informant using dummy - resigning\n" in
     Resigned
   (** Active informant requires Watchman subscriptions. *)
   else if not allow_subscriptions then
+    let () = Printf.eprintf "Not using subscriptions - Informant resigning\n" in
     Resigned
   else
     let watchman = Watchman.init {
@@ -545,7 +557,9 @@ let init {
       root;
     } in
     match watchman with
-    | None -> Resigned
+    | None ->
+      let () = Printf.eprintf "Watchman failed to init - Informant resigning\n" in
+      Resigned
     | Some watchman_env ->
       Active
       {
@@ -598,13 +612,13 @@ let report informant server_state = match informant, server_state with
   | Resigned, Informant_sig.Server_not_yet_started ->
     (** Actually, this case should never happen. But we force a restart
      * to avoid accidental wedged states anyway. *)
-    Informant_sig.Restart_server
+    Informant_sig.Restart_server None
   | Resigned, _ ->
     Informant_sig.Move_along
   | Active _, Informant_sig.Server_not_yet_started ->
     if should_start_first_server informant then begin
       HackEventLogger.informant_watcher_starting_server_from_settling ();
-      Informant_sig.Restart_server
+      Informant_sig.Restart_server None
     end
     else
       Informant_sig.Move_along

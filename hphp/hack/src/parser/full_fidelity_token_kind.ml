@@ -14,8 +14,6 @@
  *
  *   buck run //hphp/hack/src:generate_full_fidelity
  *
- * This module contains the type describing the structure of a syntax tree.
- *
  **
  *
  *)
@@ -74,10 +72,12 @@ type t =
   | Implements
   | Include
   | Include_once
+  | Inout
   | Instanceof
   | Insteadof
   | Int
   | Interface
+  | Is
   | Isset
   | Keyset
   | List
@@ -275,10 +275,12 @@ let from_string keyword =
   | "implements"   -> Some Implements
   | "include"      -> Some Include
   | "include_once" -> Some Include_once
+  | "inout"        -> Some Inout
   | "instanceof"   -> Some Instanceof
   | "insteadof"    -> Some Insteadof
   | "int"          -> Some Int
   | "interface"    -> Some Interface
+  | "is"           -> Some Is
   | "isset"        -> Some Isset
   | "keyset"       -> Some Keyset
   | "list"         -> Some List
@@ -448,10 +450,12 @@ let to_string kind =
   | Implements                    -> "implements"
   | Include                       -> "include"
   | Include_once                  -> "include_once"
+  | Inout                         -> "inout"
   | Instanceof                    -> "instanceof"
   | Insteadof                     -> "insteadof"
   | Int                           -> "int"
   | Interface                     -> "interface"
+  | Is                            -> "is"
   | Isset                         -> "isset"
   | Keyset                        -> "keyset"
   | List                          -> "list"

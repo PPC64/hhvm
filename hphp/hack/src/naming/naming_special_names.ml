@@ -8,7 +8,7 @@
  *
  *)
 
-open Core
+open Hh_core
 
 (** Module consisting of the special names known to the typechecker *)
 
@@ -44,6 +44,9 @@ module Classes = struct
   let cIMemoizeParam = "\\IMemoizeParam"
   let cClassname = "\\classname"
   let cTypename = "\\typename"
+
+  let cIDisposable = "\\IDisposable"
+  let cIAsyncDisposable = "\\IAsyncDisposable"
 end
 
 module Collections = struct
@@ -86,12 +89,27 @@ module Members = struct
   let __destruct   = "__destruct"
   let __call       = "__call"
   let __callStatic = "__callStatic"
-  let __toString   = "__toString"
-  let __set        = "__set"
-  let __isset      = "__isset"
+  let __clone      = "__clone"
+  let __debugInfo  = "__debugInfo"
+  let __dispose    = "__dispose"
+  let __disposeAsync = "__disposeAsync"
   let __get        = "__get"
+  let __invoke     = "__invoke"
+  let __isset      = "__isset"
+  let __set        = "__set"
+  let __set_state  = "__set_state"
+  let __sleep      = "__sleep"
+  let __toString   = "__toString"
   let __unset      = "__unset"
+  let __wakeup     = "__wakeup"
 
+  let as_set = List.fold_right ~f:SSet.add ~init:SSet.empty
+    [
+      __construct; __destruct; __call; __callStatic; __clone; __debugInfo;
+      __dispose; __disposeAsync;
+      __get; __invoke; __isset; __set; __set_state; __sleep; __toString;
+      __unset; __wakeup;
+    ]
 
   (* Any data- or aria- attribute is always valid, even if it is not declared
    * for a given XHP element *)
@@ -107,6 +125,7 @@ module UserAttributes = struct
   let uaUnsafeConstruct     = "__UNSAFE_Construct"
   let uaDeprecated          = "__Deprecated"
   let uaMemoize             = "__Memoize"
+  let uaPHPStdLib           = "__PHPStdLib"
 
   let as_set : SSet.t =
     let s = SSet.empty in
@@ -115,6 +134,7 @@ module UserAttributes = struct
     let s = SSet.add uaUnsafeConstruct s in
     let s = SSet.add uaDeprecated s in
     let s = SSet.add uaMemoize s in
+    let s = SSet.add uaPHPStdLib s in
     s
 
 end

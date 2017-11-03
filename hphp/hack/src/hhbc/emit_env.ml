@@ -19,18 +19,26 @@ type t = {
 type global_state =
 { global_explicit_use_set: SSet.t
 ; global_closure_namespaces: Namespace_env.env SMap.t
-; global_closure_enclosing_classes: Ast.class_ SMap.t }
+; global_closure_enclosing_classes: Ast.class_ SMap.t
+}
 
 let empty_global_state =
 { global_explicit_use_set = SSet.empty
 ; global_closure_namespaces = SMap.empty
-; global_closure_enclosing_classes = SMap.empty }
+; global_closure_enclosing_classes = SMap.empty
+}
 
 let is_hh_file_ = ref false
 let global_state_ = ref empty_global_state
 
 let set_is_hh_file v = is_hh_file_ := v
 let is_hh_file () = !is_hh_file_
+
+let is_hh_syntax_enabled () =
+  is_hh_file () || Hhbc_options.enable_hiphop_syntax !Hhbc_options.compiler_options
+
+let is_xhp_syntax_enabled () =
+  is_hh_file () || Hhbc_options.enable_xhp !Hhbc_options.compiler_options
 
 let get_explicit_use_set () = (!global_state_).global_explicit_use_set
 let get_closure_namespaces () = (!global_state_).global_closure_namespaces

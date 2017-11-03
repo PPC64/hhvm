@@ -164,122 +164,14 @@ bool mayHaveData(trep bits) {
  * try it later.
  */
 bool isPredefined(trep bits) {
+#define CASE(n) case B##n:
   switch (bits) {
-  case BBottom:
-  case BUninit:
-  case BInitNull:
-  case BFalse:
-  case BTrue:
-  case BInt:
-  case BDbl:
-  case BSStr:
-  case BCStr:
-  case BSArrE:
-  case BCArrE:
-  case BSArrN:
-  case BCArrN:
-  case BSVecE:
-  case BCVecE:
-  case BSVecN:
-  case BCVecN:
-  case BSDictE:
-  case BCDictE:
-  case BSDictN:
-  case BCDictN:
-  case BSKeysetE:
-  case BCKeysetE:
-  case BSKeysetN:
-  case BCKeysetN:
-  case BObj:
-  case BRes:
-  case BCls:
-  case BRef:
-  case BNull:
-  case BNum:
-  case BBool:
-  case BStr:
-  case BSArr:
-  case BCArr:
-  case BArrE:
-  case BArrN:
-  case BArr:
-  case BSVec:
-  case BCVec:
-  case BVecE:
-  case BVecN:
-  case BVec:
-  case BSDict:
-  case BCDict:
-  case BDictE:
-  case BDictN:
-  case BDict:
-  case BSKeyset:
-  case BCKeyset:
-  case BKeysetE:
-  case BKeysetN:
-  case BKeyset:
-  case BInitPrim:
-  case BPrim:
-  case BInitUnc:
-  case BUnc:
-  case BUncArrKey:
-  case BArrKey:
-  case BOptTrue:
-  case BOptFalse:
-  case BOptBool:
-  case BOptInt:
-  case BOptDbl:
-  case BOptNum:
-  case BOptSStr:
-  case BOptCStr:
-  case BOptStr:
-  case BOptSArrN:
-  case BOptCArrN:
-  case BOptSArrE:
-  case BOptCArrE:
-  case BOptSArr:
-  case BOptCArr:
-  case BOptArrE:
-  case BOptArrN:
-  case BOptArr:
-  case BOptSVecN:
-  case BOptCVecN:
-  case BOptSVecE:
-  case BOptCVecE:
-  case BOptSVec:
-  case BOptCVec:
-  case BOptVecE:
-  case BOptVecN:
-  case BOptVec:
-  case BOptSDictN:
-  case BOptCDictN:
-  case BOptSDictE:
-  case BOptCDictE:
-  case BOptSDict:
-  case BOptCDict:
-  case BOptDictE:
-  case BOptDictN:
-  case BOptDict:
-  case BOptSKeysetN:
-  case BOptCKeysetN:
-  case BOptSKeysetE:
-  case BOptCKeysetE:
-  case BOptSKeyset:
-  case BOptCKeyset:
-  case BOptKeysetE:
-  case BOptKeysetN:
-  case BOptKeyset:
-  case BOptObj:
-  case BOptRes:
-  case BOptUncArrKey:
-  case BOptArrKey:
-  case BInitCell:
-  case BCell:
-  case BInitGen:
-  case BGen:
-  case BTop:
+    TYPES(CASE)
     return true;
+    NON_TYPES(CASE)
+    break;
   }
+#undef CASE
   return false;
 }
 
@@ -297,23 +189,14 @@ bool canBeOptional(trep bits) {
   case BInt:
   case BDbl:
   case BSStr:
-  case BCStr:
   case BSArrE:
   case BSArrN:
-  case BCArrE:
-  case BCArrN:
   case BSVecE:
   case BSVecN:
-  case BCVecE:
-  case BCVecN:
   case BSDictE:
   case BSDictN:
-  case BCDictE:
-  case BCDictN:
   case BSKeysetE:
   case BSKeysetN:
-  case BCKeysetE:
-  case BCKeysetN:
   case BObj:
   case BRes:
     return true;
@@ -325,22 +208,18 @@ bool canBeOptional(trep bits) {
   case BUncArrKey:
   case BArrKey:
   case BSArr:
-  case BCArr:
   case BArrE:
   case BArrN:
   case BArr:
   case BSVec:
-  case BCVec:
   case BVecE:
   case BVecN:
   case BVec:
   case BSDict:
-  case BCDict:
   case BDictE:
   case BDictN:
   case BDict:
   case BSKeyset:
-  case BCKeyset:
   case BKeysetE:
   case BKeysetN:
   case BKeyset:
@@ -357,41 +236,28 @@ bool canBeOptional(trep bits) {
   case BOptDbl:
   case BOptNum:
   case BOptSStr:
-  case BOptCStr:
   case BOptStr:
   case BOptSArrE:
-  case BOptCArrE:
   case BOptSArrN:
-  case BOptCArrN:
   case BOptSArr:
-  case BOptCArr:
   case BOptArrN:
   case BOptArrE:
   case BOptArr:
   case BOptSVecE:
-  case BOptCVecE:
   case BOptSVecN:
-  case BOptCVecN:
   case BOptSVec:
-  case BOptCVec:
   case BOptVecN:
   case BOptVecE:
   case BOptVec:
   case BOptSDictE:
-  case BOptCDictE:
   case BOptSDictN:
-  case BOptCDictN:
   case BOptSDict:
-  case BOptCDict:
   case BOptDictN:
   case BOptDictE:
   case BOptDict:
   case BOptSKeysetE:
-  case BOptCKeysetE:
   case BOptSKeysetN:
-  case BOptCKeysetN:
   case BOptSKeyset:
-  case BOptCKeyset:
   case BOptKeysetN:
   case BOptKeysetE:
   case BOptKeyset:
@@ -411,6 +277,11 @@ bool canBeOptional(trep bits) {
   case BGen:
   case BTop:
     return false;
+
+#define CASE(n) case B##n:
+    NON_TYPES(CASE)
+    always_assert(false);
+#undef CASE
   }
   not_reached();
 }
@@ -1523,16 +1394,25 @@ bool Type::couldBeData(const Type& o) const {
     not_reached();
   case DataTag::Obj:
   {
-    if ((m_data.dobj.type == o.m_data.dobj.type &&
-         m_data.dobj.cls.same(o.m_data.dobj.cls)) ||
-        ((m_data.dobj.type == DObj::Sub || o.m_data.dobj.type == DObj::Sub) &&
-         m_data.dobj.cls.couldBe(o.m_data.dobj.cls))) {
-      return
-        !o.m_data.dobj.whType ||
-        !m_data.dobj.whType ||
-        m_data.dobj.whType->couldBe(*o.m_data.dobj.whType);
-    }
-    return false;
+    auto couldBe = [&] {
+      if (m_data.dobj.type == o.m_data.dobj.type &&
+          m_data.dobj.cls.same(o.m_data.dobj.cls)) {
+        return true;
+      }
+      if (m_data.dobj.type == DObj::Sub) {
+        if (o.m_data.dobj.type == DObj::Sub) {
+          return o.m_data.dobj.cls.couldBe(m_data.dobj.cls);
+        }
+        return o.m_data.dobj.cls.subtypeOf(m_data.dobj.cls);
+      }
+      if (o.m_data.dobj.type == DObj::Sub) {
+        return m_data.dobj.cls.subtypeOf(o.m_data.dobj.cls);
+      }
+      return false;
+    }();
+    return couldBe && (!o.m_data.dobj.whType ||
+                       !m_data.dobj.whType ||
+                       m_data.dobj.whType->couldBe(*o.m_data.dobj.whType));
   }
   case DataTag::Cls:
     if (m_data.dcls.type == o.m_data.dcls.type &&
@@ -1628,6 +1508,19 @@ bool Type::couldBe(const Type& o) const {
 bool Type::checkInvariants() const {
   assert(isPredefined(m_bits));
   assert(!hasData() || mayHaveData(m_bits));
+
+#define check(a) \
+  if (m_bits & BC##a) assertx(m_bits & BS##a)
+  check(Str);
+  check(ArrE);
+  check(ArrN);
+  check(VecE);
+  check(VecN);
+  check(DictE);
+  check(DictN);
+  check(KeysetE);
+  check(KeysetN);
+#undef check
 
   // NB: Avoid copying non-trivial types in here to avoid recursive calls to
   // checkInvariants() which can cause exponential time blow-ups.
@@ -1770,7 +1663,6 @@ Type aval(SArray val) {
 
 Type aempty()         { return Type { BSArrE }; }
 Type sempty()         { return sval(s_empty.get()); }
-Type counted_aempty() { return Type { BCArrE }; }
 Type some_aempty()    { return Type { BArrE }; }
 
 Type vec_val(SArray val) {
@@ -1784,7 +1676,6 @@ Type vec_val(SArray val) {
 }
 
 Type vec_empty()         { return Type { BSVecE }; }
-Type counted_vec_empty() { return Type { BCVecE }; }
 Type some_vec_empty()    { return Type { BVecE }; }
 
 Type packedn_impl(trep bits, Type t) {
@@ -1814,10 +1705,6 @@ Type vec(std::vector<Type> elems) {
   return packed_impl(BVecN, std::move(elems));
 }
 
-Type cvec(std::vector<Type> elems) {
-  return packed_impl(BCVecN, std::move(elems));
-}
-
 Type svec(std::vector<Type> elems) {
   return packed_impl(BSVecN, std::move(elems));
 }
@@ -1833,7 +1720,6 @@ Type dict_val(SArray val) {
 }
 
 Type dict_empty()         { return Type { BSDictE }; }
-Type counted_dict_empty() { return Type { BCDictE }; }
 Type some_dict_empty()    { return Type { BDictE }; }
 
 Type dict_n(Type k, Type v) {
@@ -1855,7 +1741,6 @@ Type keyset_val(SArray val) {
 }
 
 Type keyset_empty()         { return Type { BSKeysetE }; }
-Type counted_keyset_empty() { return Type { BCKeysetE }; }
 Type some_keyset_empty()    { return Type { BKeysetE }; }
 
 Type keyset_n(Type kv) {
@@ -1992,20 +1877,12 @@ Type sarr_packed(std::vector<Type> elems) {
   return packed_impl(BSArrN, std::move(elems));
 }
 
-Type carr_packed(std::vector<Type> elems) {
-  return packed_impl(BCArrN, std::move(elems));
-}
-
 Type arr_packedn(Type t) {
   return packedn_impl(BArrN, std::move(t));
 }
 
 Type sarr_packedn(Type t) {
   return packedn_impl(BSArrN, std::move(t));
-}
-
-Type carr_packedn(Type t) {
-  return packedn_impl(BCArrN, std::move(t));
 }
 
 Type map_impl(trep bits, MapElems m) {
@@ -2068,10 +1945,6 @@ Type arr_mapn(Type k, Type v) {
 
 Type sarr_mapn(Type k, Type v) {
   return mapn_impl(BSArrN, std::move(k), std::move(v));
-}
-
-Type carr_mapn(Type k, Type v) {
-  return mapn_impl(BCArrN, std::move(k), std::move(v));
 }
 
 Type opt(Type t) {
@@ -2301,9 +2174,8 @@ R tvImpl(const Type& t) {
   case BCKeysetE:
   case BCKeysetN:
   case BCKeyset:
-    // We don't want to turn definitely counted types into constants which are
-    // static.
-    return R{};
+    // We don't produce these types.
+    always_assert(false);
 
   default:
     if (is_opt(t)) {
@@ -2724,9 +2596,7 @@ Type union_of(Type a, Type b) {
   X(TInt)
   X(TDbl)
   X(TSStr)
-  X(TCStr)
   X(TSArr)
-  X(TCArr)
   X(TArrE)
   X(TArrN)
   X(TObj)
@@ -2738,17 +2608,14 @@ Type union_of(Type a, Type b) {
   X(TArr)
 
   X(TSVec)
-  X(TCVec)
   X(TVecE)
   X(TVecN)
   X(TVec)
   X(TSDict)
-  X(TCDict)
   X(TDictE)
   X(TDictN)
   X(TDict)
   X(TSKeyset)
-  X(TCKeyset)
   X(TKeysetE)
   X(TKeysetN)
   X(TKeyset)
@@ -2777,22 +2644,18 @@ Type union_of(Type a, Type b) {
   X(TOptArrN)
   X(TOptArrE)
   X(TOptSArr)
-  X(TOptCArr)
   X(TOptArr)
   X(TOptObj)
 
   X(TOptSVec)
-  X(TOptCVec)
   X(TOptVecE)
   X(TOptVecN)
   X(TOptVec)
   X(TOptSDict)
-  X(TOptCDict)
   X(TOptDictE)
   X(TOptDictN)
   X(TOptDict)
   X(TOptSKeyset)
-  X(TOptCKeyset)
   X(TOptKeysetE)
   X(TOptKeysetN)
   X(TOptKeyset)
@@ -2999,17 +2862,17 @@ Type loosen_values(Type a) {
 }
 
 Type loosen_emptiness(Type t) {
-  auto const check = [&](trep a){
-    if (t.m_bits & a) t.m_bits = static_cast<trep>(t.m_bits | a);
+  auto const check = [&](trep a, trep b){
+    if (t.m_bits & a) t.m_bits = static_cast<trep>(t.m_bits | b);
   };
-  check(BSArr);
-  check(BCArr);
-  check(BSVec);
-  check(BCVec);
-  check(BSDict);
-  check(BCDict);
-  check(BSKeyset);
-  check(BCKeyset);
+  check(BSArr,    BSArr);
+  check(BCArr,    BArr);
+  check(BSVec,    BSVec);
+  check(BCVec,    BVec);
+  check(BSDict,   BSDict);
+  check(BCDict,   BDict);
+  check(BSKeyset, BSKeyset);
+  check(BCKeyset, BKeyset);
   return t;
 }
 
@@ -3021,14 +2884,14 @@ Type add_nonemptiness(Type t) {
   auto const check = [&](trep a, trep b){
     if (t.m_bits & a) t.m_bits = static_cast<trep>(t.m_bits | b);
   };
-  check(BSArrE, BSArrN);
-  check(BCArrE, BCArrN);
-  check(BSVecE, BSVecN);
-  check(BCVecE, BCVecN);
-  check(BSDictE, BSDictN);
-  check(BCDictE, BCDictN);
+  check(BSArrE,    BSArrN);
+  check(BCArrE,    BArrN);
+  check(BSVecE,    BSVecN);
+  check(BCVecE,    BVecN);
+  check(BSDictE,   BSDictN);
+  check(BCDictE,   BDictN);
   check(BSKeysetE, BSKeysetN);
-  check(BCKeysetE, BCKeysetN);
+  check(BCKeysetE, BKeysetN);
   return t;
 }
 
@@ -3575,12 +3438,14 @@ array_elem(const Type& arr, const Type& undisectedKey) {
 
 /*
  * Note: for now we're merging counted arrays into whatever type it used to
- * have in the following set functions, and returning arr_*'s in some cases
- * where we could know it was a carr_*.
+ * have in the following set functions, and returning arr_*'s in some cases,
+ * because it might become counted.
  *
- * To be able to assume it is actually counted it if used to be static, we need
- * to add code checking for keys that are one of the "illegal offset type" of
- * keys.
+ * To be able to assume it is actually counted it if used to be
+ * static, we need to add code checking for keys that are one of the
+ * "illegal offset type" of keys; in addition, even if we know *now*
+ * that its counted, after further optimizations we might be able to
+ * fully determine its contents, and replace it with a static array.
  *
  * A similar issue applies if you want to take out emptiness when a set occurs.
  * If the key could be an illegal key type, the array may remain empty.
@@ -3965,17 +3830,17 @@ IterTypes iter_types(const Type& iterable) {
 bool could_run_destructor(const Type& t) {
   if (t.couldBe(TObj)) return true;
 
-  auto const couldBeArr =
-    t.couldBe(TCArrN) || t.couldBe(TCVecN) || t.couldBe(TCDictN);
+  auto const couldBeArrWithDestructors =
+    t.m_bits & (BCArrN | BCVecN | BCDictN);
 
   if (t.couldBe(TRef)) {
-    if (!couldBeArr && is_ref_with_inner(t)) {
+    if (!couldBeArrWithDestructors && is_ref_with_inner(t)) {
       return could_run_destructor(*t.m_data.inner);
     }
     return true;
   }
 
-  if (!couldBeArr) return false;
+  if (!couldBeArrWithDestructors) return false;
 
   switch (t.m_dataTag) {
   case DataTag::None:
@@ -4004,6 +3869,10 @@ bool could_run_destructor(const Type& t) {
   }
 
   not_reached();
+}
+
+bool could_copy_on_write(const Type& t) {
+  return t.m_bits & (BCStr | BCArrN | BCVecN | BCDictN | BCKeysetN);
 }
 
 //////////////////////////////////////////////////////////////////////

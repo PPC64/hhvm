@@ -599,16 +599,11 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
 
   case AsyncRetCtrl:
   case AsyncRetFast:
+    return ReturnEffects { AStackAny | AMIStateAny };
+
   case AsyncSwitchFast:
-    if (inst.extra<RetCtrlData>()->suspendingResumed) {
-      return UnknownEffects {};
-    }
-    return ReturnEffects {
-      *stack_below(
-        inst.src(0),
-        inst.extra<RetCtrlData>()->spOffset - 1
-      ).precise_union(AMIStateAny)
-    };
+    // Suspending can go anywhere, and doesn't even kill locals.
+    return UnknownEffects {};
 
   case GenericRetDecRefs:
     /*
@@ -872,6 +867,30 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
       AHeapAny,
       AFrameAny | AClsRefSlotAny | ACufIterAny
     );
+
+  case CreateAAWH:
+    {
+      auto const extra = inst.extra<CreateAAWH>();
+      auto const frame = AFrame {
+        inst.src(0),
+        AliasIdSet {
+          AliasIdSet::IdRange{ extra->first, extra->first + extra->count }
+        }
+      };
+      return may_load_store(frame, AHeapAny);
+    }
+
+  case CountWHNotDone:
+    {
+      auto const extra = inst.extra<CountWHNotDone>();
+      auto const frame = AFrame {
+        inst.src(0),
+        AliasIdSet {
+          AliasIdSet::IdRange{ extra->first, extra->first + extra->count }
+        }
+      };
+      return may_load_store(frame, AEmpty);
+    }
 
   // This re-enters to call extension-defined instance constructors.
   case ConstructInstance:
@@ -1716,6 +1735,7 @@ MemEffects memory_effects_impl(const IRInstruction& inst) {
   case LdVectorBase:
   case LdWHResult:
   case LdWHState:
+  case LdWHNotDone:
   case LookupClsRDS:
   case DbgTraceCall:
   case InitCtx:

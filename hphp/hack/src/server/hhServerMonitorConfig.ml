@@ -81,7 +81,7 @@ module HhServerConfig = struct
 
   let on_server_exit = check_log_for_lazy_incremental
 
-  let start_server ~informant_managed ~prior_exit_status options =
+  let start_server ?target_mini_state ~informant_managed ~prior_exit_status options =
     match prior_exit_status with
     | Some c
       when c = Exit_status.(exit_code Sql_assertion_failure) ||
@@ -89,5 +89,30 @@ module HhServerConfig = struct
            c = Exit_status.(exit_code Sql_corrupt) ||
            c = Exit_status.(exit_code Sql_misuse) ->
       start_hh_server ~informant_managed (ServerArgs.set_no_load options true)
-    | _ -> start_hh_server ~informant_managed options
+    | _ ->
+      let options = ServerArgs.set_mini_state_target options target_mini_state in
+      start_hh_server ~informant_managed options
+
+  let kill_server process =
+    try Unix.kill process.ServerProcess.pid Sys.sigusr2 with
+    | _ -> Hh_logger.log
+        "Failed to send sigusr2 signal to server process. Trying \
+         violently";
+      try Unix.kill process.ServerProcess.pid Sys.sigkill with e ->
+        Hh_logger.exc ~prefix: "Failed to violently kill server process: " e
+
+  let rec wait_for_server_exit process start_t =
+    let exit_status = Unix.waitpid [Unix.WNOHANG; Unix.WUNTRACED] process.ServerProcess.pid in
+    match exit_status with
+    | 0, _ ->
+      Unix.sleep 1;
+      wait_for_server_exit process start_t
+    | _ ->
+      ignore (
+        Hh_logger.log_duration (Printf.sprintf
+          "%s has exited. Time since sigterm: " process.ServerProcess.name) start_t)
+
+  let wait_pid process =
+    Unix.waitpid [Unix.WNOHANG; Unix.WUNTRACED] process.ServerProcess.pid
+
 end

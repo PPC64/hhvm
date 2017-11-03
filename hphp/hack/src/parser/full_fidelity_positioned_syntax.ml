@@ -14,8 +14,6 @@
  *
  *   buck run //hphp/hack/src:generate_full_fidelity
  *
- * This module contains the type describing the structure of a syntax tree.
- *
  **
  *
  * Positioned syntax tree
@@ -29,10 +27,10 @@
 
 module SyntaxTree = Full_fidelity_syntax_tree
 module SourceText = Full_fidelity_source_text
-module PositionedToken = Full_fidelity_positioned_token
+module Token = Full_fidelity_positioned_token
 
 module SyntaxWithPositionedToken =
-  Full_fidelity_syntax.WithToken(PositionedToken)
+  Full_fidelity_syntax.WithToken(Token)
 
 module PositionedSyntaxValue = struct
   type t = {
@@ -62,10 +60,65 @@ module PositionedSyntaxValue = struct
     value.trailing_width
 end
 
-open Core
-include SyntaxWithPositionedToken.WithSyntaxValue(PositionedSyntaxValue)
+
+module PositionedWithValue =
+  SyntaxWithPositionedToken.WithSyntaxValue(PositionedSyntaxValue)
+
+open Hh_core
+include PositionedWithValue
+
+module PositionedValueBuilder = struct
+  let value_from_token token =
+    let source_text = Token.source_text token in
+    let offset = Token.leading_start_offset token in
+    let leading_width = Token.leading_width token in
+    let width = Token.width token in
+    let trailing_width = Token.trailing_width token in
+    PositionedSyntaxValue.make
+      source_text offset leading_width width trailing_width
+
+let value_from_outer_children first last =
+  match (first, last) with
+  | (Some first, Some last) ->
+    let source_text = PositionedSyntaxValue.source_text (value first) in
+    let offset = PositionedSyntaxValue.start_offset (value first) in
+    let leading_width = PositionedSyntaxValue.leading_width (value first) in
+    let trailing_width =
+      PositionedSyntaxValue.trailing_width (value last) in
+    let last_offset = PositionedSyntaxValue.start_offset (value last) in
+    let width = last_offset + trailing_width - offset in
+    PositionedSyntaxValue.make
+      source_text offset leading_width width trailing_width
+  | _ -> failwith "How did we get a syntax node with only missing children?"
+
+let value_from_children kind nodes =
+  if kind == Full_fidelity_syntax_kind.Missing then
+    let source_text = SourceText.empty in
+    let offset = 0 in
+    let leading_width = 0 in
+    let width = 0 in
+    let trailing_width = 0 in
+    PositionedSyntaxValue.make
+      source_text offset leading_width width trailing_width
+  else
+    let no_missing = List.filter ~f:(fun x -> not (is_missing x)) nodes in
+    let first = List.hd no_missing in
+    let last = List.last no_missing in
+    value_from_outer_children first last
+
+  let value_from_syntax syntax =
+    let f (first, last) node =
+      if is_missing node then (first, last)
+      else if first = None then (Some node, Some node)
+      else (first, Some node) in
+    let (first, last) = fold_over_children f (None, None) syntax in
+    value_from_outer_children first last
+end
+
+include PositionedWithValue.WithValueBuilder(PositionedValueBuilder)
+
 module Validated =
-  Full_fidelity_validated_syntax.Make(PositionedToken)(PositionedSyntaxValue)
+  Full_fidelity_validated_syntax.Make(Token)(PositionedSyntaxValue)
 
 let source_text node =
   PositionedSyntaxValue.source_text (value node)
@@ -637,6 +690,7 @@ module FromMinimal = struct
       , (  parameter_default_value
         :: parameter_name
         :: parameter_type
+        :: parameter_call_convention
         :: parameter_visibility
         :: parameter_attribute
         :: results
@@ -644,16 +698,19 @@ module FromMinimal = struct
           ParameterDeclaration
           { parameter_attribute
           ; parameter_visibility
+          ; parameter_call_convention
           ; parameter_type
           ; parameter_name
           ; parameter_default_value
           }, results
       | SyntaxKind.VariadicParameter
       , (  variadic_parameter_ellipsis
+        :: variadic_parameter_type
         :: results
         ) ->
           VariadicParameter
-          { variadic_parameter_ellipsis
+          { variadic_parameter_type
+          ; variadic_parameter_ellipsis
           }, results
       | SyntaxKind.AttributeSpecification
       , (  attribute_specification_right_double_angle
@@ -1361,6 +1418,17 @@ module FromMinimal = struct
           { instanceof_left_operand
           ; instanceof_operator
           ; instanceof_right_operand
+          }, results
+      | SyntaxKind.IsExpression
+      , (  is_right_operand
+        :: is_operator
+        :: is_left_operand
+        :: results
+        ) ->
+          IsExpression
+          { is_left_operand
+          ; is_operator
+          ; is_right_operand
           }, results
       | SyntaxKind.ConditionalExpression
       , (  conditional_alternative
@@ -2152,7 +2220,7 @@ module FromMinimal = struct
         )
     and convert (offset : int) (todo : todo) (results : t list) : M.t -> t = function
     | { M.syntax = M.Token token; _ } as minimal_t ->
-      let token = PositionedToken.from_minimal source_text token offset in
+      let token = Token.from_minimal source_text token offset in
       let syntax = Token token in
       let node = make_syntax minimal_t syntax offset in
       let offset = offset + M.full_width minimal_t in
@@ -2563,6 +2631,7 @@ module FromMinimal = struct
     | { M.syntax = M.ParameterDeclaration
         { M.parameter_attribute
         ; M.parameter_visibility
+        ; M.parameter_call_convention
         ; M.parameter_type
         ; M.parameter_name
         ; M.parameter_default_value
@@ -2572,14 +2641,17 @@ module FromMinimal = struct
         let todo = Convert (parameter_default_value, todo) in
         let todo = Convert (parameter_name, todo) in
         let todo = Convert (parameter_type, todo) in
+        let todo = Convert (parameter_call_convention, todo) in
         let todo = Convert (parameter_visibility, todo) in
         convert offset todo results parameter_attribute
     | { M.syntax = M.VariadicParameter
-        { M.variadic_parameter_ellipsis
+        { M.variadic_parameter_type
+        ; M.variadic_parameter_ellipsis
         }
       ; _ } as minimal_t ->
         let todo = Build (minimal_t, offset, todo) in
-        convert offset todo results variadic_parameter_ellipsis
+        let todo = Convert (variadic_parameter_ellipsis, todo) in
+        convert offset todo results variadic_parameter_type
     | { M.syntax = M.AttributeSpecification
         { M.attribute_specification_left_double_angle
         ; M.attribute_specification_attributes
@@ -3232,6 +3304,16 @@ module FromMinimal = struct
         let todo = Convert (instanceof_right_operand, todo) in
         let todo = Convert (instanceof_operator, todo) in
         convert offset todo results instanceof_left_operand
+    | { M.syntax = M.IsExpression
+        { M.is_left_operand
+        ; M.is_operator
+        ; M.is_right_operand
+        }
+      ; _ } as minimal_t ->
+        let todo = Build (minimal_t, offset, todo) in
+        let todo = Convert (is_right_operand, todo) in
+        let todo = Convert (is_operator, todo) in
+        convert offset todo results is_left_operand
     | { M.syntax = M.ConditionalExpression
         { M.conditional_test
         ; M.conditional_question

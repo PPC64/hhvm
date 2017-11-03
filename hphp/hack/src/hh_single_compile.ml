@@ -8,10 +8,11 @@
  *
  *)
 
-open Core
+open Hh_core
 open Sys_utils
 
 module P = Printf
+module SyntaxError = Full_fidelity_syntax_error
 
 (*****************************************************************************)
 (* Types, constants *)
@@ -25,16 +26,17 @@ type mode =
   | DAEMON
 
 type options = {
-  filename        : string;
-  fallback        : bool;
-  config_list     : string list;
-  debug_time      : bool;
-  parser          : parser;
-  output_file     : string option;
-  config_file     : string option;
-  quiet_mode      : bool;
-  mode            : mode;
-  input_file_list : string option;
+  filename         : string;
+  fallback         : bool;
+  config_list      : string list;
+  debug_time       : bool;
+  parser           : parser;
+  output_file      : string option;
+  config_file      : string option;
+  quiet_mode       : bool;
+  mode             : mode;
+  input_file_list  : string option;
+  dump_symbol_refs : bool;
 }
 
 (*****************************************************************************)
@@ -84,6 +86,7 @@ let parse_options () =
   let config_file = ref None in
   let quiet_mode = ref false in
   let input_file_list = ref None in
+  let dump_symbol_refs = ref false in
   let usage = P.sprintf "Usage: %s filename\n" Sys.argv.(0) in
   let options =
     [ ("--fallback"
@@ -129,6 +132,10 @@ let parse_options () =
       , Arg.String (fun str -> input_file_list := Some str)
       , " read a list of files (one per line) from the file `input-file-list'"
       );
+      ("--dump-symbol-refs"
+      , Arg.Set dump_symbol_refs
+      , " Dump symbol ref sections of HHAS"
+      );
     ] in
   let options = Arg.align ~limit:25 options in
   Arg.parse options (fun fn -> fn_ref := Some fn) usage;
@@ -152,6 +159,7 @@ let parse_options () =
   ; quiet_mode         = !quiet_mode
   ; mode               = !mode
   ; input_file_list    = !input_file_list
+  ; dump_symbol_refs   = !dump_symbol_refs
   }
 
 let load_file_stdin () =
@@ -172,20 +180,29 @@ let parse_text compiler_options popt fn text =
   | FFP ->
     let ignore_pos =
       not (Hhbc_options.source_mapping !Hhbc_options.compiler_options) in
+    let enable_hh_syntax =
+      Hhbc_options.enable_hiphop_syntax !Hhbc_options.compiler_options in
     Full_fidelity_ast.from_text_with_legacy
       ~parser_options:popt
       ~ignore_pos
       ~suppress_output:true
+      ~hhvm_compat_mode:true
+      ~php5_compat_mode:true
+      ~enable_hh_syntax
       fn text
   | Legacy ->
     Parser_hack.program popt fn text
 
 let parse_file compiler_options popt filename text =
   try
-    Some (Errors.do_ begin fun () ->
+    `ParseResult (Errors.do_ begin fun () ->
       parse_text compiler_options popt filename text
     end)
-  with Failure _ -> None
+  with
+    (* FFP failed to parse *)
+    | Failure s -> `ParseFailure (SyntaxError.make 0 0 s)
+    (* FFP generated an error *)
+    | SyntaxError.ParserFatal e -> `ParseFailure e
 
 
 let hhvm_unix_call config filename =
@@ -223,15 +240,19 @@ let print_debug_time_info filename debug_time =
   P.eprintf "MinorWords: %0.3f\n" stat.Gc.minor_words;
   P.eprintf "PromotedWords: %0.3f\n" stat.Gc.promoted_words)
 
-let do_compile filename compiler_options opt_ast debug_time =
+let do_compile filename compiler_options fail_or_ast debug_time =
   let t = Unix.gettimeofday () in
   let t = add_to_time_ref debug_time.parsing_t t in
   let hhas_prog =
-    match opt_ast with
-    | None ->
-      Hhas_program.emit_fatal_program ~ignore_message:true
-        Hhbc_ast.FatalOp.Parse Pos.none "Syntax error"
-    | Some (errors, parser_return, _) ->
+    match fail_or_ast with
+    | `ParseFailure e ->
+      let error_t = match SyntaxError.error_type e with
+        | SyntaxError.ParseError -> Hhbc_ast.FatalOp.Parse
+        | SyntaxError.RuntimeError -> Hhbc_ast.FatalOp.Runtime
+      in
+      let s = SyntaxError.message e in
+      Hhas_program.emit_fatal_program ~ignore_message:false error_t Pos.none s
+    | `ParseResult (errors, parser_return, _) ->
       let is_hh_file =
         Option.value_map parser_return.Parser_hack.file_mode
           ~default:false ~f:(fun v -> v <> FileInfo.Mphp)
@@ -245,7 +266,8 @@ let do_compile filename compiler_options opt_ast debug_time =
         Hhbc_ast.FatalOp.Parse Pos.none "Syntax error"
       in
   let t = add_to_time_ref debug_time.codegen_t t in
-  let hhas_text = Hhbc_hhas.to_string hhas_prog in
+  let hhas_text = Hhbc_hhas.to_string
+    ~dump_symbol_refs:compiler_options.dump_symbol_refs hhas_prog in
   ignore @@ add_to_time_ref debug_time.printing_t t;
   if compiler_options.debug_time
   then print_debug_time_info filename debug_time;
@@ -273,10 +295,10 @@ let process_single_file compiler_options popt filename outputfile =
       Hhbc_options.get_options_from_config config compiler_options.config_list
     in
     Hhbc_options.set_compiler_options options;
-    let opt_ast = parse_file compiler_options popt filename text in
+    let fail_or_ast = parse_file compiler_options popt filename text in
     let debug_time = new_debug_time () in
     ignore @@ add_to_time_ref debug_time.parsing_t t;
-    let text = do_compile filename compiler_options opt_ast debug_time in
+    let text = do_compile filename compiler_options fail_or_ast debug_time in
     if compiler_options.mode = DAEMON then
       Printf.printf "%i\n%!" (String.length text);
     match outputfile with

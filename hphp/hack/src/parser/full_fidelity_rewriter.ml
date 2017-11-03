@@ -26,7 +26,7 @@ module WithSyntax(Syntax: RewritableType) = struct
      parents      : [node]  ->
      current_node : node ->
      current_acc  : accumulator ->
-     (accumulator, node Result.t)
+     (accumulator, node result)
 
      The tree is walked in post order; leaves are rewritten first. After all
      the children of a node are rewritten, then f is called on the rewritten
@@ -36,7 +36,7 @@ module WithSyntax(Syntax: RewritableType) = struct
      *)
   let parented_aggregating_rewrite_post f node init_acc =
     (* aux takes parents node accumulator and returns
-      (acc, node Result.t)  *)
+      (acc, node result)  *)
     let rec aux parents node acc =
       (* Start by rewriting all the children.
          We begin by obtaining a node list, and then from it producing
@@ -50,10 +50,10 @@ module WithSyntax(Syntax: RewritableType) = struct
         | (acc, Remove) -> ((acc, true), None)
       in
       let ((acc, child_changed), option_new_children) =
-        Core.List.map_env (acc, false) (Syntax.children node) ~f:mapper in
+        Hh_core.List.map_env (acc, false) (Syntax.children node) ~f:mapper in
       let node =
         if child_changed then
-          let new_children = Core.List.filter_opt option_new_children in
+          let new_children = Hh_core.List.filter_opt option_new_children in
           Syntax.from_children (Syntax.kind node) new_children
         else
           node
@@ -113,10 +113,10 @@ module WithSyntax(Syntax: RewritableType) = struct
       let rewrite_children node_changed node acc =
         let children = Syntax.children node in
         let ((acc, child_changed), option_new_children) =
-          Core.List.map_env (acc, false) children ~f:mapper in
+          Hh_core.List.map_env (acc, false) children ~f:mapper in
         let result =
           if child_changed then
-            let new_children = Core.List.filter_opt option_new_children in
+            let new_children = Hh_core.List.filter_opt option_new_children in
             let node = Syntax.from_children (Syntax.kind node) new_children in
             Replace node
           else if node_changed then

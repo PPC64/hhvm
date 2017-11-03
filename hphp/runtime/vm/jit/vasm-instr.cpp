@@ -145,6 +145,7 @@ Width width(Vinstr::Opcode op) {
     case Vinstr::defvmretdata:
     case Vinstr::defvmrettype:
     case Vinstr::syncvmret:
+    case Vinstr::syncvmrettype:
     case Vinstr::phplogue:
     case Vinstr::stubtophp:
     case Vinstr::loadstubret:
@@ -302,6 +303,7 @@ Width width(Vinstr::Opcode op) {
 
     case Vinstr::addq:
     case Vinstr::addqi:
+    case Vinstr::addqmr:
     case Vinstr::addqim:
     case Vinstr::andq:
     case Vinstr::andqi:

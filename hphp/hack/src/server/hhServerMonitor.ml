@@ -20,7 +20,6 @@
 *)
 
 module Program = HhServerMonitorConfig.Program
-module SP = ServerProcess
 module SM = ServerMonitor.Make_monitor
   (HhServerMonitorConfig.HhServerConfig) (HhMonitorInformant);;
 
@@ -61,6 +60,9 @@ let monitor_daemon_main (options: ServerArgs.options) =
     ServerConfig.(load filename options) in
   if local_config.ServerLocalConfig.incremental_init then
     HackEventLogger.set_incremental_init ();
+  HackEventLogger.set_use_tiny_state
+    local_config.ServerLocalConfig.load_tiny_state;
+
   HackEventLogger.set_search_chunk_size
     local_config.ServerLocalConfig.search_chunk_size;
 

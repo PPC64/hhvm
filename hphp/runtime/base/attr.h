@@ -37,6 +37,9 @@ enum Attr {
   // Does this function return by reference?     |          |         //
   AttrReference            = (1 <<  0), //       |          |    X    //
                                         //       |          |         //
+  // Class forbids dynamic properties?  //       |          |         //
+  AttrForbidDynamicProps   = (1 <<  0), //   X   |          |         //
+                                        //       |          |         //
   // Method visibility.  The relative ordering of these is important. //
   // N.B. the values are overlayed with some of the no-override bits for magic
   // class methods (next), since they don't apply to classes.
@@ -68,9 +71,9 @@ enum Attr {
   // using FCallBuiltin.                //       |          |         //
   AttrPhpLeafFn            = (1 <<  7), //       |          |    X    //
                                         //       |          |         //
-  // Is this class a trait?  On methods, this indicates that the method was
-  // imported from a trait.
-  AttrTrait                = (1 <<  8), //    X  |          |    X    //
+  // Is this class a trait?  On methods, or properties, this indicates that
+  // the method was imported from a trait.
+  AttrTrait                = (1 <<  8), //    X  |    X     |    X    //
                                         //       |          |         //
   // Indicates that this function should be ignored in backtraces.    //
   AttrNoInjection          = (1 <<  9), //       |          |    X    //
@@ -90,7 +93,7 @@ enum Attr {
   //  but we haven't done so at this point.)     |          |         //
   AttrInterceptable        = (1 << 11), //       |          |    X    //
                                         //       |          |         //
-  // FIXME: I have no documentation.    //       |          |         //
+  // Traits have been flattened on this class.
   AttrNoExpandTrait        = (1 << 12), //    X  |          |         //
                                         //       |          |         //
   // Set on functions where the $this class may not be a subclass of the
@@ -136,6 +139,17 @@ enum Attr {
   // <<__Memoize> caches).  Reuses the AttrBuiltin bit.
   AttrNoSerialize          = (1 << 20), //       |    X     |         //
                                         //       |          |         //
+  // Set on all functions which take at least one inout parameter. Also implies
+  // that the function takes no parameters by reference.
+  AttrTakesInOutParams     = (1 << 21), //       |          |    X    //
+                                        //       |          |         //
+  // Set on properties to indicate they can't be changed after construction
+  // and on classes to indicate that all that class' properties are immutable.
+  AttrIsImmutable          = (1 << 21), //    X  |    X     |         //
+                                        //       |          |         //
+  // Set on classes to indicate that they have at least one immutable property.
+  AttrHasImmutable         = (1 << 22), //    X  |          |         //
+                                        //       |          |         //
   // Indicates that the frame should be ignored when searching for context
   // (e.g., array_map evalutates its callback in the context of the caller).
   AttrSkipFrame            = (1 << 22), //       |          |    X    //
@@ -169,6 +183,9 @@ enum Attr {
   // common in PHP5 builtins.           //       |          |         //
   AttrParamCoerceModeFalse = (1 << 29), //       |          |    X    //
   AttrParamCoerceModeNull  = (1 << 30), //       |          |    X    //
+  // Indicates that this function wraps either a function taking inout or ref
+  // parameters.                        //       |          |         //
+  AttrIsInOutWrapper       = (1 << 31), //       |          |    X    //
 };
 
 constexpr Attr operator|(Attr a, Attr b) { return Attr((int)a | (int)b); }

@@ -7,18 +7,23 @@
  * of patent rights can be found in the PATENTS file in the same directory.
  *
  *)
-module Token = Full_fidelity_minimal_token
+
+module WithSyntax(Syntax: Syntax_sig.Syntax_S) = struct
+
+module Token = Syntax.Token
 module SyntaxKind = Full_fidelity_syntax_kind
 module TokenKind = Full_fidelity_token_kind
 module SyntaxError = Full_fidelity_syntax_error
-module Context = Full_fidelity_parser_context
-module Trivia = Full_fidelity_minimal_trivia
+module Trivia = Token.Trivia
 module SourceText = Full_fidelity_source_text
+module Env = Full_fidelity_parser_env
 
-open Full_fidelity_minimal_syntax
+open Syntax
 
-module type ParserType = sig
-  module Lexer : Full_fidelity_lexer_sig.Lexer_S
+module type Lexer_S = Full_fidelity_lexer_sig.WithToken(Syntax.Token).Lexer_S
+
+module WithLexer(Lexer : Lexer_S) = struct
+module type Parser_S = sig
   type t
   val errors : t -> SyntaxError.t list
   val with_errors : t -> SyntaxError.t list -> t
@@ -28,13 +33,14 @@ module type ParserType = sig
   val skipped_tokens : t -> Token.t list
   val with_skipped_tokens : t -> Token.t list -> t
   val clear_skipped_tokens : t -> t
+  val env : t -> Env.t
 end
 
-module WithParser(Parser : ParserType) = struct
+module WithParser(Parser : Parser_S) = struct
 
   let next_token parser =
     let lexer = Parser.lexer parser in
-    let (lexer, token) = Parser.Lexer.next_token lexer in
+    let (lexer, token) = Lexer.next_token lexer in
     let parser = Parser.with_lexer parser lexer in
     (* ERROR RECOVERY: Check if the parser's carring ExtraTokenError trivia.
      * If so, clear it and add it to the leading trivia of the current token. *)
@@ -48,7 +54,9 @@ module WithParser(Parser : ParserType) = struct
            * followed by the leading trivia. *)
            let prepend_onto elt_list elt = List.cons elt elt_list in
            let acc = List.fold_left prepend_onto acc (Token.trailing t) in
-           let acc = Trivia.make_extra_token_error (Token.width t) :: acc in
+           let acc = Trivia.make_extra_token_error
+              (Lexer.source lexer) (Lexer.start_offset lexer) (Token.width t)
+              :: acc in
            List.fold_left prepend_onto acc (Token.leading t)
          in
          let leading =
@@ -62,25 +70,25 @@ module WithParser(Parser : ParserType) = struct
 
   let next_token_no_trailing parser =
     let lexer = Parser.lexer parser in
-    let (lexer, token) = Parser.Lexer.next_token_no_trailing lexer in
+    let (lexer, token) = Lexer.next_token_no_trailing lexer in
     let parser = Parser.with_lexer parser lexer in
     (parser, token)
 
   let next_docstring_header parser =
     let lexer = Parser.lexer parser in
-    let (lexer, token, name) = Parser.Lexer.next_docstring_header lexer in
+    let (lexer, token, name) = Lexer.next_docstring_header lexer in
     let parser = Parser.with_lexer parser lexer in
     (parser, token, name)
 
   let next_token_in_string parser name =
     let lexer = Parser.lexer parser in
-    let (lexer, token) = Parser.Lexer.next_token_in_string lexer name in
+    let (lexer, token) = Lexer.next_token_in_string lexer name in
     let parser = Parser.with_lexer parser lexer in
     (parser, token)
 
   let peek_token ?(lookahead=0) parser =
     let rec lex_ahead lexer n =
-      let (next_lexer, token) = Parser.Lexer.next_token lexer in
+      let (next_lexer, token) = Lexer.next_token lexer in
       match n with
       | 0 -> token
       | _ -> lex_ahead next_lexer (n-1)
@@ -90,13 +98,13 @@ module WithParser(Parser : ParserType) = struct
   let next_token_as_name parser =
     (* TODO: This isn't right.  Pass flags to the lexer. *)
     let lexer = Parser.lexer parser in
-    let (lexer, token) = Parser.Lexer.next_token_as_name lexer in
+    let (lexer, token) = Lexer.next_token_as_name lexer in
     let parser = Parser.with_lexer parser lexer in
     (parser, token)
 
   let peek_token_as_name ?(lookahead=0) parser =
     let rec lex_ahead lexer n =
-      let (next_lexer, token) = Parser.Lexer.next_token_as_name lexer in
+      let (next_lexer, token) = Lexer.next_token_as_name lexer in
       match n with
       | 0 -> token
       | _ -> lex_ahead next_lexer (n-1)
@@ -115,7 +123,7 @@ module WithParser(Parser : ParserType) = struct
 
   let scan_markup parser ~is_leading_section =
     let (lexer, markup, suffix) =
-      Parser.Lexer.scan_markup (Parser.lexer parser) ~is_leading_section
+      Lexer.scan_markup (Parser.lexer parser) ~is_leading_section
     in
     Parser.with_lexer parser lexer, markup, suffix
 
@@ -124,12 +132,12 @@ module WithParser(Parser : ParserType) = struct
     if on_whole_token then
       let token = peek_token parser in
       let start_offset =
-        (Parser.Lexer.end_offset lexer) + (Token.leading_width token) in
+        (Lexer.end_offset lexer) + (Token.leading_width token) in
       let end_offset = start_offset + (Token.width token) in
       (start_offset, end_offset)
     else
-      let start_offset = Parser.Lexer.start_offset lexer in
-      let end_offset = Parser.Lexer.end_offset lexer in
+      let start_offset = Lexer.start_offset lexer in
+      let end_offset = Lexer.end_offset lexer in
       (start_offset, end_offset)
 
   (* This function reports an error starting at the current location of the
@@ -147,7 +155,7 @@ module WithParser(Parser : ParserType) = struct
   let current_token_text parser =
     let token = peek_token parser in
     let token_width = Token.width token in
-    let token_str = Parser.Lexer.current_text_at
+    let token_str = Lexer.current_text_at
       (Parser.lexer parser) token_width 0 in
     token_str
 
@@ -197,7 +205,7 @@ module WithParser(Parser : ParserType) = struct
    * of a TokenKind from kind_list, return the TokenKind that token_str is a
    * misspelling of. Otherwise, return None. *)
   let suggested_kind_from kind_list token_str =
-    Core.List.find_map kind_list ~f:(fun kind ->
+    Hh_core.List.find_map kind_list ~f:(fun kind ->
       if is_misspelled_kind kind token_str then Some kind else None)
 
   let skip_and_log_misspelled_token parser required_kind =
@@ -251,7 +259,7 @@ module WithParser(Parser : ParserType) = struct
 
   let next_xhp_category_name parser =
     let lexer = Parser.lexer parser in
-    let (lexer, token) = Parser.Lexer.next_xhp_category_name lexer in
+    let (lexer, token) = Lexer.next_xhp_category_name lexer in
     let parser = Parser.with_lexer parser lexer in
     (parser, token)
 
@@ -260,22 +268,22 @@ module WithParser(Parser : ParserType) = struct
      helper methods to deal with them. *)
 
   let is_next_name parser =
-    Parser.Lexer.is_next_name (Parser.lexer parser)
+    Lexer.is_next_name (Parser.lexer parser)
 
   let next_xhp_name parser =
     assert(is_next_name parser);
     let lexer = Parser.lexer parser in
-    let (lexer, token) = Parser.Lexer.next_xhp_name lexer in
+    let (lexer, token) = Lexer.next_xhp_name lexer in
     let parser = Parser.with_lexer parser lexer in
     (parser, token)
 
   let is_next_xhp_class_name parser =
-    Parser.Lexer.is_next_xhp_class_name (Parser.lexer parser)
+    Lexer.is_next_xhp_class_name (Parser.lexer parser)
 
   let next_xhp_class_name parser =
     assert(is_next_xhp_class_name parser);
     let lexer = Parser.lexer parser in
-    let (lexer, token) = Parser.Lexer.next_xhp_class_name lexer in
+    let (lexer, token) = Lexer.next_xhp_class_name lexer in
     let parser = Parser.with_lexer parser lexer in
     (parser, token)
 
@@ -304,7 +312,7 @@ module WithParser(Parser : ParserType) = struct
     else next_token parser
 
   let is_next_xhp_category_name parser =
-    Parser.Lexer.is_next_xhp_category_name (Parser.lexer parser)
+    Lexer.is_next_xhp_category_name (Parser.lexer parser)
 
   let next_xhp_children_name_or_other parser =
     if is_next_xhp_category_name parser then
@@ -444,7 +452,7 @@ module WithParser(Parser : ParserType) = struct
   let assert_token parser kind =
     let (parser, token) = next_token parser in
     let lexer = Parser.lexer parser in
-    let source = Parser.Lexer.source lexer in
+    let source = Lexer.source lexer in
     let file_path = SourceText.file_path source in
     if (Token.kind token) <> kind then
       failwith (Printf.sprintf "Expected token '%s' but got '%s'\n  in %s\n"
@@ -717,4 +725,10 @@ module WithParser(Parser : ParserType) = struct
     let (parser, items) = aux parser [] in
     (parser, make_list (List.rev items))
 
-end
+end (* WithParser *)
+end (* WithLexer *)
+end (* WithSyntax *)
+
+module MinimalParserSyntax = WithSyntax(Full_fidelity_minimal_syntax)
+module MinimalParserHelper = MinimalParserSyntax
+  .WithLexer(Full_fidelity_lexer.WithToken(Full_fidelity_minimal_token))

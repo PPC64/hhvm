@@ -15,7 +15,7 @@
  * 2- transform all the local names into a unique identifier
  *)
 open Ast
-open Core
+open Hh_core
 open Utils
 open String_utils
 
@@ -747,18 +747,8 @@ module Make (GetLocals : GetLocals) = struct
       is_static_var env h
 
   and shape_field_to_shape_field_info env { sf_optional; sf_name=_; sf_hint } =
-    (* TODO(t17492233): Remove this line once shapes use new syntax. *)
-    let sfi_optional =
-      if TypecheckerOptions.experimental_feature_enabled
-           (fst env).tcopt
-           TypecheckerOptions.experimental_promote_nullable_to_optional_in_shapes
-      then
-        match sf_hint with
-        | _, Hoption _ -> true
-        | _ -> sf_optional
-      else sf_optional in
     {
-      N.sfi_optional = sfi_optional;
+      N.sfi_optional = sf_optional;
       sfi_hint = hint env sf_hint;
     }
 
@@ -1057,12 +1047,24 @@ module Make (GetLocals : GetLocals) = struct
         (fun (pc,xc) -> if (x = xc) then Errors.shadowed_type_param p pc x)
     end
 
+  let check_tparams_constructor class_tparam_names constructor =
+    match constructor with
+    | None -> ()
+    | Some constr -> check_method_tparams class_tparam_names constr
+
   let check_tparams_shadow class_tparam_names methods =
     List.iter methods (check_method_tparams class_tparam_names)
 
   let check_break_continue_level p level_opt =
     if Option.is_some level_opt
     then Errors.break_continue_n_not_supported p
+
+  let ensure_name_not_dynamic env e err =
+    match e with
+    | (_, (Id _ | Lvar _)) -> ()
+    | (p, _) ->
+      if (fst env).in_mode = FileInfo.Mstrict
+      then err p
 
   (* Naming of a class *)
   let rec class_ nenv c =
@@ -1112,6 +1114,7 @@ module Make (GetLocals : GetLocals) = struct
       interface c constructor methods smethods in
     let class_tparam_names = List.map c.c_tparams (fun (_, x,_) -> x) in
     let enum = Option.map c.c_enum (enum_ env) in
+    check_tparams_constructor class_tparam_names constructor;
     check_name_collision methods;
     check_tparams_shadow class_tparam_names methods;
     check_name_collision smethods;
@@ -1450,9 +1453,12 @@ module Make (GetLocals : GetLocals) = struct
     | XhpCategory _ -> acc
     | XhpChild _ -> acc
     | Method m when snd m.m_name = SN.Members.__construct -> acc
-    | Method m when not (List.mem m.m_kind Static) ->
-      let genv = fst env in
-      method_ genv m :: acc
+    | Method m when not (List.mem m.m_kind Static) ->(
+      match (m.m_name, m.m_params) with
+        | ( (m_pos, m_name), _::_) when m_name = SN.Members.__clone ->
+            Errors.clone_too_many_arguments m_pos; acc
+        | _ -> let genv = fst env in method_ genv m :: acc
+      )
     | Method _ -> acc
     | TypeConst _ -> acc
 
@@ -1477,7 +1483,8 @@ module Make (GetLocals : GetLocals) = struct
     match e with
     | Unsafeexpr _ | Id _ | Null | True | False | Int _
     | Float _ | String _ -> ()
-    | Class_const ((_, cls), _) when cls <> "static" -> ()
+    | Class_const ((_, cls), _)
+      when (match cls with Id (_, "static") -> false | _ -> true) -> ()
     | Unop ((Uplus | Uminus | Utild | Unot), e) -> check_constant_expr env e
     | Binop (op, e1, e2) ->
       (* Only assignment is invalid *)
@@ -1636,6 +1643,7 @@ module Make (GetLocals : GetLocals) = struct
       N.m_ret             = ret         ;
       N.m_variadic        = variadicity ;
       N.m_user_attributes = attrs;
+      N.m_ret_by_ref      = m.m_ret_by_ref;
     }
 
   and kind (final, abs, vis) = function
@@ -1666,17 +1674,18 @@ module Make (GetLocals : GetLocals) = struct
         variadicity, x :: rl
 
   and fun_param env param =
-    let p, x = param.param_id in
-    let ident = Local_id.get x in
+    let p, name = param.param_id in
+    let ident = Local_id.get name in
     Env.add_lvar env param.param_id (p, ident);
     let ty = Option.map param.param_hint (hint env) in
     let eopt = Option.map param.param_expr (expr env) in
     { N.param_hint = ty;
       param_is_reference = param.param_is_reference;
       param_is_variadic = param.param_is_variadic;
-      param_pos = fst param.param_id;
-      param_name = snd param.param_id;
+      param_pos = p;
+      param_name = name;
       param_expr = eopt;
+      param_callconv = param.param_callconv;
     }
 
   and make_constraints paraml =
@@ -1728,6 +1737,7 @@ module Make (GetLocals : GetLocals) = struct
       f_fun_kind = f_kind;
       f_variadic = variadicity;
       f_user_attributes = user_attributes env f.f_user_attributes;
+      f_ret_by_ref = f.f_ret_by_ref;
     } in
     Naming_hooks.dispatch_fun_named_hook named_fun;
     named_fun
@@ -1764,6 +1774,7 @@ module Make (GetLocals : GetLocals) = struct
     | If (e, b1, b2)       -> if_stmt env st e b1 b2
     | Do (b, e)            -> do_stmt env b e
     | While (e, b)         -> while_stmt env e b
+    | Using (has_await, e, b) -> using_stmt env has_await e b
     | For (st1, e, st2, b) -> for_stmt env st1 e st2 b
     | Switch (e, cl)       -> switch_stmt env st e cl
     | Foreach (e, aw, ae, b)-> foreach_stmt env e aw ae b
@@ -1825,6 +1836,13 @@ module Make (GetLocals : GetLocals) = struct
   and while_stmt env e b =
     let e = expr env e in
     N.While (e, block env b)
+
+  and using_stmt env has_await e b =
+    let e = expr env e in
+    Env.scope env (
+      fun env ->
+        N.Using (has_await, e, block env b)
+    )
 
   and for_stmt env e1 e2 e3 b =
     let e1 = expr env e1 in
@@ -2042,21 +2060,25 @@ module Make (GetLocals : GetLocals) = struct
         let id = p, N.Lvar (Env.lvar env x) in
         N.Array_get (id, None)
     | Array_get (e1, e2) -> N.Array_get (expr env e1, oexpr env e2)
-    | Class_get (x1, (_, Id x2)) ->
+    | Class_get ((_, (Id x1 | Lvar x1)), (_, (Id x2 | Lvar x2))) ->
       N.Class_get (make_class_id env x1 [], x2)
-    | Class_get (x1, (_, Lvar x2)) ->
-      N.Class_get (make_class_id env x1 [], x2)
-    | Class_get _ ->
-      if (fst env).in_mode = FileInfo.Mstrict
-      then Errors.dynamic_class_property_name_in_strict_mode p;
+    | Class_get (x1, x2) ->
+      ensure_name_not_dynamic env x1
+        Errors.dynamic_class_name_in_strict_mode;
+      ensure_name_not_dynamic env x2
+        Errors.dynamic_class_property_name_in_strict_mode;
       N.Any
-    | Class_const (x1, x2) ->
+    | Class_const ((_, Id x1), x2)
+    | Class_const ((_, Lvar x1), x2) ->
       let (genv, _) = env in
       let (_, name) = NS.elaborate_id genv.namespace NS.ElaborateClass x1 in
       if GEnv.typedef_pos (genv.tcopt) name <> None && (snd x2) = "class" then
         N.Typename (Env.type_name env x1 ~allow_typedef:true)
       else
         N.Class_const (make_class_id env x1 [], x2)
+    | Class_const _ ->
+      (* TODO: report error in strict mode *)
+      N.Any
     | Call ((_, Id (p, pseudo_func)), hl, el, uel)
         when pseudo_func = SN.SpecialFunctions.echo ->
         arg_unpack_unexpected uel ;
@@ -2308,6 +2330,10 @@ module Make (GetLocals : GetLocals) = struct
     | InstanceOf (_e1, (p, _)) ->
       Errors.invalid_instanceof p;
       N.Any
+    | Is (e, h) ->
+      let e1 = expr env e in
+      let h1 = hint env h in
+      N.Is (e1, h1)
     | New ((_, Id_type_arguments (x, hl)), el, uel) ->
       N.New (make_class_id env x hl,
         exprl env el,
@@ -2377,6 +2403,8 @@ module Make (GetLocals : GetLocals) = struct
       N.Any
     | Omitted ->
       N.Any
+    | Callconv (kind, e) ->
+      N.Callconv (kind, expr env e)
 
   and expr_lambda env f =
     let h = Option.map f.f_ret (hint ~allow_retonly:true env) in
@@ -2405,6 +2433,7 @@ module Make (GetLocals : GetLocals) = struct
       f_fun_kind = f_kind;
       f_variadic = variadicity;
       f_user_attributes = user_attributes env f.f_user_attributes;
+      f_ret_by_ref = f.f_ret_by_ref;
     }
 
   and make_class_id env (p, x as cid) hl =

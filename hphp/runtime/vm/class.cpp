@@ -28,6 +28,7 @@
 #include "hphp/runtime/vm/instance-bits.h"
 #include "hphp/runtime/vm/native-data.h"
 #include "hphp/runtime/vm/native-prop-handler.h"
+#include "hphp/runtime/vm/unit-util.h"
 #include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/runtime/vm/treadmill.h"
 
@@ -41,6 +42,7 @@
 #include "hphp/util/logger.h"
 
 #include <folly/Bits.h>
+#include <folly/MapUtil.h>
 #include <folly/Optional.h>
 
 #include <algorithm>
@@ -148,6 +150,8 @@ namespace {
 unsigned loadUsedTraits(PreClass* preClass,
                         std::vector<ClassPtr>& usedTraits) {
   unsigned methodCount = 0;
+
+  auto const traitsFlattened = !!(preClass->attrs() & AttrNoExpandTrait);
   for (auto const& traitName : preClass->usedTraits()) {
     Class* classPtr = Unit::loadClass(traitName);
     if (classPtr == nullptr) {
@@ -159,13 +163,13 @@ unsigned loadUsedTraits(PreClass* preClass,
                   classPtr->name()->data());
     }
 
-    if (RuntimeOption::RepoAuthoritative) {
+    if (traitsFlattened) {
       // In RepoAuthoritative mode (with the WholeProgram compiler
-      // optimizations), the contents of traits are flattened away into the
-      // preClasses of "use"r classes. Continuing here allows us to avoid
-      // unnecessarily attempting to re-import trait methods and
-      // properties, only to fail due to (surprise surprise!) the same
-      // method/property existing on m_preClass.
+      // optimizations), the contents of traits can be flattened into
+      // the preClasses of "use"r classes. Continuing here allows us
+      // to avoid unnecessarily attempting to re-import trait methods
+      // and properties, only to fail due to (surprise surprise!) the
+      // same method/property existing on m_preClass.
       continue;
     }
 
@@ -174,11 +178,11 @@ unsigned loadUsedTraits(PreClass* preClass,
 
   }
 
-  if (!RuntimeOption::RepoAuthoritative) {
+  if (!traitsFlattened) {
     // Trait aliases can increase method count. Get an estimate of the
     // number of aliased functions. This doesn't need to be done in
-    // RepoAuthoritative mode due to trait flattening ensuring that added
-    // methods are already present in the preclass.
+    // classes with flattened traits because those methods are already
+    // present in the preclass.
     for (auto const& rule : preClass->traitAliasRules()) {
       auto origName = rule.origMethodName();
       auto newName = rule.newMethodName();
@@ -222,11 +226,7 @@ Class* Class::newClass(PreClass* preClass, Class* parent) {
 
   std::vector<ClassPtr> usedTraits;
   auto numTraitMethodsEstimate = loadUsedTraits(preClass, usedTraits);
-  // In RepoAuthoritative mode, trait methods are already flattened
-  // into the preClass, so we don't need to add in the estimate here.
-  if (!RuntimeOption::RepoAuthoritative) {
-    funcVecLen += numTraitMethodsEstimate;
-  }
+  funcVecLen += numTraitMethodsEstimate;
 
   // We need to pad this allocation so that the actual start of the Class is
   // 8-byte aligned.
@@ -1348,11 +1348,7 @@ void Class::setParent() {
   }
 
   // Handle stuff specific to cppext classes
-  if (m_preClass->instanceCtor()) {
-    allocExtraData();
-    m_extra.raw()->m_instanceCtor = m_preClass->instanceCtor();
-    m_extra.raw()->m_instanceDtor = m_preClass->instanceDtor();
-  } else if (m_parent.get() && m_parent->m_extra->m_instanceCtor) {
+  if (m_parent.get() && m_parent->m_extra->m_instanceCtor) {
     allocExtraData();
     m_extra.raw()->m_instanceCtor = m_parent->m_extra->m_instanceCtor;
     m_extra.raw()->m_instanceDtor = m_parent->m_extra->m_instanceDtor;
@@ -1422,6 +1418,10 @@ void Class::setSpecial() {
   auto matchedClassOrIsTrait = [this](const StringData* sd) {
     auto func = lookupMethod(sd);
     if (func && func->cls() == this) {
+      if (func->takesInOutParams() || func->isInOutWrapper()) {
+        raise_error("Parameters may not be marked inout on constructors");
+      }
+
       m_ctor = func;
       return true;
     }
@@ -1527,6 +1527,69 @@ static bool checkTypeConstraint(const PreClass* implCls, const Class* iface,
   return tc.compat(itc);
 }
 
+inline void checkRefCompat(const char* kind, const Func* self,
+                           const Func* inherit) {
+  // Shadowing is okay, if we inherit a private method we can't access it
+  // anyway.
+  if (inherit->attrs() & AttrPrivate) return;
+
+  // Because of name mangling inout functions should only have the same names as
+  // other inout functions.
+  assert(self->takesInOutParams() == inherit->takesInOutParams());
+
+  // Inout functions have the parameter offsets of their inout parameters
+  // mangled into their names, so doing this check on them would be meaningless,
+  // instead we will check their wrappers.
+  if (self->takesInOutParams()) {
+    // When reffiness invariance is disabled we cannot create wrappers for ref
+    // functions, as those wrappers would violate our invariance rules for inout
+    // functions.
+    assert(RuntimeOption::EvalReffinessInvariance || !self->isInOutWrapper());
+    return;
+  }
+
+  // When ReffinessInvariance is set we check the invariance of all functions,
+  // otherwise we only check the reffiness of functions which wrap inout
+  // inout functions.
+  if (!RuntimeOption::EvalReffinessInvariance) {
+    if (!self->isInOutWrapper() && !inherit->isInOutWrapper()) return;
+  } else {
+    if (!self->anyByRef() && !inherit->anyByRef()) return;
+  }
+
+  auto const sname = self->fullDisplayName()->data();
+  auto const iname = inherit->fullDisplayName()->data();
+  auto const max = std::max(
+    self->numNonVariadicParams(),
+    inherit->numNonVariadicParams()
+  );
+
+  auto const both_wrap = self->isInOutWrapper() == inherit->isInOutWrapper();
+
+  for (int i = 0; i < max; ++i) {
+    // Since we're looking at ref wrappers of inout functions we need to check
+    // byRef, but if one of the functions isn't a wrapper we do actually have
+    // a mismatch.
+    auto const smode = self->byRef(i);
+    auto const imode = inherit->byRef(i);
+    if (smode != imode || (smode && !both_wrap)) {
+      if (smode && (!imode || self->isInOutWrapper() || both_wrap)) {
+        auto const sdecl = self->isInOutWrapper() ? "inout " : "'&' ";
+        auto const idecl = i >= inherit->numNonVariadicParams() ? "" : sdecl;
+        raise_error("Parameter %i on function %s was declared %sbut is not "
+                    "declared %son %s function %s", i + 1, sname, sdecl, idecl,
+                    kind, iname);
+      } else {
+        auto const idecl = inherit->isInOutWrapper() ? "inout " : "'&' ";
+        auto const sdecl = i >= self->numNonVariadicParams() ? "" : idecl;
+        raise_error("Parameter %i on function %s was not declared %sbut is "
+                    "declared %son %s function %s", i + 1, sname, sdecl, idecl,
+                    kind, iname);
+      }
+    }
+  }
+}
+
 // Check compatibility vs interface and abstract declarations
 void checkDeclarationCompat(const PreClass* preClass,
                             const Func* func, const Func* imeth) {
@@ -1614,6 +1677,12 @@ void checkDeclarationCompat(const PreClass* preClass,
       }
     }
   }
+
+  checkRefCompat(
+    imeth->attrs() & AttrAbstract ? "abstract" : "interface",
+    func,
+    imeth
+  );
 }
 
 } // namespace
@@ -1696,6 +1765,8 @@ void Class::methodOverrideCheck(const Func* parentMethod, const Func* method) {
   if (!(method->attrs() & AttrAbstract) &&
       (baseMethod->attrs() & AttrAbstract)) {
     checkDeclarationCompat(m_preClass.get(), method, baseMethod);
+  } else {
+    checkRefCompat("parent", method, parentMethod);
   }
 }
 
@@ -1716,7 +1787,7 @@ void Class::setMethods() {
         // static locals, we want to make a copy of the Func so that it
         // gets a distinct set of static locals variables. We defer making
         // a copy of the parent method until the end because it might get
-        // overriden below.
+        // overridden below.
         parentMethodsWithStaticLocals.push_back(i);
       }
       assert(builder.size() == i);
@@ -2120,11 +2191,10 @@ void Class::setProperties() {
   }
 
   Slot traitIdx = m_preClass->numProperties();
-  if (RuntimeOption::RepoAuthoritative) {
-    for (auto const& traitName : m_preClass->usedTraits()) {
-      Class* classPtr = Unit::loadClass(traitName);
-      traitIdx -= classPtr->m_declProperties.size() +
-                  classPtr->m_staticProperties.size();
+  if (m_preClass->attrs() & AttrNoExpandTrait) {
+    while (traitIdx &&
+           (m_preClass->properties()[traitIdx - 1].attrs() & AttrTrait)) {
+      traitIdx--;
     }
   }
 
@@ -2170,7 +2240,7 @@ void Class::setProperties() {
         prop.name                = preProp->name();
         prop.mangledName         = preProp->mangledName();
         prop.originalMangledName = preProp->mangledName();
-        prop.attrs               = preProp->attrs();
+        prop.attrs               = Attr(preProp->attrs() & ~AttrTrait);
         // This is the first class to declare this property
         prop.cls                 = this;
         prop.typeConstraint      = preProp->typeConstraint();
@@ -2437,7 +2507,7 @@ void Class::importTraitStaticProp(Class* /*trait*/, SProp& traitProp,
 
       prevPropVal = prevSProps[prevPropInd].val;
     }
-    if (prevProp.attrs != traitProp.attrs ||
+    if ((prevProp.attrs ^ traitProp.attrs) & ~AttrPersistent ||
         !compatibleTraitPropInit(traitProp.val, prevPropVal)) {
       raise_error("trait declaration of property '%s' is incompatible with "
                   "previous declaration", traitProp.name->data());
@@ -2729,7 +2799,11 @@ void Class::setInterfaceVtables() {
     auto const nMethods = iface->numMethods();
     auto const vtable = reinterpret_cast<LowPtr<Func>*>(cursor);
     cursor += nMethods * sizeof(LowPtr<Func>);
-    always_assert(vtableVec[slot].vtable == nullptr);
+    if (vtableVec[slot].vtable != nullptr) {
+      raise_error("Static analysis failure: "
+                  "%s was expected to fatal at runtime, but didn't",
+                  m_preClass->name()->data());
+    }
     vtableVec[slot].vtable = vtable;
     vtableVec[slot].iface = iface;
 
@@ -2797,9 +2871,9 @@ void Class::setRequirements() {
       }
       addReq(&req);
     }
-  } else if (attrs() & AttrTrait || RuntimeOption::RepoAuthoritative) {
+  } else if (attrs() & (AttrTrait | AttrNoExpandTrait)) {
     // Check that requirements are semantically valid.
-    // Note that in repo-auth mode, trait flatening could have migrated
+    // Note that trait flattening could have migrated
     // requirements onto a class's preClass.
     for (auto const& req : m_preClass->requirements()) {
       auto const reqName = req.name();
@@ -2879,7 +2953,7 @@ void Class::raiseUnsatisfiedRequirement(const PreClass::ClassRequirement* req)  
   if (req->is_implements()) {
     // "require implements" is only allowed on traits.
 
-    assert(RuntimeOption::RepoAuthoritative ||
+    assert(attrs() & AttrNoExpandTrait ||
            (m_extra && m_extra->m_usedTraits.size() > 0));
     for (auto const& traitCls : m_extra->m_usedTraits) {
       if (traitCls->allRequirements().contains(reqName)) {
@@ -2890,7 +2964,7 @@ void Class::raiseUnsatisfiedRequirement(const PreClass::ClassRequirement* req)  
       }
     }
 
-    if (RuntimeOption::RepoAuthoritative) {
+    if (attrs() & AttrNoExpandTrait) {
       // As a result of trait flattening, the PreClass of this normal class
       // contains a requirement. To save space, we don't include the source
       // trait in the requirement. For details, see
@@ -2927,7 +3001,7 @@ void Class::raiseUnsatisfiedRequirement(const PreClass::ClassRequirement* req)  
     }
   }
 
-  if (RuntimeOption::RepoAuthoritative) {
+  if (attrs() & AttrNoExpandTrait) {
     // A result of trait flattening, as with the is_implements case above
     assert(!m_extra || m_extra->m_usedTraits.size() == 0);
     assert(m_preClass->requirements().size() > 0);
@@ -3174,12 +3248,31 @@ void Class::importTraitMethod(const TMIData::MethodData& mdata,
 void Class::importTraitMethods(MethodMapBuilder& builder) {
   TMIData tmid;
 
+  // For inout functions we cannot apply the trait aliasing rules (as their
+  // names have been mangled). All of these functions must either be wrappers
+  // for unmangled by-ref functions, or having unmangled wrappers, and so we
+  // retain a map of unmangled function -> mangled inout wrapper. After the
+  // trait rules have been applied to all unmangled functions we use the map
+  // to apply the same modifications to both the mangled and unmangled forms
+  // of each inout function.
+
+  // Map of ref wrapper -> inout function
+  std::unordered_map<const Func*, Func*> inoutFunctions;
+
   // Find all methods to be imported.
   for (auto const& t : m_extra->m_usedTraits) {
     Class* trait = t.get();
     for (Slot i = 0; i < trait->m_methods.size(); ++i) {
       Func* method = trait->getMethod(i);
       const StringData* methName = method->name();
+
+      if (method->takesInOutParams()) {
+        auto const wrapper = trait->lookupMethod(stripInOutSuffix(methName));
+        assert(wrapper);
+
+        inoutFunctions.emplace(wrapper, method);
+        continue; // Don't apply any trait rules to the inout function
+      }
 
       TraitMethod traitMethod { trait, method, method->attrs() };
       tmid.add(traitMethod, methName);
@@ -3190,9 +3283,26 @@ void Class::importTraitMethods(MethodMapBuilder& builder) {
   applyTraitRules(tmid);
   auto traitMethods = tmid.finish(this);
 
+  auto getSuffix = [] (const StringData* name) {
+    auto start = name->data() + name->size() - sizeof(kInOutSuffix);
+    for (; *start != '$'; --start) assert(start != name->data());
+    return folly::StringPiece(start, name->size() - (start - name->data()));
+  };
+
   // Import the methods.
   for (auto const& mdata : traitMethods) {
     importTraitMethod(mdata, builder);
+
+    if (auto io = folly::get_default(inoutFunctions, mdata.tm.method)) {
+      auto const sfx = getSuffix(io->name());
+      auto tm = mdata.tm;
+      tm.method = io;
+      auto ioData = TMIData::MethodData {
+        makeStaticString(folly::to<std::string>(mdata.name->data(), sfx)),
+        tm
+      };
+      importTraitMethod(ioData, builder);
+    }
   }
 }
 

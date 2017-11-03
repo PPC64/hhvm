@@ -64,7 +64,7 @@ struct c_Closure final : ObjectData {
    * Update that method if this assumption changes.
    */
   explicit c_Closure(Class* cls)
-    : ObjectData(cls, HasClone, HeaderKind::Closure) {
+    : ObjectData(cls, 0, HeaderKind::Closure) {
     // hdr()->ctx must be initialized by init() or the TC.
     if (debug) setThis(reinterpret_cast<ObjectData*>(-uintptr_t(1)));
   }
@@ -99,10 +99,10 @@ struct c_Closure final : ObjectData {
   /*
    * Use and static local variables.
    *
-   * Returns obj->propVec()
+   * Returns obj->propVecForWrite()
    * but with runtime generalized checks replaced with assertions
    */
-  TypedValue* getUseVars() { return propVec(); }
+  TypedValue* getUseVars() { return propVecForWrite(); }
 
   TypedValue* getStaticVar(Slot s) {
     assertx(getVMClass()->numDeclProperties() > s);

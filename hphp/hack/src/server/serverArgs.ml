@@ -101,12 +101,12 @@ let parse_mini_state_json (json, _keytrace) =
       let changes = List.fold_left
         (fun acc file -> (Hh_json.get_string_exn file) :: acc) [] changes in
       let changes = List.map Relative_path.from_root changes in
-      return {
+      return (Mini_state_target_info {
         saved_state_fn = state;
         corresponding_base_revision = for_base_rev;
         deptable_fn = deptable;
         changes = changes;
-      }
+      })
 
 let verify_with_mini_state v = match !v with
   | None -> None
@@ -129,8 +129,8 @@ let verify_with_mini_state v = match !v with
           >>= parse_mini_state_json
     in
     match
-      (Result.ok_fst data_dump_parse_result),
-      (Result.ok_fst from_file_parse_result) with
+      (Core_result.ok_fst data_dump_parse_result),
+      (Core_result.ok_fst from_file_parse_result) with
     | (`Fst (parsed_data_dump, _)), (`Fst (_parsed_from_file, _)) ->
       Hh_logger.log "Warning - %s"
         ("Parsed mini state target from both JSON blob data dump" ^
@@ -293,3 +293,9 @@ let debug_client options = options.debug_client
 (*****************************************************************************)
 
 let set_no_load options is_no_load = {options with no_load = is_no_load}
+let set_mini_state_target options target = match target with
+  | None -> options
+  | Some target ->
+    { options with
+      with_mini_state = Some (Informant_induced_mini_state_target target)
+    }

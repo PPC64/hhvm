@@ -40,6 +40,8 @@ type local_env = {
   fake_members       : fake_members;
   local_types        : local_types;
   local_type_history : local_history Local_id.Map.t;
+  (* Local variables that were assigned in a `using` clause *)
+  local_using_vars   : Local_id.Set.t;
   (* Type parameter environment
    * Lower and upper bounds on generic type parameters and abstract types
    * For constraints of the form Tu <: Tv where both Tu and Tv are type
@@ -66,7 +68,9 @@ type env = {
 
 and genv = {
   tcopt   : TypecheckerOptions.t;
-  return  : locl ty;
+  return  : locl ty * bool (* use as contextual type *);
+  (* For each function parameter, its type and calling convention. *)
+  params  : (locl ty * param_mode) Local_id.Map.t;
   parent_id : string;
   parent  : decl ty;
   (* Identifier of the enclosing class *)

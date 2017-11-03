@@ -1,5 +1,5 @@
 (* @generated from ast_defs.src.ml by hphp/hack/tools/ppx/ppx_gen. *)
-(* SourceShasum<<7fa441a303446d919ae954f72b09406785402be6>> *)
+(* SourceShasum<<1630fb13c3d3f2a93bdf3c568525edbedf9a889e>> *)
 
 (* DO NOT EDIT MANUALLY. *)
 [@@@ocaml.text
@@ -20,7 +20,7 @@ let rec (pp_cst_kind :
 and show_cst_kind : cst_kind -> Ppx_deriving_runtime.string =
   fun x  -> Format.asprintf "%a" pp_cst_kind x
 
-type id = (Pos.t* string)[@@deriving show]
+type id = (Pos.t * string)[@@deriving show]
 let rec pp_id : Format.formatter -> id -> Ppx_deriving_runtime.unit =
   let __0 () = Pos.pp  in
   ((let open! Ppx_deriving_runtime in
@@ -36,7 +36,7 @@ let rec pp_id : Format.formatter -> id -> Ppx_deriving_runtime.unit =
 and show_id : id -> Ppx_deriving_runtime.string =
   fun x  -> Format.asprintf "%a" pp_id x
 
-type pstring = (Pos.t* string)[@@deriving show]
+type pstring = (Pos.t * string)[@@deriving show]
 let rec pp_pstring : Format.formatter -> pstring -> Ppx_deriving_runtime.unit
   =
   let __0 () = Pos.pp  in
@@ -172,6 +172,18 @@ let rec (pp_kind : Format.formatter -> kind -> Ppx_deriving_runtime.unit) =
 and show_kind : kind -> Ppx_deriving_runtime.string =
   fun x  -> Format.asprintf "%a" pp_kind x
 
+type param_kind =
+  | Pinout [@@deriving show]
+let rec (pp_param_kind :
+          Format.formatter -> param_kind -> Ppx_deriving_runtime.unit)
+  =
+  ((let open! Ppx_deriving_runtime in
+      fun fmt  -> function | Pinout  -> Format.pp_print_string fmt "Pinout")
+  [@ocaml.warning "-A"])
+
+and show_param_kind : param_kind -> Ppx_deriving_runtime.string =
+  fun x  -> Format.asprintf "%a" pp_param_kind x
+
 type og_null_flavor =
   | OG_nullthrows 
   | OG_nullsafe [@@deriving show]
@@ -230,7 +242,7 @@ and show_fun_kind : fun_kind -> Ppx_deriving_runtime.string =
 
 type shape_field_name =
   | SFlit of pstring 
-  | SFclass_const of id* pstring [@@deriving show]
+  | SFclass_const of id * pstring [@@deriving show]
 let rec pp_shape_field_name :
   Format.formatter -> shape_field_name -> Ppx_deriving_runtime.unit =
   let __2 () = pp_pstring
@@ -369,6 +381,7 @@ let string_of_kind =
   | Private  -> "private"
   | Public  -> "public"
   | Protected  -> "protected" 
+let string_of_param_kind = function | Pinout  -> "inout" 
 module ShapeField =
   struct
     type t = shape_field_name
@@ -383,7 +396,7 @@ module ShapeField =
   end
 module ShapeMap =
   struct
-    include MyMap.Make(ShapeField)
+    include (MyMap.Make)(ShapeField)
     let map_and_rekey m f1 f2 =
       fold (fun k  -> fun v  -> fun acc  -> add (f1 k) (f2 v) acc) m empty 
     let pp _ fmt _ = Format.pp_print_string fmt "[ShapeMap]" 

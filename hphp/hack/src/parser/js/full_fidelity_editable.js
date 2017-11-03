@@ -14,8 +14,6 @@
  *
  *   buck run //hphp/hack/src:generate_full_fidelity
  *
- * This module contains the type describing the structure of a syntax tree.
- *
  **
  *
  */
@@ -267,6 +265,8 @@ class EditableSyntax
       return BinaryExpression.from_json(json, position, source);
     case 'instanceof_expression':
       return InstanceofExpression.from_json(json, position, source);
+    case 'is_expression':
+      return IsExpression.from_json(json, position, source);
     case 'conditional_expression':
       return ConditionalExpression.from_json(json, position, source);
     case 'eval_expression':
@@ -780,6 +780,8 @@ class EditableToken extends EditableSyntax
        return new IncludeToken(leading, trailing);
     case 'include_once':
        return new Include_onceToken(leading, trailing);
+    case 'inout':
+       return new InoutToken(leading, trailing);
     case 'instanceof':
        return new InstanceofToken(leading, trailing);
     case 'insteadof':
@@ -788,6 +790,8 @@ class EditableToken extends EditableSyntax
        return new IntToken(leading, trailing);
     case 'interface':
        return new InterfaceToken(leading, trailing);
+    case 'is':
+       return new IsToken(leading, trailing);
     case 'isset':
        return new IssetToken(leading, trailing);
     case 'keyset':
@@ -1483,6 +1487,13 @@ class Include_onceToken extends EditableToken
     super('include_once', leading, trailing, 'include_once');
   }
 }
+class InoutToken extends EditableToken
+{
+  constructor(leading, trailing)
+  {
+    super('inout', leading, trailing, 'inout');
+  }
+}
 class InstanceofToken extends EditableToken
 {
   constructor(leading, trailing)
@@ -1509,6 +1520,13 @@ class InterfaceToken extends EditableToken
   constructor(leading, trailing)
   {
     super('interface', leading, trailing, 'interface');
+  }
+}
+class IsToken extends EditableToken
+{
+  constructor(leading, trailing)
+  {
+    super('is', leading, trailing, 'is');
   }
 }
 class IssetToken extends EditableToken
@@ -6474,6 +6492,7 @@ class ParameterDeclaration extends EditableSyntax
   constructor(
     attribute,
     visibility,
+    call_convention,
     type,
     name,
     default_value)
@@ -6481,12 +6500,14 @@ class ParameterDeclaration extends EditableSyntax
     super('parameter_declaration', {
       attribute: attribute,
       visibility: visibility,
+      call_convention: call_convention,
       type: type,
       name: name,
       default_value: default_value });
   }
   get attribute() { return this.children.attribute; }
   get visibility() { return this.children.visibility; }
+  get call_convention() { return this.children.call_convention; }
   get type() { return this.children.type; }
   get name() { return this.children.name; }
   get default_value() { return this.children.default_value; }
@@ -6494,6 +6515,7 @@ class ParameterDeclaration extends EditableSyntax
     return new ParameterDeclaration(
       attribute,
       this.visibility,
+      this.call_convention,
       this.type,
       this.name,
       this.default_value);
@@ -6502,6 +6524,16 @@ class ParameterDeclaration extends EditableSyntax
     return new ParameterDeclaration(
       this.attribute,
       visibility,
+      this.call_convention,
+      this.type,
+      this.name,
+      this.default_value);
+  }
+  with_call_convention(call_convention){
+    return new ParameterDeclaration(
+      this.attribute,
+      this.visibility,
+      call_convention,
       this.type,
       this.name,
       this.default_value);
@@ -6510,6 +6542,7 @@ class ParameterDeclaration extends EditableSyntax
     return new ParameterDeclaration(
       this.attribute,
       this.visibility,
+      this.call_convention,
       type,
       this.name,
       this.default_value);
@@ -6518,6 +6551,7 @@ class ParameterDeclaration extends EditableSyntax
     return new ParameterDeclaration(
       this.attribute,
       this.visibility,
+      this.call_convention,
       this.type,
       name,
       this.default_value);
@@ -6526,6 +6560,7 @@ class ParameterDeclaration extends EditableSyntax
     return new ParameterDeclaration(
       this.attribute,
       this.visibility,
+      this.call_convention,
       this.type,
       this.name,
       default_value);
@@ -6538,12 +6573,14 @@ class ParameterDeclaration extends EditableSyntax
     new_parents.push(this);
     var attribute = this.attribute.rewrite(rewriter, new_parents);
     var visibility = this.visibility.rewrite(rewriter, new_parents);
+    var call_convention = this.call_convention.rewrite(rewriter, new_parents);
     var type = this.type.rewrite(rewriter, new_parents);
     var name = this.name.rewrite(rewriter, new_parents);
     var default_value = this.default_value.rewrite(rewriter, new_parents);
     if (
       attribute === this.attribute &&
       visibility === this.visibility &&
+      call_convention === this.call_convention &&
       type === this.type &&
       name === this.name &&
       default_value === this.default_value)
@@ -6555,6 +6592,7 @@ class ParameterDeclaration extends EditableSyntax
       return rewriter(new ParameterDeclaration(
         attribute,
         visibility,
+        call_convention,
         type,
         name,
         default_value), parents);
@@ -6568,6 +6606,9 @@ class ParameterDeclaration extends EditableSyntax
     let visibility = EditableSyntax.from_json(
       json.parameter_visibility, position, source);
     position += visibility.width;
+    let call_convention = EditableSyntax.from_json(
+      json.parameter_call_convention, position, source);
+    position += call_convention.width;
     let type = EditableSyntax.from_json(
       json.parameter_type, position, source);
     position += type.width;
@@ -6580,6 +6621,7 @@ class ParameterDeclaration extends EditableSyntax
     return new ParameterDeclaration(
         attribute,
         visibility,
+        call_convention,
         type,
         name,
         default_value);
@@ -6590,6 +6632,7 @@ class ParameterDeclaration extends EditableSyntax
       ParameterDeclaration._children_keys = [
         'attribute',
         'visibility',
+        'call_convention',
         'type',
         'name',
         'default_value'];
@@ -6599,14 +6642,23 @@ class ParameterDeclaration extends EditableSyntax
 class VariadicParameter extends EditableSyntax
 {
   constructor(
+    type,
     ellipsis)
   {
     super('variadic_parameter', {
+      type: type,
       ellipsis: ellipsis });
   }
+  get type() { return this.children.type; }
   get ellipsis() { return this.children.ellipsis; }
+  with_type(type){
+    return new VariadicParameter(
+      type,
+      this.ellipsis);
+  }
   with_ellipsis(ellipsis){
     return new VariadicParameter(
+      this.type,
       ellipsis);
   }
   rewrite(rewriter, parents)
@@ -6615,8 +6667,10 @@ class VariadicParameter extends EditableSyntax
       parents = [];
     let new_parents = parents.slice();
     new_parents.push(this);
+    var type = this.type.rewrite(rewriter, new_parents);
     var ellipsis = this.ellipsis.rewrite(rewriter, new_parents);
     if (
+      type === this.type &&
       ellipsis === this.ellipsis)
     {
       return rewriter(this, parents);
@@ -6624,21 +6678,27 @@ class VariadicParameter extends EditableSyntax
     else
     {
       return rewriter(new VariadicParameter(
+        type,
         ellipsis), parents);
     }
   }
   static from_json(json, position, source)
   {
+    let type = EditableSyntax.from_json(
+      json.variadic_parameter_type, position, source);
+    position += type.width;
     let ellipsis = EditableSyntax.from_json(
       json.variadic_parameter_ellipsis, position, source);
     position += ellipsis.width;
     return new VariadicParameter(
+        type,
         ellipsis);
   }
   get children_keys()
   {
     if (VariadicParameter._children_keys == null)
       VariadicParameter._children_keys = [
+        'type',
         'ellipsis'];
     return VariadicParameter._children_keys;
   }
@@ -12539,6 +12599,89 @@ class InstanceofExpression extends EditableSyntax
         'operator',
         'right_operand'];
     return InstanceofExpression._children_keys;
+  }
+}
+class IsExpression extends EditableSyntax
+{
+  constructor(
+    left_operand,
+    operator,
+    right_operand)
+  {
+    super('is_expression', {
+      left_operand: left_operand,
+      operator: operator,
+      right_operand: right_operand });
+  }
+  get left_operand() { return this.children.left_operand; }
+  get operator() { return this.children.operator; }
+  get right_operand() { return this.children.right_operand; }
+  with_left_operand(left_operand){
+    return new IsExpression(
+      left_operand,
+      this.operator,
+      this.right_operand);
+  }
+  with_operator(operator){
+    return new IsExpression(
+      this.left_operand,
+      operator,
+      this.right_operand);
+  }
+  with_right_operand(right_operand){
+    return new IsExpression(
+      this.left_operand,
+      this.operator,
+      right_operand);
+  }
+  rewrite(rewriter, parents)
+  {
+    if (parents == undefined)
+      parents = [];
+    let new_parents = parents.slice();
+    new_parents.push(this);
+    var left_operand = this.left_operand.rewrite(rewriter, new_parents);
+    var operator = this.operator.rewrite(rewriter, new_parents);
+    var right_operand = this.right_operand.rewrite(rewriter, new_parents);
+    if (
+      left_operand === this.left_operand &&
+      operator === this.operator &&
+      right_operand === this.right_operand)
+    {
+      return rewriter(this, parents);
+    }
+    else
+    {
+      return rewriter(new IsExpression(
+        left_operand,
+        operator,
+        right_operand), parents);
+    }
+  }
+  static from_json(json, position, source)
+  {
+    let left_operand = EditableSyntax.from_json(
+      json.is_left_operand, position, source);
+    position += left_operand.width;
+    let operator = EditableSyntax.from_json(
+      json.is_operator, position, source);
+    position += operator.width;
+    let right_operand = EditableSyntax.from_json(
+      json.is_right_operand, position, source);
+    position += right_operand.width;
+    return new IsExpression(
+        left_operand,
+        operator,
+        right_operand);
+  }
+  get children_keys()
+  {
+    if (IsExpression._children_keys == null)
+      IsExpression._children_keys = [
+        'left_operand',
+        'operator',
+        'right_operand'];
+    return IsExpression._children_keys;
   }
 }
 class ConditionalExpression extends EditableSyntax
@@ -18741,10 +18884,12 @@ exports.IfToken = IfToken;
 exports.ImplementsToken = ImplementsToken;
 exports.IncludeToken = IncludeToken;
 exports.Include_onceToken = Include_onceToken;
+exports.InoutToken = InoutToken;
 exports.InstanceofToken = InstanceofToken;
 exports.InsteadofToken = InsteadofToken;
 exports.IntToken = IntToken;
 exports.InterfaceToken = InterfaceToken;
+exports.IsToken = IsToken;
 exports.IssetToken = IssetToken;
 exports.KeysetToken = KeysetToken;
 exports.ListToken = ListToken;
@@ -18990,6 +19135,7 @@ exports.PrefixUnaryExpression = PrefixUnaryExpression;
 exports.PostfixUnaryExpression = PostfixUnaryExpression;
 exports.BinaryExpression = BinaryExpression;
 exports.InstanceofExpression = InstanceofExpression;
+exports.IsExpression = IsExpression;
 exports.ConditionalExpression = ConditionalExpression;
 exports.EvalExpression = EvalExpression;
 exports.EmptyExpression = EmptyExpression;

@@ -265,7 +265,8 @@ inline const ObjectData* obj(const NativeNode* node) {
 }
 
 ObjectData* nativeDataInstanceCtor(Class* cls);
-void nativeDataInstanceCopy(ObjectData* dest, ObjectData *src);
+ObjectData* nativeDataInstanceCopyCtor(ObjectData *src, Class* cls,
+                                       size_t nProps);
 void nativeDataInstanceDtor(ObjectData* obj, const Class* cls);
 
 Variant nativeDataSleep(const ObjectData* obj);
@@ -278,10 +279,6 @@ size_t ndsize(const ObjectData* obj, const NativeDataInfo* ndi);
 inline size_t ndsize(size_t dataSize) {
   return alignTypedValue(dataSize + sizeof(NativeNode));
  }
-
-inline size_t ndextra(const ObjectData* obj, const NativeDataInfo* ndi) {
-  return ndsize(obj, ndi) - ndsize(ndi->sz);
-}
 
 inline NativeNode* getNativeNode(ObjectData* obj, const NativeDataInfo* ndi) {
   return reinterpret_cast<NativeNode*>(

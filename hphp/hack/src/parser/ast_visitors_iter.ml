@@ -254,6 +254,9 @@ class virtual ['self] iter =
       | Private -> self#on_Private env
       | Public -> self#on_Public env
       | Protected -> self#on_Protected env
+    method on_Pinout env = ()
+    method on_param_kind env = function
+      | Pinout -> self#on_Pinout env
     method on_OG_nullthrows env = ()
     method on_OG_nullsafe env = ()
     method on_og_null_flavor env = function
@@ -301,6 +304,7 @@ class virtual ['self] iter =
       self#on_option self#on_expr env this.param_expr;
       self#on_option self#on_kind env this.param_modifier;
 
+      self#on_option self#on_param_kind env this.param_callconv;
       begin
         self#on_list self#on_user_attribute env
           this.param_user_attributes
@@ -441,6 +445,7 @@ class virtual ['self] iter =
       | Def_inline c0 ->
         self#on_Def_inline env c0
       | Noop -> self#on_Noop env
+      | Using (c0, c1, c2) -> self#on_Using env c0 c1 c2
     method on_As_v = self#on_expr
     method on_As_kv env c0 c1 =
       self#on_expr env c0;
@@ -491,10 +496,10 @@ class virtual ['self] iter =
       self#on_expr env c0;
       self#on_option self#on_expr env c1;
     method on_Class_get env c0 c1 =
-      self#on_id env c0;
+      self#on_expr env c0;
       self#on_expr env c1;
     method on_Class_const env c0 c1 =
-      self#on_id env c0;
+      self#on_expr env c0;
       self#on_pstring env c1;
     method on_Call env c0 c1 c2 c3 =
       self#on_expr env c0;
@@ -535,6 +540,9 @@ class virtual ['self] iter =
     method on_InstanceOf env c0 c1 =
       self#on_expr env c0;
       self#on_expr env c1;
+    method on_Is env c0 c1 =
+      self#on_expr env c0;
+      self#on_hint env c1;
     method on_New env c0 c1 c2 =
       self#on_expr env c0;
       self#on_list self#on_expr env c1;
@@ -567,6 +575,12 @@ class virtual ['self] iter =
     method on_Markup env c0 c1 =
       self#on_pstring env c0;
       self#on_option self#on_expr env c1;
+    method on_Using env _c0 c1 c2 =
+      self#on_expr env c1;
+      self#on_block env c2;
+    method on_Callconv env c0 c1 =
+      self#on_param_kind env c0;
+      self#on_expr env c1;
     method on_expr_ env = function
       | Array c0 -> self#on_Array env c0
       | Darray c0 -> self#on_Darray env c0
@@ -604,6 +618,7 @@ class virtual ['self] iter =
       | Eif (c0, c1, c2) -> self#on_Eif env c0 c1 c2
       | NullCoalesce (c0, c1) -> self#on_NullCoalesce env c0 c1
       | InstanceOf (c0, c1) -> self#on_InstanceOf env c0 c1
+      | Is (c0, c1) -> self#on_Is env c0 c1
       | BracedExpr c0 -> self#on_BracedExpr env c0
       | New (c0, c1, c2) -> self#on_New env c0 c1 c2
       | Efun (c0, c1) -> self#on_Efun env c0 c1
@@ -612,6 +627,7 @@ class virtual ['self] iter =
       | Unsafeexpr c0 -> self#on_Unsafeexpr env c0
       | Import (c0, c1) -> self#on_Import env c0 c1
       | Omitted         -> self#on_Omitted env
+      | Callconv (c0, c1) -> self#on_Callconv env c0 c1
     method on_Include env = ()
     method on_Require env = ()
     method on_IncludeOnce env = ()

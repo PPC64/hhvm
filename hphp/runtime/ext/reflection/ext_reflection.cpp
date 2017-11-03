@@ -111,6 +111,9 @@ const StaticString
   s_type_hint_builtin("type_hint_builtin"),
   s_type_hint_nullable("type_hint_nullable");
 
+Class* Reflection::s_ReflectionExceptionClass = nullptr;
+Class* Reflection::s_ReflectionExtensionClass = nullptr;
+
 Class* get_cls(const Variant& class_or_object) {
   if (class_or_object.is(KindOfObject)) {
     return class_or_object.toCObjRef()->getVMClass();
@@ -701,8 +704,6 @@ void Reflection::ThrowReflectionExceptionObject(const Variant& message) {
 }
 
 
-HPHP::Class* Reflection::s_ReflectionExceptionClass = nullptr;
-
 /////////////////////////////////////////////////////////////////////////////
 // class ReflectionFuncHandle
 
@@ -1151,18 +1152,10 @@ static Variant HHVM_METHOD(ReflectionFunction, getClosureThisObject,
 static Array HHVM_METHOD(ReflectionFunction, getClosureUseVariables,
                          const Object& closure) {
   auto const cls = get_cls(closure);
-  assert(cls);
-
-  auto size = cls->numDeclProperties();
-  ArrayInit ai(size, ArrayInit::Mixed{});
-
-  auto clsName = cls->nameStr();
-
+  assertx(cls);
+  MixedArrayInit ai(cls->numDeclProperties());
+  auto propVal = closure->propVec();
   for (auto const& prop : cls->declProperties()) {
-    auto val = closure.get()->o_realProp(StrNR(prop.name),
-                                         ObjectData::RealPropExist, clsName);
-    assert(val);
-
     // Closure static locals are represented as special instance properties
     // with a mangled name.
     if (prop.name->data()[0] == '8') {
@@ -1171,14 +1164,11 @@ static Array HHVM_METHOD(ReflectionFunction, getClosureUseVariables,
       String strippedName(prop.name->data() + sizeof prefix - 1,
                           prop.name->size() - sizeof prefix + 1,
                           CopyString);
-      ai.setUnknownKey(VarNR(strippedName), *val);
+      ai.setUnknownKey(VarNR(strippedName), tvAsCVarRef(propVal));
     } else {
-      if (val->isReferenced()) {
-        ai.setRef(StrNR(prop.name), *val, false /* = keyConverted */);
-      } else {
-        ai.setUnknownKey(VarNR(prop.name), *val);
-      }
+      ai.setWithRef(StrNR(prop.name), *propVal);
     }
+    propVal++;
   }
   return ai.toArray();
 }
@@ -1728,13 +1718,16 @@ void ReflectionClassHandle::wakeup(const Variant& content, ObjectData* obj) {
   // It is possible that $name does not get serialized. If a class derives
   // from ReflectionClass and the return value of its __sleep() function does
   // not contain 'name', $name gets ignored. So, we restore $name here.
-  obj->o_set(s_name, result);
+  obj->setProp(nullptr, s_name.get(), make_tv<KindOfString>(result.get()));
 }
 
 static Variant reflection_extension_name_get(const Object& this_) {
-  auto name = this_->o_realProp(s___name, ObjectData::RealPropUnchecked,
-                                s_reflectionextension);
-  return name->toString();
+  assertx(Reflection::s_ReflectionExtensionClass);
+  auto const name = this_->getProp(
+    Reflection::s_ReflectionExtensionClass,
+    s___name.get()
+  ).unboxed();
+  return tvCastToString(name.tv());
 }
 
 static Native::PropAccessor reflection_extension_Accessors[] = {
@@ -2100,7 +2093,11 @@ struct ReflectionExtension final : Extension {
     loadSystemlib("reflection_hni");
 
     Reflection::s_ReflectionExceptionClass =
-        Unit::lookupClass(s_reflectionexception.get());
+      Unit::lookupClass(s_reflectionexception.get());
+    assertx(Reflection::s_ReflectionExceptionClass);
+    Reflection::s_ReflectionExtensionClass =
+      Unit::lookupClass(s_reflectionextension.get());
+    assertx(Reflection::s_ReflectionExtensionClass);
   }
 } s_reflection_extension;
 

@@ -63,6 +63,9 @@ type t = {
  (* Namespace aliasing map *)
  po_auto_namespace_map : (string * string) list;
 
+ (* Flag for disabling functions in HHI files with the __PHPStdLib attribute *)
+ po_deregister_php_stdlib : bool;
+
  (* Error codes for which we do not allow HH_FIXMEs *)
  ignored_fixme_codes : ISet.t;
 }
@@ -70,6 +73,7 @@ val make :
   tco_assume_php: bool ->
   tco_safe_array: bool ->
   tco_safe_vector_array: bool ->
+  po_deregister_php_stdlib: bool ->
   tco_user_attrs: SSet.t option ->
   tco_experimental_features: SSet.t ->
   tco_migration_flags: SSet.t ->
@@ -83,27 +87,26 @@ val tco_experimental_feature_enabled : t -> SSet.elt -> bool
 val tco_migration_flag_enabled : t -> SSet.elt -> bool
 val tco_allowed_attribute : t -> SSet.elt -> bool
 val po_auto_namespace_map : t -> (string * string) list
+val po_deregister_php_stdlib : t -> bool
 val default : t
 val make_permissive : t -> t
 val tco_experimental_instanceof : string
 val tco_experimental_isarray : string
-val tco_experimental_optional_shape_field : string
 val tco_experimental_darray_and_varray : string
 val tco_experimental_goto : string
 val tco_experimental_tconst_on_generics : string
-val tco_experimental_shape_idx_relaxed : string
 val tco_experimental_disable_shape_and_tuple_arrays : string
-val tco_experimental_promote_nullable_to_optional_in_shapes : string
 val tco_experimental_stronger_shape_idx_ret : string
 val tco_experimental_unresolved_fix : string
 val tco_experimental_contextual_inference : string
 val tco_experimental_generics_arity : string
 val tco_experimental_annotate_function_calls : string
-val tco_experimental_unknown_fields_shape_is_not_subtype_of_known_fields_shape
-    : string
 val tco_experimental_forbid_nullable_cast : string
 val tco_experimental_safe_pass_by_ref : string
 val tco_experimental_coroutines: string
+val tco_experimental_inout_params : string
+val tco_experimental_disallow_static_memoized : string
+val tco_experimental_disable_optional_and_unknown_shape_fields : string
 val tco_experimental_all : SSet.t
 val tco_migration_flags_all : SSet.t
 val ignored_fixme_codes : t -> ISet.t

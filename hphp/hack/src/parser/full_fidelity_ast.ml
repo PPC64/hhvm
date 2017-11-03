@@ -24,9 +24,10 @@ module Trivia = Full_fidelity_positioned_trivia
 module TriviaKind = Full_fidelity_trivia_kind
 module SourceData = Full_fidelity_editable_positioned_original_source_data
 module SourceText = Full_fidelity_source_text
+module ParserErrors = Full_fidelity_parser_errors
 open Prim_defs
 
-open Core
+open Hh_core
 
 let drop_pstr : int -> pstring -> pstring = fun cnt (pos, str) ->
   let len = String.length str in
@@ -72,32 +73,9 @@ let get_pos : node -> Pos.t = fun node ->
   else begin
     let pos_file = !(lowerer_state.filePath) in
     let text = source_text node in
-    (* TODO(8086635) Figure out where this off-by-one comes from *)
-    let start_offset =
-      (*should be removed after resolving TODO above *)
-      let start_offset = start_offset node in
-      if start_offset = 0 then 0 else start_offset - 1
-    in
-    let end_offset =
-      (*should be removed after resolving TODO above *)
-      let end_offset = end_offset node in
-      if end_offset = 0 then 0 else end_offset - 1
-    in
-    let s_line, s_column = SourceText.offset_to_position text start_offset in
-    let e_line, e_column = SourceText.offset_to_position text end_offset in
-    let pos_start =
-      File_pos.of_line_column_offset
-        ~line:s_line
-        ~column:s_column
-        ~offset:start_offset
-    in
-    let pos_end =
-      File_pos.of_line_column_offset
-        ~line:e_line
-        ~column:e_column
-        ~offset:end_offset
-    in
-    Pos.make_from_file_pos ~pos_file ~pos_start ~pos_end
+    let start_offset = start_offset node in
+    let end_offset = end_offset node in
+    SourceText.relative_pos pos_file text start_offset end_offset
   end
 
 exception Lowerer_invariant_failure of string * string
@@ -185,9 +163,21 @@ let as_list : node -> node list =
   | { syntax = Missing; _ } -> []
   | syn -> [syn]
 
-let missing =
-  let value = SyntaxValue.Synthetic in
-  make Missing value
+let make_syntax syntax = make syntax Value.Synthetic
+
+let make_token_syntax token_kind =
+  let single_space = " " in
+  let text = "" in
+  make_syntax @@
+    Token (Token.synthesize_new token_kind text single_space single_space)
+
+let make_compound_statement nl =
+  make_compound_statement
+    (make_token_syntax TK.LeftBrace)
+    (make_list nl)
+    (make_token_syntax TK.RightBrace)
+
+let missing = make_syntax Missing
 
 
 
@@ -273,6 +263,11 @@ let pKinds : kind list parser = couldMap ~f:(fun node env ->
   | Some TK.Var       -> Public
   | _ -> missing_syntax "kind" node env
   )
+
+let pParamKind : param_kind parser = fun node env ->
+  match token_kind node with
+  | Some TK.Inout -> Pinout
+  | _ -> missing_syntax "param kind" node env
 
 let syntax_of_token : Token.t -> node = fun t ->
   let value =
@@ -423,6 +418,7 @@ let param_template node =
   ; param_id              = pos_name node
   ; param_expr            = None
   ; param_modifier        = None
+  ; param_callconv        = None
   ; param_user_attributes = []
   }
 
@@ -468,19 +464,7 @@ let rec pHint : hint parser = fun node env ->
       -> Happly (pos_name node, [])
     | ShapeTypeSpecifier { shape_type_fields; shape_type_ellipsis; _ } ->
       let si_allows_unknown_fields =
-        (**
-         * To maintain compatibility with open source, we always promote the
-         * definitions in Shapes.hhi.
-         *
-         * TODO(T21756986): Clean this up after OSS release of `...`
-         *)
-        let filename = Relative_path.to_absolute !(lowerer_state.filePath) in
-        not (is_missing shape_type_ellipsis) ||
-        String_utils.string_ends_with filename "Shapes.hhi" ||
-        (TypecheckerOptions.experimental_feature_enabled
-          !(lowerer_state.popt)
-          TypecheckerOptions.experimental_promote_nullable_to_optional_in_shapes
-        )
+        not (is_missing shape_type_ellipsis)
       in
       let si_shape_field_list =
         couldMap ~f:(mpShapeField pHint) shape_type_fields env in
@@ -590,11 +574,13 @@ let rec pSimpleInitializer node env =
   | SimpleInitializer { simple_initializer_value; simple_initializer_equal } ->
     pExpr simple_initializer_value env
   | _ -> missing_syntax "simple initializer" node env
+
 and pFunParam : fun_param parser = fun node env ->
   match syntax node with
   | ParameterDeclaration
     { parameter_attribute
     ; parameter_visibility
+    ; parameter_call_convention
     ; parameter_type
     ; parameter_name
     ; parameter_default_value
@@ -628,6 +614,8 @@ and pFunParam : fun_param parser = fun node env ->
       mpOptional pSimpleInitializer parameter_default_value env
     ; param_user_attributes = List.concat @@
       couldMap ~f:pUserAttribute parameter_attribute env
+    ; param_callconv        =
+      mpOptional pParamKind parameter_call_convention env
     (* implicit field via constructor parameter.
      * This is always None except for constructors and the modifier
      * can be only Public or Protected or Private.
@@ -707,6 +695,8 @@ and pString2: node list -> env -> expr list =
     | x::xs -> aux xs env ((pExpr ~location:InString x env)::acc)
   in
   fun l env -> aux l env []
+and pExprL node env =
+  (get_pos node, Expr_list (couldMap ~f:pExpr node env))
 and pExpr ?location:(location=TopLevel) : expr parser = fun node env ->
   let rec pExpr_ : expr_ parser = fun node env ->
     let pos = get_pos node in
@@ -752,11 +742,20 @@ and pExpr ?location:(location=TopLevel) : expr parser = fun node env ->
       { vector_intrinsic_keyword = kw
       ; vector_intrinsic_members = members
       ; _ }
-    | CollectionLiteralExpression
-      { collection_literal_name         = kw
-      ; collection_literal_initializers = members
-      ; _ }
       -> Collection (pos_name kw, couldMap ~f:pAField members env)
+    | CollectionLiteralExpression
+      { collection_literal_name         = collection_name
+      ; collection_literal_initializers = members
+      ; _ } ->
+      let collection_name =
+        match syntax collection_name with
+        | SimpleTypeSpecifier { simple_type_specifier = class_type }
+        (* TODO: currently type arguments are dropped on the floor,
+           though they should be properly propagated to the typechecker *)
+        | GenericTypeSpecifier { generic_class_type = class_type; _ } ->
+          pos_name class_type
+        | _ -> pos_name collection_name in
+      Collection (collection_name, couldMap ~f:pAField members env)
 
     | VarrayIntrinsicExpression { varray_intrinsic_members = members; _ } ->
       Varray (couldMap ~f:pExpr members env)
@@ -902,6 +901,7 @@ and pExpr ?location:(location=TopLevel) : expr parser = fun node env ->
         | Some TK.Minus                   -> Unop (Uminus, expr)
         | Some TK.Ampersand               -> Unop (Uref,   expr)
         | Some TK.At                      -> Unop (Usilence, expr)
+        | Some TK.Inout                   -> Callconv (Pinout, expr)
         | Some TK.Await                   -> Await expr
         | Some TK.Suspend                 -> Suspend expr
         | Some TK.Clone                   -> Clone expr
@@ -952,7 +952,7 @@ and pExpr ?location:(location=TopLevel) : expr parser = fun node env ->
 
     | ScopeResolutionExpression
       { scope_resolution_qualifier; scope_resolution_name; _ } ->
-      let qual = pos_name scope_resolution_qualifier in
+      let qual = pExpr scope_resolution_qualifier env in
       begin match syntax scope_resolution_name with
       | Token { Token.kind = TK.Variable; _ } ->
         let name =
@@ -1083,7 +1083,7 @@ and pExpr ?location:(location=TopLevel) : expr parser = fun node env ->
       { instanceof_left_operand; instanceof_right_operand; _ } ->
       let ty =
         match pExpr instanceof_right_operand env with
-        | p, Class_const (pid, (_, "")) -> p, Id pid
+        | p, Class_const ((_, pid), (_, "")) -> p, pid
         | ty -> ty
       in
       InstanceOf (pExpr instanceof_left_operand env, ty)
@@ -1092,6 +1092,9 @@ and pExpr ?location:(location=TopLevel) : expr parser = fun node env ->
       | p, Unop (o,e) -> Unop (0, (p, InstanceOf (e, ty)))
       | e -> InstanceOf (e, ty)
       *)
+    | IsExpression
+      { is_left_operand; is_right_operand; _ } ->
+      Is (pExpr is_left_operand env, pHint is_right_operand env)
     | AnonymousFunction
       { anonymous_static_keyword
       ; anonymous_async_keyword
@@ -1207,8 +1210,9 @@ and pExpr ?location:(location=TopLevel) : expr parser = fun node env ->
   in
   let env = { env with unsafes } in
   begin match syntax node with
+  | BracedExpression        { braced_expression_expression        = expr; _ }
   | ParenthesizedExpression { parenthesized_expression_expression = expr; _ } ->
-    (* peel of parenthesised expresions:
+    (* peel of braced or parenthesised expresions:
        if there is a XHP inside - we want XHP node to have its own positions,
        not positions of enclosing parenthesised expression *)
     leading_unsafe @@ pExpr ~location expr env
@@ -1316,7 +1320,38 @@ and pStmt : stmt parser = fun node env ->
       | Some t when Token.has_trivia_kind t TriviaKind.Unsafe -> [Unsafe]
       | _ -> []
     in
-    let blk = List.concat (couldMap ~f:pStmtUnsafe compound_statements env) in
+    let compound_statements = as_list compound_statements in
+    (* Here we rewrite the function scoped using expression as block scoped
+     * using expression by determining the proper block and folding over it *)
+    let compound_statements = List.fold_right compound_statements
+      ~init:([] : node list)
+      ~f:(fun node acc ->
+          match syntax node with
+          | UsingStatementFunctionScoped
+            { using_function_await_keyword = await_kw
+            ; using_function_using_keyword = using_kw
+            ; using_function_expression = expression
+            ; _ } ->
+            (* block scoped version is expecting a list of expressions *)
+            let expressions = make_list [expression] in
+            let body = make_compound_statement acc in
+            let syntax =
+              UsingStatementBlockScoped
+              { using_block_await_keyword = await_kw
+              ; using_block_using_keyword = using_kw
+              ; using_block_expressions = expressions
+              ; using_block_left_paren = missing
+              ; using_block_right_paren = missing
+              ; using_block_body = body
+              }
+            in
+            [make_syntax syntax]
+          | _ -> node :: acc
+        )
+    in
+    let blk =
+      List.concat (List.map ~f:(fun x -> pStmtUnsafe x env) compound_statements)
+    in
     (match List.filter ~f:(fun x -> x <> Noop) blk @ tail with
     | [] -> Block [Noop]
     | blk -> Block blk
@@ -1326,11 +1361,31 @@ and pStmt : stmt parser = fun node env ->
     Do ([Block (pBlock do_body env)], pExpr do_condition env)
   | WhileStatement { while_condition; while_body; _ } ->
     While (pExpr while_condition env, pStmtUnsafe while_body env)
+  | UsingStatementBlockScoped
+    { using_block_await_keyword
+    ; using_block_expressions
+    ; using_block_body
+    ; _ } ->
+    Using
+    ( not (is_missing using_block_await_keyword)
+    , pExprL using_block_expressions env
+    , [Block (pBlock using_block_body env)]
+    )
+  | UsingStatementFunctionScoped
+    { using_function_await_keyword
+    ; using_function_expression
+    ; _ } ->
+    (* All regular function scoped using statements should
+     * be rewritten by this point
+     * If this gets run, it means that this using statement is the only one
+     * in the block, hence it is not in a compound statement *)
+    Using
+    ( not (is_missing using_function_await_keyword)
+    , pExpr using_function_expression env
+    , [Block [Noop]]
+    )
   | ForStatement
     { for_initializer; for_control; for_end_of_loop; for_body; _ } ->
-    let pExprL node env =
-      (get_pos node, Expr_list (couldMap ~f:pExpr node env))
-    in
     For
     ( pExprL for_initializer env
     , pExprL for_control env
@@ -2236,7 +2291,7 @@ let scour_comments
              in
              failwith msg;
            );
-           let p = pos_of_offset (Trivia.start_offset t) (Trivia.end_offset t) in
+           let p = pos_of_offset (Trivia.start_offset t) (Pos.start_cnum pos) in
            let code = int_of_string (matched_group 2 txt) in
            let ignores = IMap.add code p ignores in
            cmts, IMap.add line ignores fm
@@ -2303,7 +2358,7 @@ let lower
     in
     if keep_errors then begin
       Fixmes.HH_FIXMES.add file fixmes;
-      Option.iter (Core.List.last !errors) Errors.parsing_error
+      Option.iter (Hh_core.List.last !errors) Errors.parsing_error
     end;
     { fi_mode; ast; content; comments; file }
 
@@ -2315,13 +2370,32 @@ let from_text
   ?(quick                 = false)
   ?(suppress_output       = false)
   ?(lower_coroutines      = true)
+  ?(enable_hh_syntax       = false)
+  ?hhvm_compat_mode
+  ?php5_compat_mode
   ?(parser_options        = ParserOptions.default)
   (file        : Relative_path.t)
   (source_text : Full_fidelity_source_text.t)
   : result =
     let open Full_fidelity_syntax_tree in
-    let tree   = make source_text in
+    let tree   =
+      let env =
+        Full_fidelity_parser_env.make
+          ?hhvm_compat_mode
+          ?php5_compat_mode
+          () in
+      make ~env source_text in
     let script = Full_fidelity_positioned_syntax.from_tree tree in
+    if Option.value hhvm_compat_mode ~default:false
+    then begin
+    match ParserErrors.parse_errors
+      ~enable_hh_syntax
+      ~positioned_syntax:script
+      ~level:ParserErrors.HHVMCompatibility tree with
+    | [] -> ()
+    | e :: _ ->
+      raise @@ Full_fidelity_syntax_error.ParserFatal e
+    end;
     let script = from_positioned_syntax script in
     let script =
       if lower_coroutines then
@@ -2364,7 +2438,10 @@ let from_file
   ?(ignore_pos            = false)
   ?(quick                 = false)
   ?(suppress_output       = false)
+  ?(enable_hh_syntax      = false)
   ?lower_coroutines
+  ?hhvm_compat_mode
+  ?php5_compat_mode
   ?(parser_options        = ParserOptions.default)
   (path : Relative_path.t)
   : result =
@@ -2375,7 +2452,10 @@ let from_file
       ~ignore_pos
       ~quick
       ~suppress_output
+      ~enable_hh_syntax
       ?lower_coroutines
+      ?hhvm_compat_mode
+      ?php5_compat_mode
       ~parser_options
       path
       (Full_fidelity_source_text.from_file path)
@@ -2398,7 +2478,10 @@ let from_text_with_legacy
   ?(ignore_pos            = false)
   ?(quick                 = false)
   ?(suppress_output       = false)
+  ?(enable_hh_syntax      = false)
   ?lower_coroutines
+  ?hhvm_compat_mode
+  ?php5_compat_mode
   ?(parser_options        = ParserOptions.default)
   (file    : Relative_path.t)
   (content : string)
@@ -2410,7 +2493,10 @@ let from_text_with_legacy
       ~ignore_pos
       ~quick
       ~suppress_output
+      ~enable_hh_syntax
       ?lower_coroutines
+      ?hhvm_compat_mode
+      ?php5_compat_mode
       ~parser_options
       file
       (Full_fidelity_source_text.make file content)
@@ -2422,7 +2508,10 @@ let from_file_with_legacy
   ?(ignore_pos            = false)
   ?(quick                 = false)
   ?(suppress_output       = false)
+  ?(enable_hh_syntax      = false)
   ?lower_coroutines
+  ?hhvm_compat_mode
+  ?php5_compat_mode
   ?(parser_options        = ParserOptions.default)
   (file : Relative_path.t)
   : Parser_hack.parser_return =
@@ -2433,6 +2522,9 @@ let from_file_with_legacy
       ~ignore_pos
       ~quick
       ~suppress_output
+      ~enable_hh_syntax
       ?lower_coroutines
+      ?hhvm_compat_mode
+      ?php5_compat_mode
       ~parser_options
       file

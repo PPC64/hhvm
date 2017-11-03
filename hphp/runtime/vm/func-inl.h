@@ -18,6 +18,8 @@
 #error "func-inl.h should only be included by func.h"
 #endif
 
+#include "hphp/runtime/vm/unit-util.h"
+
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 // EH and FPI tables.
@@ -50,6 +52,7 @@ inline void Func::ParamInfo::serde(SerDe& sd) {
     (variadic)
     (userAttributes)
     (userType)
+    (inout)
     ;
 }
 
@@ -139,12 +142,18 @@ inline StrNR Func::fullNameStr() const {
 
 inline const StringData* Func::displayName() const {
   auto const target = dynCallTarget();
-  return LIKELY(!target) ? name() : target->name();
+  return
+    LIKELY(!target && !takesInOutParams()) ? name() :
+    LIKELY(target != nullptr) ? target->name() :
+    stripInOutSuffix(name());
 }
 
 inline const StringData* Func::fullDisplayName() const {
   auto const target = dynCallTarget();
-  return LIKELY(!target) ? fullName() : target->fullName();
+  return
+    LIKELY(!target && !takesInOutParams()) ? fullName() :
+    LIKELY(target != nullptr) ? target->fullName() :
+    stripInOutSuffix(fullName());
 }
 
 inline NamedEntity* Func::getNamedEntity() {
@@ -293,6 +302,14 @@ inline bool Func::hasVariadicCaptureParam() const {
 
 inline bool Func::discardExtraArgs() const {
   return !(m_attrs & (AttrMayUseVV | AttrVariadicParam));
+}
+
+inline bool Func::takesInOutParams() const {
+  return m_attrs & AttrTakesInOutParams;
+}
+
+inline bool Func::isInOutWrapper() const {
+  return m_attrs & AttrIsInOutWrapper;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

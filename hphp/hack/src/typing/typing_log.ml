@@ -11,7 +11,7 @@
 module Env = Typing_env
 
 open Tty
-open Core
+open Hh_core
 
 (*****************************************************************************)
 (* Logging type inference environment                                        *)
@@ -156,10 +156,20 @@ let log_local_types env =
       env.Env.lenv.Env.local_types;
     log_history env)
 
+let log_using_vars env =
+  let using_vars = env.Env.lenv.Env.local_using_vars in
+  if not (Local_id.Set.is_empty using_vars) then
+  indentEnv "using_vars" (fun () ->
+    Local_id.Set.iter (fun lvar ->
+      lprintf (Normal Green) "%s " (Local_id.get_name lvar))
+      using_vars)
+
 let log_return_type env =
   indentEnv "return_type" (fun () ->
-    lprintf (Normal Green) "%s"
-      (Typing_print.debug_with_tvars env (Env.get_return env))
+    let (ty, contextual) = Env.get_return env in
+    lprintf (Normal Green) "%s (%s)"
+      (Typing_print.debug_with_tvars env ty)
+      (if contextual then "contextual" else "non-contextual")
   )
 
 let log_tpenv env =
@@ -212,6 +222,7 @@ let hh_show_env p env =
   log_position p
     (fun () ->
        log_local_types env;
+       log_using_vars env;
        log_fake_members env;
        log_return_type env;
        log_env_diff (!lastenv) env;

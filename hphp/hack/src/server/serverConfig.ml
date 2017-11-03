@@ -12,7 +12,7 @@
  * Parses and gathers information from the .hhconfig in the repo.
  *)
 
-open Core
+open Hh_core
 open Config_file.Getters
 open Reordered_argument_collections
 
@@ -40,6 +40,8 @@ type t = {
   parser_options   : ParserOptions.t;
   formatter_override : Path.t option;
   config_hash      : string option;
+  (* A list of regexps for paths to ignore *)
+  ignored_paths    : string list;
 }
 
 let filename = Relative_path.from_root ".hhconfig"
@@ -114,13 +116,7 @@ let process_experimental sl =
   match List.map sl String.lowercase_ascii with
     | ["false"] -> SSet.empty
     | ["true"] -> TypecheckerOptions.experimental_all
-    | features ->
-      begin
-        List.iter features ~f:(fun s ->
-          if not (SSet.mem TypecheckerOptions.experimental_all s)
-          then failwith ("invalid experimental feature " ^ s));
-        List.fold_left features ~f:SSet.add ~init:SSet.empty
-      end
+    | features -> List.fold_left features ~f:SSet.add ~init:SSet.empty
 
 let config_experimental_tc_features config =
   match SMap.get config "enable_experimental_tc_features" with
@@ -146,6 +142,22 @@ let config_tc_migration_flags config =
   |> Option.value_map ~f:(Str.split config_list_regexp) ~default:[]
   |> List.map ~f:String.lowercase_ascii
   |> process_migration_flags
+
+
+let convert_ignored_paths str =
+  let json = Hh_json.json_of_string ~strict:true str in
+  let l = Hh_json.get_array_exn json in
+  List.filter_map ~f:(fun s ->
+      match s with
+      | Hh_json.JSON_String path -> Some path
+      | _ -> None
+    ) l
+
+
+let process_ignored_paths config =
+  SMap.get config "ignored_paths"
+  |> Option.value_map ~f:convert_ignored_paths ~default:[]
+
 
 let maybe_relative_path fn =
   (* Note: this is not the same as calling realpath; the cwd is not
@@ -185,6 +197,7 @@ let load config_filename options =
   let config_hash, config = Config_file.parse (Relative_path.to_absolute config_filename) in
   let local_config = ServerLocalConfig.load ~silent:false in
   let version = SMap.get config "version" in
+  let ignored_paths = process_ignored_paths config in
   let load_script =
     Option.map (SMap.get config "load_script") maybe_relative_path in
   (* Since we use the unix alarm() for our timeouts, a timeout value of 0 means
@@ -200,6 +213,7 @@ let load config_filename options =
     (bool_ "assume_php" ~default:true config)
     (bool_ "safe_array" ~default:false config)
     (bool_ "safe_vector_array" ~default:false config)
+    (bool_ "deregister_php_stdlib" ~default:false config)
     (config_user_attributes config)
     (config_experimental_tc_features config)
     (config_tc_migration_flags config)
@@ -220,6 +234,7 @@ let load config_filename options =
     parser_options = global_opts;
     formatter_override = formatter_override;
     config_hash = config_hash;
+    ignored_paths = ignored_paths;
   }, local_config
 
 (* useful in testing code *)
@@ -235,6 +250,7 @@ let default_config = {
   parser_options = ParserOptions.default;
   formatter_override = None;
   config_hash = None;
+  ignored_paths = [];
 }
 
 let set_parser_options config popt = { config with parser_options = popt }
@@ -249,3 +265,4 @@ let typechecker_options config = config.tc_options
 let parser_options config = config.parser_options
 let formatter_override config = config.formatter_override
 let config_hash config = config.config_hash
+let ignored_paths config = config.ignored_paths

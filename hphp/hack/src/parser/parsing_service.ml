@@ -8,7 +8,7 @@
  *
  *)
 
-open Core
+open Hh_core
 
 (*****************************************************************************)
 (* Helpers *)
@@ -20,6 +20,7 @@ let neutral = (
   )
 
 let empty_file_info : FileInfo.t = {
+  hash = None;
   file_mode = None;
   FileInfo.funs = [];
   classes = [];
@@ -38,9 +39,13 @@ let legacy_php_file_info = ref (fun fn ->
  * error_files is Relative_path.Set.t of files that we failed to parse
  *)
 let process_parse_result
-  ?(ide = false) ~quick (acc, errorl, error_files) fn res =
+  ?(ide = false) ~quick (acc, errorl, error_files) fn res popt =
   let errorl', {Parser_hack.file_mode; comments; ast; content;}, _ = res in
-
+  let ast =
+  if (Relative_path.prefix fn = Relative_path.Hhi)
+  && ParserOptions.deregister_php_stdlib popt
+  then Ast_utils.deregister_ignored_attributes ast
+  else ast in
   if file_mode <> None then begin
     let funs, classes, typedefs, consts = Ast_utils.get_defs ast in
     (* If this file was parsed from a tmp directory,
@@ -55,8 +60,9 @@ let process_parse_result
     let mode = if quick then Parser_heap.Decl else Parser_heap.Full in
     Parser_heap.ParserHeap.write_through fn (ast, mode);
     let comments = Some comments in
+    let hash = Some (Ast_utils.generate_ast_decl_hash ast) in
     let defs =
-      {FileInfo.funs; classes; typedefs; consts; comments; file_mode}
+      {FileInfo.hash; funs; classes; typedefs; consts; comments; file_mode}
     in
     let acc = Relative_path.Map.add acc ~key:fn ~data:defs in
     let errorl = Errors.merge errorl' errorl in
@@ -82,7 +88,7 @@ let really_parse ~quick popt acc fn =
       Parser_hack.from_file ~quick popt fn
     end
   in
-  process_parse_result ~quick acc fn res
+  process_parse_result ~quick acc fn res popt
 
 let parse ?(quick = false) popt (acc, errorl, error_files) fn =
   (* Ugly hack... hack build requires that we keep JS files in our
@@ -144,7 +150,7 @@ let parse_sequential ~quick fn content acc popt =
       Parser_hack.program popt fn content
     end
   in
-  process_parse_result ~ide:true ~quick acc fn res
+  process_parse_result ~ide:true ~quick acc fn res popt
 
 (*****************************************************************************)
 (* Main entry points *)

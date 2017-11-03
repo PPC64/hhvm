@@ -8,31 +8,66 @@
  *
  *)
 
-module Token = Full_fidelity_minimal_token
+module WithSyntax(Syntax : Syntax_sig.Syntax_S) = struct
+
+module Token = Syntax.Token
 module SyntaxKind = Full_fidelity_syntax_kind
 module TokenKind = Full_fidelity_token_kind
-module SourceText = Full_fidelity_source_text
+module TriviaKind = Full_fidelity_trivia_kind
 module SyntaxError = Full_fidelity_syntax_error
-module Operator = Full_fidelity_operator
-module SimpleParser = Full_fidelity_simple_parser.WithLexer(Full_fidelity_lexer)
+module Env = Full_fidelity_parser_env
+module SimpleParserSyntax =
+  Full_fidelity_simple_parser.WithSyntax(Syntax)
+module SimpleParser = SimpleParserSyntax.WithLexer(
+    Full_fidelity_lexer.WithToken(Syntax.Token))
+
+module ParserHelperSyntax = Full_fidelity_parser_helpers.WithSyntax(Syntax)
+module ParserHelper = ParserHelperSyntax
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+
+module type ExpressionParser_S = Full_fidelity_expression_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .ExpressionParser_S
+
+module type StatementParser_S = Full_fidelity_statement_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .StatementParser_S
+
+module type TypeParser_S = Full_fidelity_type_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .TypeParser_S
+
+module type DeclarationParser_S = Full_fidelity_declaration_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .DeclarationParser_S
 
 open TokenKind
-open Full_fidelity_minimal_syntax
+open Syntax
 
 module WithExpressionAndStatementAndTypeParser
-  (ExpressionParser : Full_fidelity_expression_parser_type.ExpressionParserType)
-  (StatementParser : Full_fidelity_statement_parser_type.StatementParserType)
-  (TypeParser : Full_fidelity_type_parser_type.TypeParserType) :
-  Full_fidelity_declaration_parser_type.DeclarationParserType = struct
+  (ExpressionParser : ExpressionParser_S)
+  (StatementParser : StatementParser_S)
+  (TypeParser : TypeParser_S) :
+  DeclarationParser_S = struct
 
   include SimpleParser
-  include Full_fidelity_parser_helpers.WithParser(SimpleParser)
+  include ParserHelper.WithParser(SimpleParser)
+
+  (* Tokens *)
+
+  let has_leading_end_of_line token =
+    Hh_core.List.exists (Token.leading token)
+      ~f:(fun trivia ->  Token.Trivia.kind trivia = TriviaKind.EndOfLine)
 
   (* Types *)
 
   let parse_in_type_parser parser type_parser_function =
-    let type_parser = TypeParser.make parser.lexer
-      parser.errors parser.context in
+    let type_parser = TypeParser.make
+      parser.env parser.lexer parser.errors parser.context in
     let (type_parser, node) = type_parser_function type_parser in
     let lexer = TypeParser.lexer type_parser in
     let errors = TypeParser.errors type_parser in
@@ -56,8 +91,8 @@ module WithExpressionAndStatementAndTypeParser
 
   (* Expressions *)
   let parse_in_expression_parser parser expression_parser_function =
-    let expr_parser = ExpressionParser.make parser.lexer
-      parser.errors parser.context in
+    let expr_parser = ExpressionParser.make
+      parser.env parser.lexer parser.errors parser.context in
     let (expr_parser, node) = expression_parser_function expr_parser in
     let lexer = ExpressionParser.lexer expr_parser in
     let errors = ExpressionParser.errors expr_parser in
@@ -69,8 +104,8 @@ module WithExpressionAndStatementAndTypeParser
 
   (* Statements *)
   let parse_in_statement_parser parser statement_parser_function =
-    let statement_parser = StatementParser.make parser.lexer
-      parser.errors parser.context in
+    let statement_parser = StatementParser.make
+      parser.env parser.lexer parser.errors parser.context in
     let (statement_parser, node) = statement_parser_function
        statement_parser in
     let lexer = StatementParser.lexer statement_parser in
@@ -888,7 +923,7 @@ module WithExpressionAndStatementAndTypeParser
        * we should be parsing a methodish. Throw an error, process the token
        * as an extra, and keep going. *)
       | _, (Async | Coroutine | Function)
-        when not (Token.has_leading_end_of_line next_token) ->
+        when not (has_leading_end_of_line next_token) ->
         let parser = with_error parser SyntaxError.error1056
           ~on_whole_token:true in
         let parser = skip_and_log_unexpected_token parser
@@ -1188,8 +1223,8 @@ module WithExpressionAndStatementAndTypeParser
   and parse_generic_type_parameter_list_opt parser =
     let (parser1, open_angle) = next_token parser in
     if (Token.kind open_angle) = LessThan then
-        let type_parser = TypeParser.make parser.lexer
-          parser.errors parser.context in
+        let type_parser = TypeParser.make
+          parser.env parser.lexer parser.errors parser.context in
         let (type_parser, node) =
           TypeParser.parse_generic_type_parameter_list type_parser in
         let lexer = TypeParser.lexer type_parser in
@@ -1243,23 +1278,32 @@ module WithExpressionAndStatementAndTypeParser
     | DotDotDot ->
       let next_kind = peek_token_kind parser1 in
       if next_kind = Variable then parse_parameter_declaration parser
-      else (parser1, make_variadic_parameter (make_token token))
+      else
+        (parser1, make_variadic_parameter (make_missing ()) (make_token token))
     | _ -> parse_parameter_declaration parser
 
   and parse_parameter_declaration parser =
     (* SPEC
     parameter-declaration:
-      attribute-specification-opt  type-specifier  variable-name \
+      attribute-specification-opt \
+      call-convention-opt \
+      type-specifier  variable-name \
       default-argument-specifier-opt
+    *)
+    (* TODO: Update grammar for inout parameters (call-convention-opt).
+       (This work is tracked by task T22582715.)
     *)
     (* ERROR RECOVERY
       * In strict mode, we require a type specifier. This error is not caught
         at parse time but rather by a later pass.
       * Visibility modifiers are only legal in constructor parameter
         lists; we give an error in a later pass.
+      * Variadic params and inout params cannot have default values; these
+        errors are also reported in a later pass.
     *)
     let (parser, attrs) = parse_attribute_specification_opt parser in
     let (parser, visibility) = parse_visibility_modifier_opt parser in
+    let (parser, callconv) = parse_call_convention_opt parser in
     let token = peek_token parser in
     let (parser, type_specifier) =
       match Token.kind token with
@@ -1268,7 +1312,13 @@ module WithExpressionAndStatementAndTypeParser
     let (parser, name) = parse_decorated_variable_opt parser in
     let (parser, default) = parse_simple_initializer_opt parser in
     let syntax =
-      make_parameter_declaration attrs visibility type_specifier name default in
+      make_parameter_declaration
+        attrs
+        visibility
+        callconv
+        type_specifier
+        name
+        default in
     (parser, syntax)
 
   and parse_decorated_variable_opt parser =
@@ -1282,12 +1332,11 @@ module WithExpressionAndStatementAndTypeParser
   same data structure for a decorated expression as a declaration; one
   is a *use* and the other is a *definition*. *)
   and parse_decorated_variable parser =
-    (* TODO: Error on
-          ... ... variable
-          & & variable
-          ... & variable
-       at a later pass
-       (This work is tracked by task T21651222.)
+    (* ERROR RECOVERY
+       Detection of (variadic, byRef) inout params happens in post-parsing.
+       Although a parameter can have at most one variadic/reference decorator,
+       we deliberately allow multiple decorators in the initial parse and produce
+       an error in a later pass.
      *)
     let (parser, decorator) = next_token parser in
     let decorator = make_token decorator in
@@ -1303,6 +1352,12 @@ module WithExpressionAndStatementAndTypeParser
     let (parser1, token) = next_token parser in
     match Token.kind token with
     | Public | Protected | Private -> (parser1, make_token token)
+    | _ -> (parser, make_missing())
+
+  and parse_call_convention_opt parser =
+    let (parser1, token) = next_token parser in
+    match Token.kind token with
+    | Inout -> (parser1, make_token token)
     | _ -> (parser, make_missing())
 
   (* SPEC
@@ -1373,10 +1428,14 @@ module WithExpressionAndStatementAndTypeParser
     (parser, result)
 
   and parse_where_constraint_list_item parser =
-    let (parser, where_constraint) = parse_where_constraint parser in
-    let (parser, comma) = optional_token parser Comma in
-    let result = make_list_item where_constraint comma in
-    (parser, result)
+    match peek_token_kind parser with
+    | Semicolon | LeftBrace ->
+      (parser, None)
+    | _ ->
+      let (parser, where_constraint) = parse_where_constraint parser in
+      let (parser, comma) = optional_token parser Comma in
+      let result = make_list_item where_constraint comma in
+      (parser, Some result)
 
   and parse_where_clause parser =
     (* TODO: Add this to the specification
@@ -1387,11 +1446,9 @@ module WithExpressionAndStatementAndTypeParser
       constraint-list:
         constraint
         constraint-list , constraint
-
-      Note that a trailing comma is not accepted in a constraint list
     *)
     let (parser, keyword) = assert_token parser Where in
-    let (parser, constraints) = parse_list_until_no_comma
+    let (parser, constraints) = parse_list_until_none
       parser parse_where_constraint_list_item in
     let result = make_where_clause keyword constraints in
     (parser, result)
@@ -1566,7 +1623,11 @@ module WithExpressionAndStatementAndTypeParser
       | Require
       | Require_once -> parse_inclusion_directive parser
       | Type
-      | Newtype -> parse_alias_declaration parser (make_missing())
+      | Newtype when
+         match peek_token_kind parser1 with
+         | Name | Classname -> true
+         | _ -> false ->
+        parse_alias_declaration parser (make_missing())
       | Enum -> parse_enum_declaration parser (make_missing())
       | Namespace -> parse_namespace_declaration parser
       | Use -> parse_namespace_use_declaration parser
@@ -1596,7 +1657,7 @@ module WithExpressionAndStatementAndTypeParser
       (StatementParser.parse_markup_section ~is_leading_section:true)
     in
     let valid =
-      match markup_section.syntax with
+      match syntax markup_section with
       (* proceed successfully if we've consumed <?... *)
       (* We purposefully ignore leading trivia before the <?hh, and handle
       the error on a later pass *)
@@ -1604,7 +1665,8 @@ module WithExpressionAndStatementAndTypeParser
       | MarkupSection { markup_suffix; _ } -> not (is_missing markup_suffix)
       | _ -> false
     in
-    if valid then
+    (* Do not attempt to recover in HHVM compatibility mode *)
+    if valid || Env.hhvm_compat_mode (env parser) then
       parser1, markup_section
     else
       let parser = with_error parser SyntaxError.error1001 in
@@ -1641,3 +1703,4 @@ module WithExpressionAndStatementAndTypeParser
     (parser, result)
 
 end
+end (* WithSyntax *)

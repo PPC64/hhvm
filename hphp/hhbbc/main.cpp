@@ -259,10 +259,7 @@ std::pair<std::vector<std::unique_ptr<UnitEmitter>>,
   };
 }
 
-void write_output(
-  UnitEmitterQueue& ueq,
-  std::unique_ptr<ArrayTypeTable::Builder>& arrTable,
-  std::vector<SString> apcProfile) {
+void write_units(UnitEmitterQueue& ueq) {
   folly::Optional<trace_time> timer;
 
   RuntimeOption::RepoCommit = true;
@@ -283,6 +280,11 @@ void write_output(
 
   batchCommit(ues);
   ues.clear();
+}
+
+void write_global_data(
+  std::unique_ptr<ArrayTypeTable::Builder>& arrTable,
+  std::vector<SString> apcProfile) {
 
   auto gd                        = Repo::GlobalData{};
   gd.UsedHHBBC                   = true;
@@ -303,6 +305,7 @@ void write_output(
   gd.HackArrCompatNotices        = RuntimeOption::EvalHackArrCompatNotices;
   gd.EnableIntrinsicsExtension   = RuntimeOption::EnableIntrinsicsExtension;
   gd.APCProfile                  = std::move(apcProfile);
+  gd.ReffinessInvariance         = RuntimeOption::EvalReffinessInvariance;
 
   gd.InitialNamedEntityTableSize  =
     RuntimeOption::EvalInitialNamedEntityTableSize;
@@ -331,11 +334,11 @@ void compile_repo() {
       hphp_thread_exit();
     };
     Trace::BumpRelease bumper(Trace::hhbbc_time, -1, logging);
-    arrTable = whole_program(std::move(input.first), ueq);
-    ueq.push(nullptr);
+    whole_program(std::move(input.first), ueq, arrTable);
   });
 
-  write_output(ueq, arrTable, std::move(input.second));
+  write_units(ueq);
+  write_global_data(arrTable, input.second);
   wp_thread.join();
 }
 

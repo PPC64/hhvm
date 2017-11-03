@@ -8,7 +8,7 @@
  *
  *)
 
-open Core
+open Hh_core
 open ServerEnv
 open Reordered_argument_collections
 open String_utils
@@ -399,53 +399,57 @@ let serve genv env in_fd _ =
     flag := next_iteration_flag;
   done
 
+let resolve_init_approach genv =
+  if not genv.local_config.ServerLocalConfig.use_mini_state then
+    None, "Local_config_mini_state_disabled"
+  else if ServerArgs.no_load genv.options then
+    None, "Server_args_no_load"
+  else if ServerArgs.save_filename genv.options <> None then
+    None, "Server_args_saving_state"
+  else
+    match
+      (ServerConfig.load_mini_script genv.config),
+      (genv.local_config.ServerLocalConfig.load_state_natively),
+      (ServerArgs.with_mini_state genv.options) with
+      | None, _, None ->
+        None, "No_mini_script_or_precomputed"
+      | Some _, true, None ->
+        (** Use native loading only if the config specifies a load script,
+         * and the local config prefers native. *)
+        Some ServerInit.Load_state_natively, "Load_state_natively"
+      | _, _, Some (ServerArgs.Informant_induced_mini_state_target target) ->
+        Some (ServerInit.Load_state_natively_with_target target), "Load_state_natively_with_target"
+      | Some load_mini_script, false, None ->
+        Some (ServerInit.Load_mini_script load_mini_script), "Load_mini_script"
+      | None, _, Some (ServerArgs.Mini_state_target_info target) ->
+        Some (ServerInit.Precomputed target), "Precomputed"
+      | Some _, _, Some (ServerArgs.Mini_state_target_info target) ->
+        Hh_logger.log "Warning - Both a mini script in the server config %s"
+          "and a mini state target in server args are configured";
+        Hh_logger.log "Ignoring the script and using precomputed target";
+        Some (ServerInit.Precomputed target), "Precompute_override"
+
 let program_init genv =
+  let load_mini_approach, approach_name = resolve_init_approach genv in
   let env, init_type, state_distance =
-    (* If we are saving, always start from a fresh state -- just in case
-     * incremental mode introduces any errors. *)
-    if genv.local_config.ServerLocalConfig.use_mini_state &&
-      not (ServerArgs.no_load genv.options) &&
-      ServerArgs.save_filename genv.options = None then
-      let load_mini_approach = match
-        (ServerConfig.load_mini_script genv.config),
-        (genv.local_config.ServerLocalConfig.load_state_natively),
-        (ServerArgs.with_mini_state genv.options) with
-        | None, _, None ->
-          None
-        | Some _, true, None ->
-          (** Use native loading only if the config specifies a load script,
-           * and the local config prefers native. *)
-          Some ServerInit.Load_state_natively
-        | Some load_mini_script, false, None ->
-          Some (ServerInit.Load_mini_script load_mini_script)
-        | None, _, Some target ->
-          Some (ServerInit.Precomputed target)
-        | Some _, _, Some target ->
-          Hh_logger.log "Warning - Both a mini script in the server config %s"
-            "and a mini state target in server args are configured";
-          Hh_logger.log "Ignoring the script and using precomputed target";
-          Some (ServerInit.Precomputed target)
-      in
-      match load_mini_approach with
-      | None ->
-        let env, _ = ServerInit.init genv in
-        env, "fresh", None
-      | Some load_mini_approach ->
-        let env, init_result = ServerInit.init ~load_mini_approach genv in
-        match init_result with
-          | ServerInit.Mini_load distance -> env, "mini_load", distance
-          | ServerInit.Mini_load_failed err -> env, err, None
-    else
+    match load_mini_approach with
+    | None ->
       let env, _ = ServerInit.init genv in
       env, "fresh", None
+    | Some load_mini_approach ->
+      let env, init_result = ServerInit.init ~load_mini_approach genv in
+      begin match init_result with
+        | ServerInit.Mini_load distance -> env, "mini_load", distance
+        | ServerInit.Mini_load_failed err -> env, err, None
+      end
   in
   let timeout = genv.local_config.ServerLocalConfig.load_mini_script_timeout in
   EventLogger.set_init_type init_type;
-  HackEventLogger.init_end ~state_distance init_type timeout;
+  HackEventLogger.init_end ~state_distance ~approach_name init_type timeout;
   Hh_logger.log "Waiting for daemon(s) to be ready...";
   genv.wait_until_ready ();
   ServerStamp.touch_stamp ();
-  HackEventLogger.init_really_end ~state_distance init_type;
+  HackEventLogger.init_really_end ~state_distance ~approach_name init_type;
   env
 
 let setup_server ~informant_managed options handle =
@@ -465,8 +469,12 @@ let setup_server ~informant_managed options handle =
     incremental_init;
     search_chunk_size;
     load_script_config;
+    max_workers;
+    max_bucket_size;
+    load_tiny_state;
     _
   } as local_config = local_config in
+  List.iter (ServerConfig.ignored_paths config) ~f:FilesToIgnore.ignore_path;
   let saved_state_load_type =
     LoadScriptConfig.saved_state_load_type_to_string load_script_config in
   let use_sql =
@@ -481,7 +489,10 @@ let setup_server ~informant_managed options handle =
     incremental_init
     saved_state_load_type
     use_sql
-    search_chunk_size;
+    search_chunk_size
+    max_workers
+    max_bucket_size
+    load_tiny_state;
   let root_s = Path.to_string root in
   let check_mode = ServerArgs.check_mode options in
   if not check_mode && Sys_utils.is_nfs root_s && not enable_on_nfs then begin

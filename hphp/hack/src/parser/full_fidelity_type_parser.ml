@@ -8,27 +8,43 @@
  *
  *)
 
-module Token = Full_fidelity_minimal_token
+module WithSyntax(Syntax : Syntax_sig.Syntax_S) = struct
+
+module Token = Syntax.Token
 module SyntaxKind = Full_fidelity_syntax_kind
 module TokenKind = Full_fidelity_token_kind
 module SourceText = Full_fidelity_source_text
 module SyntaxError = Full_fidelity_syntax_error
-module SimpleParser =
-  Full_fidelity_simple_parser.WithLexer(Full_fidelity_type_lexer)
+module SimpleParserSyntax = Full_fidelity_simple_parser.WithSyntax(Syntax)
+module SimpleParser = SimpleParserSyntax.WithLexer(
+  Full_fidelity_type_lexer.WithToken(Syntax.Token))
+
+module type ExpressionParser_S = Full_fidelity_expression_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .ExpressionParser_S
+
+module type TypeParser_S = Full_fidelity_type_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_type_lexer.WithToken(Syntax.Token))
+  .TypeParser_S
+
+module ParserHelperSyntax = Full_fidelity_parser_helpers.WithSyntax(Syntax)
+module ParserHelper = ParserHelperSyntax
+  .WithLexer(Full_fidelity_type_lexer.WithToken(Syntax.Token))
 
 open TokenKind
-open Full_fidelity_minimal_syntax
+open Syntax
 
-module WithExpressionParser (ExpressionParser :
-    Full_fidelity_expression_parser_type.ExpressionParserType) :
-  Full_fidelity_type_parser_type.TypeParserType = struct
+module WithExpressionParser (ExpressionParser : ExpressionParser_S) :
+  TypeParser_S = struct
 
 include SimpleParser
-include Full_fidelity_parser_helpers.WithParser(SimpleParser)
+include ParserHelper.WithParser(SimpleParser)
 
 let parse_expression parser =
-  let expr_parser = ExpressionParser.make parser.lexer
-    parser.errors parser.context in
+  let expr_parser = ExpressionParser.make
+    parser.env parser.lexer parser.errors parser.context in
   let (expr_parser, node) = ExpressionParser.parse_expression expr_parser in
   let lexer = ExpressionParser.lexer expr_parser in
   let errors = ExpressionParser.errors expr_parser in
@@ -248,9 +264,16 @@ and parse_type_or_ellipsis_list parser close_kind =
 
 and parse_type_or_ellipsis parser =
   let (parser1, token) = next_token parser in
-  match Token.kind token with
-  | DotDotDot -> (parser1, make_variadic_parameter (make_token token))
-  | _ -> parse_type_specifier parser
+  if Token.kind token = DotDotDot then
+    (parser1, make_variadic_parameter (make_missing ()) (make_token token))
+  else begin
+    let (parser, ts) = parse_type_specifier parser in
+    let (parser1, token) = next_token parser in
+    match Token.kind token with
+    | DotDotDot ->
+      (parser1, make_variadic_parameter ts (make_token token))
+    | _ -> (parser, ts)
+  end
 
 and parse_generic_type_argument_list parser =
   (* SPEC:
@@ -690,3 +713,4 @@ and parse_return_type parser =
     parse_type_specifier parser
 
 end
+end (* WithSyntax *)

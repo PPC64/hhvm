@@ -8,7 +8,7 @@
  *
 *)
 
-open Core
+open Hh_core
 open Instruction_sequence
 open Ast_class_expr
 module A = Ast
@@ -21,10 +21,11 @@ let from_variadic_param_hint_opt ho =
 
 let resolve_class_id ~scope cid =
   let cexpr, _ = expr_to_class_expr ~resolve_self:true
-    scope (id_to_expr cid) in
+    scope cid in
   match cexpr with
-  | Class_id cid -> cid
-  | Class_parent | Class_self | Class_static | Class_expr _ -> cid
+  | Class_id ((p, _) as cid) -> p, A.Id cid
+  | Class_parent | Class_self | Class_static | Class_expr _
+  | Class_unnamed_local _ -> cid
 
 let resolver_visitor =
 object(_)
@@ -38,7 +39,6 @@ object(_)
     let cid = resolve_class_id ~scope cid in
     A.Class_const (cid, id)
 
-  method on_Markup _ parent _ _ = parent
 end
 
 let get_hint_display_name hint =
@@ -114,7 +114,7 @@ let default_type_check param_name param_type_info param_expr =
   (* If matches, return None, otherwise return default_type *)
   let default_type = Option.bind hint_type (function hint_type ->
       match_default_and_hint
-      (Emit_env.is_hh_file () || Hhbc_options.enable_hiphop_syntax !Hhbc_options.compiler_options)
+      (Emit_env.is_hh_syntax_enabled ())
       hint_type param_expr)
   in
   let param_true_name = Hhbc_string_utils.Locals.strip_dollar param_name
@@ -131,6 +131,11 @@ let default_type_check param_name param_type_info param_expr =
 let from_ast ~tparams ~namespace ~generate_defaults ~scope p =
   let param_name = snd p.A.param_id in
   let param_is_variadic = p.Ast.param_is_variadic in
+  if param_is_variadic && p.Ast.param_hint <> None && not (Emit_env.is_hh_file ())
+  then Emit_fatal.raise_fatal_parse Pos.none @@
+    Printf.sprintf
+      "Parameter %s is variadic and has a type constraint; variadic params with type constraints are not supported in non-Hack files"
+      param_name;
   let param_user_attributes =
     Emit_attribute.from_asts namespace p.Ast.param_user_attributes in
   let param_hint =
@@ -166,7 +171,7 @@ let from_ast ~tparams ~namespace ~generate_defaults ~scope p =
     param_user_attributes param_type_info param_default_value)
 
 let rename_params params =
-  let names = Core.List.fold_left params
+  let names = Hh_core.List.fold_left params
     ~init:SSet.empty ~f:(fun n p -> SSet.add (Hhas_param.name p) n) in
   let rec rename param_counts param =
     let name = Hhas_param.name param in
@@ -180,7 +185,7 @@ let rename_params params =
       then rename param_counts param
       else param_counts, (Hhas_param.with_name newname param)
   in
-    List.rev (snd (Core.List.map_env SMap.empty (List.rev params) rename))
+    List.rev (snd (Hh_core.List.map_env SMap.empty (List.rev params) rename))
 
 let from_asts ~namespace ~tparams ~generate_defaults ~scope ast_params =
   let hhas_params = List.filter_map ast_params

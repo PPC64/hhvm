@@ -14,8 +14,6 @@
  *
  *   buck run //hphp/hack/src:generate_full_fidelity
  *
- * This module contains the type describing the structure of a syntax tree.
- *
  **
  *
  * This module contains the type describing the structure of a syntax tree.
@@ -280,12 +278,14 @@ module MakeSyntaxType(Token : TokenType)(SyntaxValue : SyntaxValueType) = struct
   and parameter_declaration =
     { parameter_attribute                                : t
     ; parameter_visibility                               : t
+    ; parameter_call_convention                          : t
     ; parameter_type                                     : t
     ; parameter_name                                     : t
     ; parameter_default_value                            : t
     }
   and variadic_parameter =
-    { variadic_parameter_ellipsis                        : t
+    { variadic_parameter_type                            : t
+    ; variadic_parameter_ellipsis                        : t
     }
   and attribute_specification =
     { attribute_specification_left_double_angle          : t
@@ -612,6 +612,11 @@ module MakeSyntaxType(Token : TokenType)(SyntaxValue : SyntaxValueType) = struct
     { instanceof_left_operand                            : t
     ; instanceof_operator                                : t
     ; instanceof_right_operand                           : t
+    }
+  and is_expression =
+    { is_left_operand                                    : t
+    ; is_operator                                        : t
+    ; is_right_operand                                   : t
     }
   and conditional_expression =
     { conditional_test                                   : t
@@ -1061,6 +1066,7 @@ module MakeSyntaxType(Token : TokenType)(SyntaxValue : SyntaxValueType) = struct
   | PostfixUnaryExpression                  of postfix_unary_expression
   | BinaryExpression                        of binary_expression
   | InstanceofExpression                    of instanceof_expression
+  | IsExpression                            of is_expression
   | ConditionalExpression                   of conditional_expression
   | EvalExpression                          of eval_expression
   | EmptyExpression                         of empty_expression
@@ -1191,6 +1197,7 @@ module MakeValidated(Token : TokenType)(SyntaxValue : SyntaxValueType) = struct
   | ExprPostfixUnary                  of postfix_unary_expression
   | ExprBinary                        of binary_expression
   | ExprInstanceof                    of instanceof_expression
+  | ExprIs                            of is_expression
   | ExprConditional                   of conditional_expression
   | ExprEval                          of eval_expression
   | ExprEmpty                         of empty_expression
@@ -1303,6 +1310,7 @@ module MakeValidated(Token : TokenType)(SyntaxValue : SyntaxValueType) = struct
   | LambdaPostfixUnary                  of postfix_unary_expression
   | LambdaBinary                        of binary_expression
   | LambdaInstanceof                    of instanceof_expression
+  | LambdaIs                            of is_expression
   | LambdaConditional                   of conditional_expression
   | LambdaEval                          of eval_expression
   | LambdaEmpty                         of empty_expression
@@ -1350,6 +1358,7 @@ module MakeValidated(Token : TokenType)(SyntaxValue : SyntaxValueType) = struct
   | CExprPostfixUnary                  of postfix_unary_expression
   | CExprBinary                        of binary_expression
   | CExprInstanceof                    of instanceof_expression
+  | CExprIs                            of is_expression
   | CExprConditional                   of conditional_expression
   | CExprEval                          of eval_expression
   | CExprEmpty                         of empty_expression
@@ -1584,12 +1593,14 @@ module MakeValidated(Token : TokenType)(SyntaxValue : SyntaxValueType) = struct
   and parameter_declaration =
     { parameter_attribute: attribute_specification option value
     ; parameter_visibility: Token.t option value
+    ; parameter_call_convention: Token.t option value
     ; parameter_type: specifier option value
     ; parameter_name: expression value
     ; parameter_default_value: simple_initializer option value
     }
   and variadic_parameter =
-    { variadic_parameter_ellipsis: Token.t value
+    { variadic_parameter_type: simple_type_specifier option value
+    ; variadic_parameter_ellipsis: Token.t value
     }
   and attribute_specification =
     { attribute_specification_left_double_angle: Token.t value
@@ -1917,6 +1928,11 @@ module MakeValidated(Token : TokenType)(SyntaxValue : SyntaxValueType) = struct
     ; instanceof_operator: Token.t value
     ; instanceof_right_operand: expression value
     }
+  and is_expression =
+    { is_left_operand: expression value
+    ; is_operator: Token.t value
+    ; is_right_operand: specifier value
+    }
   and conditional_expression =
     { conditional_test: expression value
     ; conditional_question: Token.t value
@@ -1983,7 +1999,7 @@ module MakeValidated(Token : TokenType)(SyntaxValue : SyntaxValueType) = struct
     ; list_right_paren: Token.t value
     }
   and collection_literal_expression =
-    { collection_literal_name: Token.t value
+    { collection_literal_name: specifier value
     ; collection_literal_left_brace: Token.t value
     ; collection_literal_initializers: constructor_expression listesque value
     ; collection_literal_right_brace: Token.t value

@@ -56,7 +56,12 @@ bool HPHPSessionAcceptor::canAccept(const SocketAddress& /*address*/) {
 }
 
 void HPHPSessionAcceptor::onIngressError(
-  const proxygen::HTTPSession& /*session*/, proxygen::ProxygenError error) {
+#ifdef PROXYGEN_HTTP_SESSION_USES_BASE
+  const proxygen::HTTPSessionBase& /*session*/,
+#else
+  const proxygen::HTTPSession& /*session*/,
+#endif
+  proxygen::ProxygenError error) {
   // This method is invoked when the HTTP library encountered some error before
   // it could completely parse the headers.  Most of these are HTTP garbage
   // (400 Bad Request) or client timeouts (408).
@@ -567,7 +572,7 @@ void ProxygenServer::reportShutdownStatus() {
                 getQueuedJobs(),
                 getLibEventConnectionCount(),
                 m_pendingTransports.size(),
-                Process::GetProcessRSS(getpid()));
+                Process::GetProcessRSS());
   m_worker.getEventBase()->runAfterDelay([this]{reportShutdownStatus();}, 500);
 }
 

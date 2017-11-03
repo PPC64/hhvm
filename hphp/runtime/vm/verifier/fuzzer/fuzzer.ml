@@ -165,7 +165,7 @@ let mutate (mut: IS.t -> IS.t) (prog : HP.t) : int ->
   num_fold (fun a -> mutate_program mut prog |> Nondet.add_event a)
 
 (* produces sublist (i, k] of input lst *)
-let slice lst i k = Core.List.take (Core.List.drop lst (i + 1)) (k - i)
+let slice lst i k = Hh_core.List.take (Hh_core.List.drop lst (i + 1)) (k - i)
 
 open Hhbc_ast
 
@@ -578,7 +578,7 @@ let mutate_reorder (input : HP.t) : mutation_monad =
                  subinstrs end2 (List.length instrs - 1) in
     (* Reattach fault regions that were discarded by converting to list *)
     IS.gather [IS.InstrSeq.flat_map (IS.Instr_list newseq)
-               (maintain_stack (seq_data is) Core.List.return);
+               (maintain_stack (seq_data is) Hh_core.List.return);
                IS.extract_fault_instructions is] in
   Nondet.return input |> mutate mut input !reorder_reps
 
@@ -671,7 +671,7 @@ let mutate_insert (input : HP.t) : mutation_monad =
 let mutate_metadata (input : HP.t)  =
   debug_print "Mutating metadata";
   let delete_map f l =
-    Core.List.filter_map l
+    Hh_core.List.filter_map l
       ~f:(fun x -> if should_mutate() then None else Some (f x)) in
   let mutate_option opt =
     if should_mutate () then None else opt in
@@ -815,7 +815,8 @@ let mutate_metadata (input : HP.t)  =
       (prog |> HP.functions |> delete_map mutate_fun_data)
       (prog |> HP.classes   |> delete_map (mutate_class_data ids))
       (prog |> HP.typedefs  |> delete_map mutate_typedef)
-      (prog |> HP.main      |> mutate_body_data) in
+      (prog |> HP.main      |> mutate_body_data)
+      Emit_symbol_refs.empty_symbol_refs in
   let open Nondet in
   return input |> num_fold
     (fun a -> mut_data input |> add_event a) !metadata_reps

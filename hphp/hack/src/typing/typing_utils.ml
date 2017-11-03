@@ -8,7 +8,7 @@
  *
  *)
 
-open Core
+open Hh_core
 open Typing_defs
 
 module N = Nast
@@ -79,14 +79,15 @@ let rec is_option env ty =
 
 let is_shape_field_optional env { sft_optional; sft_ty } =
   let optional_shape_field_enabled =
-    TypecheckerOptions.experimental_feature_enabled
-      (Env.get_options env)
-      TypecheckerOptions.experimental_optional_shape_field in
+    not @@
+      TypecheckerOptions.experimental_feature_enabled
+        (Env.get_options env)
+        TypecheckerOptions.experimental_disable_optional_and_unknown_shape_fields in
 
   if optional_shape_field_enabled then
     sft_optional
   else
-    is_option env sft_ty
+    is_option env sft_ty || sft_optional
 
 let is_class ty = match snd ty with
   | Tclass _ -> true
@@ -280,11 +281,7 @@ let get_printable_shape_field_name = Env.get_shape_field_name
 let apply_shape ~on_common_field ~on_missing_optional_field (env, acc)
   (r1, fields_known1, fdm1) (r2, fields_known2, fdm2) =
   begin match fields_known1, fields_known2 with
-    | FieldsFullyKnown, FieldsFullyKnown
-        when TypecheckerOptions.experimental_feature_enabled
-          (Env.get_options env)
-          TypecheckerOptions.experimental_unknown_fields_shape_is_not_subtype_of_known_fields_shape
-            ->
+    | FieldsFullyKnown, FieldsFullyKnown ->
         (* If both shapes are FieldsFullyKnown, then we must ensure that the
            supertype shape knows about every single field that could possibly
            be present in the subtype shape. *)
@@ -339,29 +336,29 @@ let apply_shape ~on_common_field ~on_missing_optional_field (env, acc)
 
 let shape_field_name_ env field =
   let open Nast in match field with
-    | String name -> Result.Ok (Ast.SFlit name)
-    | Class_const (CI (x, _), y) -> Result.Ok (Ast.SFclass_const (x, y))
+    | String name -> Ok (Ast.SFlit name)
+    | Class_const (CI (x, _), y) -> Ok (Ast.SFclass_const (x, y))
     | Class_const (CIself, y) ->
       let _, c_ty = Env.get_self env in
       (match c_ty with
       | Tclass (sid, _) ->
-        Result.Ok (Ast.SFclass_const(sid, y))
+        Ok (Ast.SFclass_const(sid, y))
       | _ ->
-        Result.Error `Expected_class)
-    | _ -> Result.Error `Invalid_shape_field_name
+        Error `Expected_class)
+    | _ -> Error `Invalid_shape_field_name
 
 let maybe_shape_field_name env field =
   match shape_field_name_ env field with
-    | Result.Ok x -> Some x
-    | Result.Error _ -> None
+    | Ok x -> Some x
+    | Error _ -> None
 
 let shape_field_name env p field =
   match shape_field_name_ env field with
-    | Result.Ok x -> Some x
-    | Result.Error `Expected_class ->
+    | Ok x -> Some x
+    | Error `Expected_class ->
         Errors.expected_class p;
         None
-    | Result.Error `Invalid_shape_field_name ->
+    | Error `Invalid_shape_field_name ->
         Errors.invalid_shape_field_name p;
         None
 
@@ -548,9 +545,14 @@ end
 (* Function parameters *)
 (*****************************************************************************)
 
+let safe_pass_by_ref_enabled env =
+  TypecheckerOptions.experimental_feature_enabled
+    (Env.get_options env)
+    TypecheckerOptions.experimental_safe_pass_by_ref
+
 let default_fun_param ty : 'a fun_param = {
   fp_pos = Pos.none;
   fp_name = None;
   fp_type = ty;
-  fp_is_ref = false;
+  fp_kind = FPnormal;
 }

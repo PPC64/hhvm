@@ -204,6 +204,7 @@ and fun_param = {
    * can be only Public or Protected or Private.
    *)
   param_modifier: kind option;
+  param_callconv: param_kind option;
   param_user_attributes: user_attribute list;
 }
 
@@ -282,6 +283,7 @@ and stmt =
   | Def_inline of def
   | Noop
   | Markup of pstring * expr option
+  | Using of bool (* await? *) * expr * block
 
 and as_expr =
   | As_v of expr
@@ -315,8 +317,8 @@ and expr_ =
   | Clone of expr
   | Obj_get of expr * expr * og_null_flavor
   | Array_get of expr * expr option
-  | Class_get of id * expr
-  | Class_const of id * pstring
+  | Class_get of expr * expr
+  | Class_const of expr * pstring
   | Call of expr * hint list * expr list * expr list
   | Int of pstring
   | Float of pstring
@@ -336,6 +338,7 @@ and expr_ =
   | Eif of expr * expr option * expr
   | NullCoalesce of expr * expr
   | InstanceOf of expr * expr
+  | Is of expr * hint
   | BracedExpr of expr
   | New of expr * expr list * expr list
   (* Traditional PHP-style closure with a use list. Each use element is
@@ -349,6 +352,7 @@ and expr_ =
   | Xml of id * (id * expr) list * expr list
   | Unsafeexpr of expr
   | Import of import_flavor * expr
+  | Callconv of param_kind * expr
 
 and import_flavor =
   | Include

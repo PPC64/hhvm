@@ -1646,27 +1646,21 @@ To string conversions:
   the caller.  The `suspendingResumed' flag indicates when this instruction is
   suspending a resumable rather than performing a normal function return.
 
-| AsyncRetCtrl<spOff,suspendingResumed>, ND,
-|                                        S(StkPtr) S(FramePtr) S(InitNull),
-|                                        T
+| AsyncRetCtrl<spOff>, ND, S(StkPtr) S(FramePtr), T
 
-  Ensure that S0 + `spOff` (in cells) is stored in rvmsp and that S1 is stored
-  in rvmfp.  The `suspendingResumed' flag indicates when this instruction is
-  suspending a resumable rather than performing an async function return.
-  Returns by leaving the TC to enterTCHelper.
+  Return control to the asio scheduler.  Ensure that S0 + `spOff` (in cells)
+  is stored in rvmsp and that S1 is stored in rvmfp.  Only one cell containing
+  uninitialized garbage must be left on the stack, which will be populated by
+  the enterTCExit stub using the null returned via rret_type() register.
 
-  The return value is S2, which is passed via the rret_*() registers, and must
-  be null---it is only used for enterTCHelper and ignored by everything else;
-  resumed functions store their real return value into the Resumable object.
-
-| AsyncRetFast<spOff,suspendingResumed>, ND, S(StkPtr) S(FramePtr) S(Cell), T
+| AsyncRetFast<spOff>, ND, S(StkPtr) S(FramePtr) S(Cell), T
 
   Packs retVal (S2) into registers, sync stack (S0) and calls the asyncRetCtrl
   unique stub. The stub unblocks parents of the async function (represented by
   the frame pointer S1) and determines if it's possible to resume parent
   directly (fast path).
 
-| AsyncSwitchFast<spOff,suspendingResumed>, ND, S(StkPtr) S(FramePtr) S(Cell), T
+| AsyncSwitchFast<spOff>, ND, S(StkPtr) S(FramePtr), T
 
   Pass control to any pending fast resumable wait handles, bypassing the
   scheduler.  If no fast resumables are pending, behave like AsyncRetCtrl.
@@ -2215,6 +2209,13 @@ To string conversions:
   non-finished child S4.  This version of the instruction guarantees that the
   VarEnv is unused.
 
+| CreateAAWH<local,count>, DAllocObj, S(FramePtr) S(Int), PRc
+
+  Create an AwaitAllWaitHandle and add the count elements from frame contiguous
+  frame locals beginning at local and extending count locals. S1 denotes the
+  total number of non-completed waithandles. All locals must be subclasses of
+  WaitHandle.
+
 | CreateSSWH, DAllocObj, S(Cell), CRc|PRc
 
   Call c_StaticWaitHandle::CreateSucceeded.
@@ -2352,6 +2353,15 @@ To string conversions:
 
   Loads the result of the WaitHandle in S0. This instruction has undefined
   behavior if S0 is not a WaitHandle, or if S0 is not finished.
+
+| LdWHNotDone, D(Int), S(Obj), NF
+
+  Returns 1 if S0 is not finished, and 0 if S0 is finished.
+
+| CountWHNotDone<local,count>, D(Int), S(FramePtr), NF
+
+  Returns the number of unfinished waithandles contained in the contiguous
+  locals beginning at local and extending count.
 
 | LdAFWHActRec, D(FramePtr), S(Obj), NF
 

@@ -12,92 +12,127 @@ module TriviaKind = Full_fidelity_trivia_kind
 module TokenKind = Full_fidelity_token_kind
 module SourceText = Full_fidelity_source_text
 module SyntaxError = Full_fidelity_syntax_error
-module Trivia = Full_fidelity_minimal_trivia
-module Token = Full_fidelity_minimal_token
+module Lexer : sig
+  type t
+  val make : SourceText.t -> t
+  val start : t -> int
+  val source : t -> SourceText.t
+  val errors : t -> SyntaxError.t list
+  val offset : t -> int
 
-type t = {
-  text : SourceText.t;
-  start : int;  (* Both start and offset are absolute offsets in the text. *)
-  offset : int;
-  errors : SyntaxError.t list
-}
+  val with_error : t -> string -> t
+  val with_offset : t -> int -> t
+  val with_offset_errors : t -> int -> SyntaxError.t list -> t
+  val start_new_lexeme : t -> t
+  val advance : t -> int -> t
+end = struct
 
-type lexer = t
+  type t = {
+    text : SourceText.t;
+    start : int;  (* Both start and offset are absolute offsets in the text. *)
+    offset : int;
+    errors : SyntaxError.t list
+  }
+
+  let make text =
+    { text; start = 0; offset = 0; errors = [] }
+
+  let start  x = x.start
+  let source x = x.text
+  let errors x = x.errors
+  let offset x = x.offset
+
+  let with_error lexer message =
+    let error = SyntaxError.make lexer.start lexer.offset message in
+    { lexer with errors = error :: lexer.errors }
+
+  let with_offset lexer offset = {lexer with offset = offset}
+
+  let with_offset_errors lexer offset errors = {
+    lexer with offset = offset; errors = errors
+  }
+
+  let start_new_lexeme lexer =
+    { lexer with start = lexer.offset }
+
+  let advance lexer index =
+    { lexer with offset = lexer.offset + index }
+end
+
+module WithToken(Token: Lexable_token_sig.LexableToken_S) = struct
+
+module Trivia = Token.Trivia
+
+type lexer = Lexer.t
+type t = lexer
+
+let make = Lexer.make
+let start = Lexer.start
+let source = Lexer.source
+let errors = Lexer.errors
+let offset = Lexer.offset
+let with_error = Lexer.with_error
+let with_offset = Lexer.with_offset
+let start_new_lexeme = Lexer.start_new_lexeme
+let advance = Lexer.advance
+let with_offset_errors = Lexer.with_offset_errors
+
+let start_offset = start
+let end_offset = offset
 
 let invalid = '\000'
 
-let make text =
-  { text; start = 0; offset = 0; errors = [] }
-
 let empty = make SourceText.empty
-
-let source lexer =
-  lexer.text
-
-let errors lexer =
-  lexer.errors
-
-let with_error lexer message =
-  let error = SyntaxError.make lexer.start lexer.offset message in
-  { lexer with errors = error :: lexer.errors }
 
 (* Housekeeping *)
 
-let start_new_lexeme lexer =
-  { lexer with start = lexer.offset }
-
 let peek_char lexer index =
-  let i = lexer.offset + index in
-  if i >= SourceText.length lexer.text || i < 0 then invalid
-  else SourceText.get lexer.text i
+  let i = offset lexer + index in
+  if i >= SourceText.length (source lexer) || i < 0 then invalid
+  else SourceText.get (source lexer) i
 
 let peek_string lexer size =
-  let r = (SourceText.length lexer.text) - lexer.offset in
+  let r = (SourceText.length (source lexer)) - offset lexer in
   if r < 0 then ""
-  else if r < size then SourceText.sub lexer.text lexer.offset r
-  else SourceText.sub lexer.text lexer.offset size
+  else if r < size then SourceText.sub (source lexer) (offset lexer) r
+  else SourceText.sub (source lexer) (offset lexer) size
 
 let match_string lexer s =
   s = peek_string lexer (String.length s)
 
 let make_error_with_location (l : lexer) (msg : string) =
-  SyntaxError.make l.start l.offset msg
-
-let advance lexer index =
-  match index with
-  | 0 -> lexer
-  | _ -> { lexer with offset = lexer.offset + index }
-
-let with_offset lexer offset =
-  if offset = lexer.offset then lexer else {lexer with offset = offset}
+  SyntaxError.make (start l) (offset l) msg
 
 let width lexer =
-  lexer.offset - lexer.start
+  (offset lexer) - (start lexer)
 
 let current_text lexer =
-  SourceText.sub lexer.text lexer.start (width lexer)
+  SourceText.sub (source lexer) (start lexer) (width lexer)
 
 let current_text_at lexer length relative_start =
-  SourceText.sub lexer.text (lexer.start + relative_start) length
+  SourceText.sub (source lexer) ((start lexer) + relative_start) length
 
 let at_end lexer =
-  lexer.offset >= SourceText.length lexer.text
+  (offset lexer) >= SourceText.length (source lexer)
+
+let at_end_index lexer index =
+  index >= SourceText.length (source lexer)
 
 let remaining lexer =
-  let r = (SourceText.length lexer.text) - lexer.offset in
+  let r = (SourceText.length (source lexer)) - offset lexer in
   if r < 0 then 0 else r
 
-let start_offset lexer =
-  lexer.start
-
-let end_offset lexer =
-  lexer.offset
-
 let text_len (l : lexer) =
-  SourceText.length l.text
+  SourceText.length (source l)
 
 let peek (l : lexer) i =
-  SourceText.get l.text i
+  SourceText.get (source l) i
+
+let peek_def (l: lexer) i ~def =
+  if i >= SourceText.length (source l) then
+    def
+  else
+    SourceText.get (source l) i
 
 (* Character classification *)
 
@@ -132,13 +167,10 @@ let is_name_letter ch =
 (* create a new lexer where the offset is advanced as
  * long as the predicate is true *)
 let skip_while (l : lexer) (p : char -> bool) =
-  let n = SourceText.length l.text in
-  let peek = SourceText.get l.text in
-
+  let n = SourceText.length (source l) in
   let rec aux i =
-    if i < n && p (peek i) then aux (i + 1) else i in
-
-  with_offset l (aux l.offset)
+  if i < n && p (peek l i) then aux (i + 1) else i in
+  with_offset l (aux (offset l))
 
 let skip_whitespace (l : lexer) =
   let is_space ch = (ch = '\t' || ch = ' ') in
@@ -150,16 +182,13 @@ let skip_to_end_of_line (l : lexer) =
 
 let skip_to_end_of_line_or_end_tag (l : lexer) =
   let n = text_len l in
-  let peek i = peek l i in
-  let peek_def i = if i < n then peek i else invalid in
-
+  let peek_def i = if i < n then peek l i else invalid in
   let should_stop i =
     (i >= n) || begin
-      let ch = peek i in
+      let ch = peek l i in
       (is_newline ch) || (ch = '?' && peek_def (succ i) = '>')
     end in
-
-  let i = ref l.offset in
+  let i = ref (offset l) in
   while (not (should_stop !i)) do incr i done;
   with_offset l !i
 
@@ -167,12 +196,10 @@ let skip_name_end (l : lexer) =
   skip_while l is_name_letter
 
 let skip_end_of_line lexer =
-  let ch0 = peek_char lexer 0 in
-  let ch1 = peek_char lexer 1 in
-  match (ch0, ch1) with
-  | ('\r', '\n') -> advance lexer 2
-  | ('\r', _)
-  | ('\n', _) -> advance lexer 1
+  match peek_char lexer 0 with
+  | '\n' -> advance lexer 1
+  | '\r' ->
+    if (peek_char lexer 1) = '\n' then advance lexer 2 else advance lexer 1
   | _ -> lexer
 
 (* A qualified name which ends with a backslash is a namespace prefix; this is
@@ -222,18 +249,15 @@ let scan_variable lexer =
 
 let scan_with_underscores (l : lexer) accepted_char =
   let n = text_len l in
-  let peek i = peek l i in
-  let peek_def i = if i < n then peek i else invalid in
-
+  let peek_def i = if i < n then peek l i else invalid in
   let rec aux i =
     if i >= n then i
-    else let ch = peek i in
+    else let ch = peek l i in
       if accepted_char ch then aux (succ i)
       else if ch = ' ' && accepted_char (peek_def (succ i)) then
         aux (2 + i)
       else i in
-
-  with_offset l (aux l.offset)
+  with_offset l (aux (offset l))
 
 let scan_decimal_digits (l : lexer) =
   skip_while l is_decimal_digit
@@ -273,9 +297,9 @@ let scan_binary_literal lexer =
     (scan_binary_digits_with_underscores lexer, TokenKind.BinaryLiteral)
 
 let scan_exponent lexer =
-  let lexer = advance lexer 1 in
-  let ch = peek_char lexer 0 in
-  let lexer = if ch = '+' || ch = '-' then (advance lexer 1) else lexer in
+  let ch = peek_char lexer 1 in
+  let lexer = if ch = '+' || ch = '-' then (advance lexer 2)
+    else (advance lexer 1) in
   let ch = peek_char lexer 0 in
   if not (is_decimal_digit ch) then
     let lexer = with_error lexer SyntaxError.error0003 in
@@ -313,10 +337,11 @@ let scan_octal_or_float lexer =
         if ch = 'e' || ch = 'E' then scan_exponent lexer_oct
         else if ch = '.' then scan_after_decimal_point lexer_oct
         else
-        (* This is irritating - we only want to allow underscores for integer literals.
-         * Deferring the lexing with underscores here allows us to make sure we're not dealing
-         * with floats. *)
-        let lexer_oct_with_underscores = scan_octal_digits_with_underscores lexer in
+        (* This is irritating - we only want to allow underscores for integer
+        literals. Deferring the lexing with underscores here allows us to
+        make sure we're not dealing with floats. *)
+        let lexer_oct_with_underscores =
+          scan_octal_digits_with_underscores lexer in
         (lexer_oct_with_underscores, TokenKind.OctalLiteral)
       end
     else
@@ -359,8 +384,8 @@ let scan_execution_string_literal (l : lexer) =
   TODO: Are there any illegal characters in execution strings?
   *)
 
-  let n = SourceText.length l.text in
-  let peek = SourceText.get l.text in
+  let n = SourceText.length (source l) in
+  let peek = SourceText.get (source l) in
 
   let has_error0012 = ref false in
   let has_error0006 = ref false in
@@ -376,17 +401,17 @@ let scan_execution_string_literal (l : lexer) =
       | _      -> (last_pos (1 + i))
     end in
 
-  let new_offset = last_pos (1 + l.offset) in
+  let new_offset = last_pos (1 + (offset l)) in
 
   let new_errors =
     let err msg = make_error_with_location l msg in
     match (!has_error0006, !has_error0012) with
-    | (true, true) -> (err SyntaxError.error0006 :: err SyntaxError.error0012 :: l.errors)
-    | (true, false) -> (err SyntaxError.error0006 :: l.errors)
-    | (false, true) -> (err SyntaxError.error0012 :: l.errors)
-    | (false, false) -> l.errors in
+    | (true, true) -> (err SyntaxError.error0006 :: err SyntaxError.error0012 :: (errors l))
+    | (true, false) -> (err SyntaxError.error0006 :: (errors l))
+    | (false, true) -> (err SyntaxError.error0012 :: (errors l))
+    | (false, false) -> (errors l) in
 
-  let res = { l with errors = new_errors; offset = new_offset } in
+  let res = with_offset_errors l new_offset new_errors in
   (res, TokenKind.ExecutionString)
 
 let scan_single_quote_string_literal (l : lexer) =
@@ -410,8 +435,8 @@ let scan_single_quote_string_literal (l : lexer) =
 
   *)
 
-  let n = SourceText.length l.text in
-  let peek = SourceText.get l.text in
+  let n = SourceText.length (source l) in
+  let peek = SourceText.get (source l) in
 
   let has_error0012 = ref false in
   let has_error0006 = ref false in
@@ -428,17 +453,17 @@ let scan_single_quote_string_literal (l : lexer) =
       | _ -> stepper (1+i)
     end in
 
-  let new_offset = stepper (1 + l.offset) in
+  let new_offset = stepper (1 + (offset l)) in
 
   let new_errors =
     let err msg = make_error_with_location l msg in
     match (!has_error0006, !has_error0012) with
-    | (true, true) -> (err SyntaxError.error0006 :: err SyntaxError.error0012 :: l.errors)
-    | (true, false) -> (err SyntaxError.error0006 :: l.errors)
-    | (false, true) -> (err SyntaxError.error0012 :: l.errors)
-    | (false, false) -> l.errors in
+    | (true, true) -> (err SyntaxError.error0006 :: err SyntaxError.error0012 :: (errors l))
+    | (true, false) -> (err SyntaxError.error0006 :: (errors l))
+    | (false, true) -> (err SyntaxError.error0012 :: (errors l))
+    | (false, false) -> (errors l) in
 
-  let res = { l with errors = new_errors; offset = new_offset } in
+  let res = with_offset_errors l new_offset new_errors in
   (res, TokenKind.SingleQuotedStringLiteral)
 
 let scan_hexadecimal_escape lexer =
@@ -456,33 +481,31 @@ let scan_hexadecimal_escape lexer =
 
 let scan_unicode_escape lexer =
   (* At present the lexer is pointing at \u *)
-  let ch2 = peek_char lexer 2 in
-  let ch3 = peek_char lexer 3 in
-  match (ch2, ch3) with
-  | ( '{', '$') ->
-    (* We have a malformed unicode escape that contains a possible embedded
-    expression. Eat the \u and keep on processing the embedded expression. *)
-    (* TODO: Consider producing a warning for a malformed unicode escape. *)
-    advance lexer 2
-  | ('{', _) ->
-    (* We have a possibly well-formed escape sequence, and at least we know
-       that it is not an embedded expression. *)
-    (* TODO: Consider producing an error if the digits are out of range
-       of legal Unicode characters. *)
-    (* TODO: Consider producing an error if there are no digits. *)
-    (* Skip over the slash, u and brace, and start lexing the number. *)
-    let lexer = advance lexer 3 in
-    let lexer = scan_hexadecimal_digits lexer in
-    let ch = peek_char lexer 0 in
-    if ch != '}' then
+  if (peek_char lexer 2) = '{' then
+    if (peek_char lexer 3) = '$' then
+      (* We have a malformed unicode escape that contains a possible embedded
+      expression. Eat the \u and keep on processing the embedded expression. *)
       (* TODO: Consider producing a warning for a malformed unicode escape. *)
-      lexer
+      advance lexer 2
     else
-      advance lexer 1
-  | _ ->
-    (* We have a malformed unicode escape sequence. Bail out. *)
-    (* TODO: Consider producing a warning for a malformed unicode escape. *)
-    advance lexer 2
+      (* We have a possibly well-formed escape sequence, and at least we know
+         that it is not an embedded expression. *)
+      (* TODO: Consider producing an error if the digits are out of range
+         of legal Unicode characters. *)
+      (* TODO: Consider producing an error if there are no digits. *)
+      (* Skip over the slash, u and brace, and start lexing the number. *)
+      let lexer = advance lexer 3 in
+      let lexer = scan_hexadecimal_digits lexer in
+      let ch = peek_char lexer 0 in
+      if ch != '}' then
+        (* TODO: Consider producing a warning for a malformed unicode escape. *)
+        lexer
+      else
+        advance lexer 1
+    else
+      (* We have a malformed unicode escape sequence. Bail out. *)
+      (* TODO: Consider producing a warning for a malformed unicode escape. *)
+      advance lexer 2
 
 let skip_uninteresting_double_quote_string_characters (l : lexer) =
   let is_uninteresting ch =
@@ -493,15 +516,13 @@ let skip_uninteresting_double_quote_string_characters (l : lexer) =
   skip_while l is_uninteresting
 
 let scan_integer_literal lexer =
-  let ch0 = peek_char lexer 0 in
-  let ch1 = peek_char lexer 1 in
-  match (ch0, ch1) with
-  | ('0', 'x')
-  | ('0', 'X') -> scan_hex_literal (advance lexer 2)
-  | ('0', 'b')
-  | ('0', 'B') -> scan_binary_literal (advance lexer 2)
-  | ('0', _) -> (scan_octal_digits_with_underscores lexer, TokenKind.OctalLiteral)
-  | _ -> (scan_decimal_digits_with_underscores lexer, TokenKind.DecimalLiteral)
+  if (peek_char lexer 0) = '0' then
+    match peek_char lexer 1 with
+    | 'x' | 'X' -> scan_hex_literal (advance lexer 2)
+    | 'b' | 'B' -> scan_binary_literal (advance lexer 2)
+    | _ -> (scan_octal_digits_with_underscores lexer, TokenKind.OctalLiteral)
+  else
+    (scan_decimal_digits_with_underscores lexer, TokenKind.DecimalLiteral)
 
 let scan_double_quote_string_literal_from_start lexer =
   let rec aux lexer =
@@ -568,9 +589,8 @@ let scan_string_literal_in_progress lexer name =
     else
       (scan_name_impl lexer, TokenKind.Name)
   else
-    let ch1 = peek_char lexer 1 in
-    match (ch0, ch1) with
-    | ('\000', _) ->
+    match ch0 with
+    | '\000' ->
       if at_end lexer then
         let lexer = with_error lexer SyntaxError.error0012 in
         let kind =
@@ -582,65 +602,50 @@ let scan_string_literal_in_progress lexer name =
         let lexer = advance lexer 1 in
         let lexer = skip_uninteresting_double_quote_string_characters lexer in
         (lexer, TokenKind.StringLiteralBody)
-    | ('"', _) ->
+    | '"' ->
       let kind =
         if is_heredoc then TokenKind.StringLiteralBody
         else TokenKind.DoubleQuotedStringLiteralTail in
       (advance lexer 1, kind)
-    | ('$', _) ->
-      if is_name_nondigit ch1 then scan_variable lexer
+    | '$' ->
+      if is_name_nondigit (peek_char lexer 1) then scan_variable lexer
       else (advance lexer 1, TokenKind.Dollar)
-    | ('{', _) -> (advance lexer 1, TokenKind.LeftBrace)
-
-    (* In these cases we just skip the escape sequence and
-     keep on scanning for special characters. *)
-    | ('\\', '\\')
-    | ('\\', '"')
-    | ('\\', '$')
-    | ('\\', 'e')
-    | ('\\', 'f')
-    | ('\\', 'n')
-    | ('\\', 'r')
-    | ('\\', 't')
-    | ('\\', 'v')
-    (* Same in these cases; there might be more octal characters following but
-       if there are, we'll just eat them as normal characters. *)
-    | ('\\', '0')
-    | ('\\', '1')
-    | ('\\', '2')
-    | ('\\', '3')
-    | ('\\', '4')
-    | ('\\', '5')
-    | ('\\', '6')
-    | ('\\', '7') ->
-      let lexer = advance lexer 2 in
-      let lexer = skip_uninteresting_double_quote_string_characters lexer in
-      (lexer, TokenKind.StringLiteralBody)
-    | ('\\', 'x') ->
-      let lexer = scan_hexadecimal_escape lexer in
-      let lexer = skip_uninteresting_double_quote_string_characters lexer in
-      (lexer, TokenKind.StringLiteralBody)
-    | ('\\', 'u') ->
-      let lexer = scan_unicode_escape lexer in
-      let lexer = skip_uninteresting_double_quote_string_characters lexer in
-      (lexer, TokenKind.StringLiteralBody)
-    | ('\\', '{') ->
-      (* The rules for escaping open braces in Hack are bizarre. Suppose we have
-      $x = 123;
-      $y = 456;
-      $z = "\{$x,$y\}";
-      What is the value of $z?  Naively you would think that the backslash
-      escapes the braces, and the variables are embedded, so {123,456}. But
-      that's not what happens. Yes, the backslash makes the brace no longer
-      the opening brace of an expression. But the backslash is still part
-      of the string!  This is the string \{123,456\}.
-
-      TODO: We might want to fix this because this is very strange. *)
-      (* Eat the backslash and the brace. *)
-
-      let lexer = advance lexer 2 in
-      (lexer, TokenKind.StringLiteralBody)
-    | ('\\', _) ->
+    | '{' -> (advance lexer 1, TokenKind.LeftBrace)
+    | '\\' -> begin
+      match peek_char lexer 1 with
+      (* In these cases we just skip the escape sequence and
+       keep on scanning for special characters. *)
+      | '\\' | '"' | '$' | 'e' | 'f' | 'n' | 'r' | 't' | 'v'
+      (* Same in these cases; there might be more octal characters following but
+         if there are, we'll just eat them as normal characters. *)
+      | '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' ->
+        let lexer = advance lexer 2 in
+        let lexer = skip_uninteresting_double_quote_string_characters lexer in
+        (lexer, TokenKind.StringLiteralBody)
+      | 'x' ->
+        let lexer = scan_hexadecimal_escape lexer in
+        let lexer = skip_uninteresting_double_quote_string_characters lexer in
+        (lexer, TokenKind.StringLiteralBody)
+      | 'u' ->
+        let lexer = scan_unicode_escape lexer in
+        let lexer = skip_uninteresting_double_quote_string_characters lexer in
+        (lexer, TokenKind.StringLiteralBody)
+      | '{' ->
+        (* The rules for escaping open braces in Hack are bizarre. Suppose we
+           have
+        $x = 123;
+        $y = 456;
+        $z = "\{$x,$y\}";
+        What is the value of $z?  Naively you would think that the backslash
+        escapes the braces, and the variables are embedded, so {123,456}. But
+        that's not what happens. Yes, the backslash makes the brace no longer
+        the opening brace of an expression. But the backslash is still part
+        of the string!  This is the string \{123,456\}.
+        TODO: We might want to fix this because this is very strange. *)
+        (* Eat the backslash and the brace. *)
+        let lexer = advance lexer 2 in
+        (lexer, TokenKind.StringLiteralBody)
+    | _ ->
       (* TODO: A backslash followed by something other than an escape sequence
          is legal in hack, and treated as though it was just the backslash
          and the character. However we might consider making this a warning.
@@ -654,29 +659,28 @@ let scan_string_literal_in_progress lexer name =
          let lexer = advance lexer 1 in
          let lexer = skip_uninteresting_double_quote_string_characters lexer in
          (lexer, TokenKind.StringLiteralBody)
-    | ('[', _) ->
+      end
+    | '[' ->
       let lexer = advance lexer 1 in
       (lexer, TokenKind.LeftBracket)
-    | (']', _) ->
+    | ']' ->
       let lexer = advance lexer 1 in
       (lexer, TokenKind.RightBracket)
-    | ('-', '>') ->
-      let lexer = advance lexer 2 in
-      (lexer, TokenKind.MinusGreaterThan)
-    | ('0', _)
-    | ('1', _)
-    | ('2', _)
-    | ('3', _)
-    | ('4', _)
-    | ('5', _)
-    | ('6', _)
-    | ('7', _)
-    | ('8', _)
-    | ('9', _) ->
+    | '-' ->
+      if (peek_char lexer 1) = '>' then
+        let lexer = advance lexer 2 in
+        (lexer, TokenKind.MinusGreaterThan)
+      else
+        (* Nothing interesting here. Skip it and find the next
+           interesting character. *)
+        let lexer = advance lexer 1 in
+        let lexer = skip_uninteresting_double_quote_string_characters lexer in
+        (lexer, TokenKind.StringLiteralBody)
+    | '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' ->
       let (lexer1, _) as literal = scan_integer_literal lexer in
       if errors lexer == errors lexer1 then literal else
         (* If we failed to scan a literal, do not interpret the literal *)
-        ({ lexer with offset = lexer1.offset }, TokenKind.StringLiteralBody)
+        (with_offset lexer (offset lexer1), TokenKind.StringLiteralBody)
     | _ ->
       (* Nothing interesting here. Skip it and find the next
          interesting character. *)
@@ -719,7 +723,7 @@ let scan_docstring_name_actual lexer =
   if is_name_nondigit ch then
     let end_lexer = skip_name_end (advance lexer 1) in
     let name = SourceText.sub
-      lexer.text lexer.offset (end_lexer.offset - lexer.offset) in
+      (source lexer) (offset lexer) (offset end_lexer - offset lexer) in
     (end_lexer, name)
   else
     let lexer = with_error lexer SyntaxError.error0008 in
@@ -818,22 +822,20 @@ let scan_xhp_class_name lexer =
 
 let scan_xhp_string_literal lexer =
   (* XHP string literals are just straight up "find the closing quote"
-     strings.  TODO: What about newlines embedded? *)
-  let rec aux lexer =
-    let ch0 = peek_char lexer 0 in
-    let ch1 = peek_char lexer 1 in
-    match (ch0, ch1) with
-      | ('\000', _) ->
+     strings.  Embedded newlines are legal. *)
+  let rec aux lexer offset =
+    match peek_char lexer offset with
+      | '\000' ->
+        let lexer = advance lexer offset in
         if at_end lexer then
           let lexer = with_error lexer SyntaxError.error0012 in
           (lexer, TokenKind.XHPStringLiteral)
         else
           let lexer = with_error lexer SyntaxError.error0006 in
-          aux (advance lexer 1)
-
-      | ('"', _) -> (advance lexer 1, TokenKind.XHPStringLiteral)
-      | _ -> aux (advance lexer 1) in
-  aux (advance lexer 1)
+          aux lexer 1
+      | '"' -> (advance lexer (offset + 1), TokenKind.XHPStringLiteral)
+      | _ -> aux lexer (offset + 1) in
+  aux lexer 1
 
 (* Note that this does not scan an XHP body *)
 let scan_xhp_token ?(attribute=false) lexer =
@@ -841,35 +843,41 @@ let scan_xhp_token ?(attribute=false) lexer =
      opening tag, but does allow trivia between </ and name in a closing tag.
      Consider allowing trivia in an opening tag. *)
   let ch0 = peek_char lexer 0 in
-  let ch1 = peek_char lexer 1 in
-  match (ch0, ch1) with
-  | ('{', _) -> (advance lexer 1, TokenKind.LeftBrace)
-  | ('}', _) -> (advance lexer 1, TokenKind.RightBrace)
-  | ('=', _) -> (advance lexer 1, TokenKind.Equal)
-  | ('<', '/') -> (advance lexer 2, TokenKind.LessThanSlash)
-  | ('<', _) -> (advance lexer 1, TokenKind.LessThan)
-  | ('"', _) -> scan_xhp_string_literal lexer
-  | ('/', '>') -> (advance lexer 2, TokenKind.SlashGreaterThan)
-  | ('>', _) -> (advance lexer 1, TokenKind.GreaterThan)
-  | _ ->
-    if ch0 = invalid && at_end lexer then
-      (lexer, TokenKind.EndOfFile)
-    else if is_name_nondigit ch0 then
-      scan_xhp_element_name ~attribute lexer
+  if ch0 = invalid && at_end lexer then
+    (lexer, TokenKind.EndOfFile)
+  else if is_name_nondigit ch0 then
+    scan_xhp_element_name ~attribute lexer
+  else match ch0 with
+  | '{' -> (advance lexer 1, TokenKind.LeftBrace)
+  | '}' -> (advance lexer 1, TokenKind.RightBrace)
+  | '=' -> (advance lexer 1, TokenKind.Equal)
+  | '<' ->
+    if (peek_char lexer 1) = '/' then
+      (advance lexer 2, TokenKind.LessThanSlash)
+    else
+      (advance lexer 1, TokenKind.LessThan)
+  | '"' -> scan_xhp_string_literal lexer
+  | '/' ->
+    if (peek_char lexer 1) = '>' then
+      (advance lexer 2, TokenKind.SlashGreaterThan)
     else
       let lexer = with_error lexer SyntaxError.error0006 in
       (advance lexer 1, TokenKind.ErrorToken)
+  | '>' -> (advance lexer 1, TokenKind.GreaterThan)
+  | _ ->
+    let lexer = with_error lexer SyntaxError.error0006 in
+    (advance lexer 1, TokenKind.ErrorToken)
 
 let scan_xhp_comment lexer =
-  let rec aux lexer =
-    let ch0 = peek_char lexer 0 in
-    let ch1 = peek_char lexer 1 in
-    let ch2 = peek_char lexer 2 in
+  let rec aux lexer offset =
+    let ch0 = peek_char lexer offset in
+    let ch1 = peek_char lexer (offset + 1) in
+    let ch2 = peek_char lexer (offset + 2) in
     match (ch0, ch1, ch2) with
-    | ('\000', _, _) -> with_error lexer SyntaxError.error0014
-    | ('-', '-', '>') -> (advance lexer 3)
-    | _ -> aux (advance lexer 1) in
-  aux (advance lexer 4)
+    | ('\000', _, _) -> with_error (advance lexer offset) SyntaxError.error0014
+    | ('-', '-', '>') -> (advance lexer (offset + 3))
+    | _ -> aux lexer (offset + 1) in
+  aux lexer 4
 
 let scan_xhp_body lexer =
   (* Naively you might think that an XHP body is just a bunch of characters,
@@ -887,30 +895,34 @@ let scan_xhp_body lexer =
      we need to make XHP comments a sequence of tokens, rather than a
      single token as they are now.
   *)
-  let rec aux lexer =
-    let ch = peek_char lexer 0 in
+  let rec aux lexer offset =
+    let ch = peek_char lexer offset in
     match ch with
       | '\000' ->
+        let lexer = advance lexer offset in
         if at_end lexer then
           let lexer = with_error lexer SyntaxError.error0013 in
           lexer
         else
           let lexer = with_error lexer SyntaxError.error0006 in
-          aux (advance lexer 1)
-      | '\t' | ' ' | '\r' | '\n' | '{' | '}' | '<' -> lexer
-      | _ -> aux (advance lexer 1) in
+          aux lexer 1
+      | '\t' | ' ' | '\r' | '\n' | '{' | '}' | '<' -> advance lexer offset
+      | _ -> aux lexer (offset + 1) in
   let ch0 = peek_char lexer 0 in
-  let ch1 = peek_char lexer 1 in
-  let ch2 = peek_char lexer 2 in
-  let ch3 = peek_char lexer 3 in
-  match (ch0, ch1, ch2, ch3) with
-  | ('\000', _, _, _) when at_end lexer -> (lexer, TokenKind.EndOfFile)
-  | ('{', _, _, _) -> (advance lexer 1, TokenKind.LeftBrace)
-  | ('}', _, _, _) -> (advance lexer 1, TokenKind.RightBrace)
-  | ('<', '!', '-', '-') -> (scan_xhp_comment lexer, TokenKind.XHPComment)
-  | ('<', '/', _, _) -> (advance lexer 2, TokenKind.LessThanSlash)
-  | ('<', _, _, _) -> (advance lexer 1, TokenKind.LessThan)
-  | _ -> ((aux lexer), TokenKind.XHPBody)
+  match ch0 with
+  | '\000' when at_end lexer -> (lexer, TokenKind.EndOfFile)
+  | '{' -> (advance lexer 1, TokenKind.LeftBrace)
+  | '}' -> (advance lexer 1, TokenKind.RightBrace)
+  | '<' -> begin
+    let ch1 = peek_char lexer 1 in
+    let ch2 = peek_char lexer 2 in
+    let ch3 = peek_char lexer 3 in
+    match (ch1, ch2, ch3) with
+    | ('!', '-', '-') -> (scan_xhp_comment lexer, TokenKind.XHPComment)
+    | ('/', _, _) -> (advance lexer 2, TokenKind.LessThanSlash)
+    | _ -> (advance lexer 1, TokenKind.LessThan)
+    end
+  | _ -> ((aux lexer 0), TokenKind.XHPBody)
 
 let scan_dollar_token lexer =
   (*
@@ -942,122 +954,146 @@ let scan_dollar_token lexer =
      *)
   (* We are already at $. *)
   let ch1 = peek_char lexer 1 in
-  let ch2 = peek_char lexer 2 in
   match ch1 with
   | '$' ->
-    if is_name_nondigit ch2 then (advance lexer 1, TokenKind.Dollar) (* $$x *)
-    else if ch2 = '$' then (advance lexer 1, TokenKind.Dollar) (* $$$ *)
-    else (advance lexer 2, TokenKind.DollarDollar) (* $$ *)
+    let ch2 = peek_char lexer 2 in
+    if ch2 = '$' || is_name_nondigit ch2 then
+      (advance lexer 1, TokenKind.Dollar) (* $$x or $$$*)
+    else
+      (advance lexer 2, TokenKind.DollarDollar) (* $$ *)
   | _ ->
     if is_name_nondigit ch1 then scan_variable lexer (* $x *)
     else (advance lexer 1, TokenKind.Dollar) (* $ *)
 
 let scan_token in_type lexer =
   let ch0 = peek_char lexer 0 in
-  let ch1 = peek_char lexer 1 in
-  let ch2 = peek_char lexer 2 in
-  match (ch0, ch1, ch2) with
-  | ('[', _, _) -> (advance lexer 1, TokenKind.LeftBracket)
-  | (']', _, _) -> (advance lexer 1, TokenKind.RightBracket)
-  | ('(', _, _) -> (advance lexer 1, TokenKind.LeftParen)
-  | (')', _, _) -> (advance lexer 1, TokenKind.RightParen)
-  | ('{', _, _) -> (advance lexer 1, TokenKind.LeftBrace)
-  | ('}', _, _) -> (advance lexer 1, TokenKind.RightBrace)
-  | ('.', '=', _) -> (advance lexer 2, TokenKind.DotEqual)
-  | ('.', '.', '.') -> (advance lexer 3, TokenKind.DotDotDot)
-  | ('.', '0', _)
-  | ('.', '1', _)
-  | ('.', '2', _)
-  | ('.', '3', _)
-  | ('.', '4', _)
-  | ('.', '5', _)
-  | ('.', '6', _)
-  | ('.', '7', _)
-  | ('.', '8', _)
-  | ('.', '9', _) -> scan_after_decimal_point lexer
-  | ('.', _, _) -> (advance lexer 1, TokenKind.Dot)
-  | ('-', '=', _) -> (advance lexer 2, TokenKind.MinusEqual)
-  | ('-', '-', _) -> (advance lexer 2, TokenKind.MinusMinus)
-  | ('-', '>', _) -> (advance lexer 2, TokenKind.MinusGreaterThan)
-  | ('-', _, _) -> (advance lexer 1, TokenKind.Minus)
-  | ('+', '=', _) -> (advance lexer 2, TokenKind.PlusEqual)
-  | ('+', '+', _) -> (advance lexer 2, TokenKind.PlusPlus)
-  | ('+', _, _) -> (advance lexer 1, TokenKind.Plus)
-  | ('*', '=', _) -> (advance lexer 2, TokenKind.StarEqual)
-  | ('*', '*', '=') -> (advance lexer 3, TokenKind.StarStarEqual)
-  | ('*', '*', _) -> (advance lexer 2, TokenKind.StarStar)
-  | ('*', _, _) -> (advance lexer 1, TokenKind.Star)
-  | ('~', _, _) -> (advance lexer 1, TokenKind.Tilde)
-  | ('!', '=', '=') -> (advance lexer 3, TokenKind.ExclamationEqualEqual)
-  | ('!', '=', _) -> (advance lexer 2, TokenKind.ExclamationEqual)
-  | ('!', _, _) -> (advance lexer 1, TokenKind.Exclamation)
-  | ('$', _, _) -> scan_dollar_token lexer
-  | ('/', '=', _) -> (advance lexer 2, TokenKind.SlashEqual)
-  | ('/', _, _) -> (advance lexer 1, TokenKind.Slash)
-  | ('%', '=', _) -> (advance lexer 2, TokenKind.PercentEqual)
-  | ('%', _, _) -> (advance lexer 1, TokenKind.Percent)
-  | ('<', '<', '<') -> scan_docstring_literal lexer
-  | ('<', '<', '=') -> (advance lexer 3, TokenKind.LessThanLessThanEqual)
-  (* TODO: We lex and parse the spaceship operator.
-     TODO: This is not in the spec at present.  We should either make it an
-     TODO: error, or add it to the specification. *)
-  | ('<', '=', '>') -> (advance lexer 3, TokenKind.LessThanEqualGreaterThan)
-  | ('<', '>', _) -> (advance lexer 2, TokenKind.LessThanGreaterThan)
-  | ('<', '=', _) -> (advance lexer 2, TokenKind.LessThanEqual)
-  | ('<', '<', _) -> (advance lexer 2, TokenKind.LessThanLessThan)
-  | ('<', _, _) -> (advance lexer 1, TokenKind.LessThan)
-  | ('>', '>', '=') -> (advance lexer 3, TokenKind.GreaterThanGreaterThanEqual)
-  | ('>', '>', _) ->
+  match ch0 with
+  | '[' -> (advance lexer 1, TokenKind.LeftBracket)
+  | ']' -> (advance lexer 1, TokenKind.RightBracket)
+  | '(' -> (advance lexer 1, TokenKind.LeftParen)
+  | ')' -> (advance lexer 1, TokenKind.RightParen)
+  | '{' -> (advance lexer 1, TokenKind.LeftBrace)
+  | '}' -> (advance lexer 1, TokenKind.RightBrace)
+  | '.' -> begin
+    match peek_char lexer 1 with
+    | '=' -> (advance lexer 2, TokenKind.DotEqual)
+    | '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' ->
+      scan_after_decimal_point lexer
+    | '.' ->
+      if (peek_char lexer 2) = '.' then (advance lexer 3, TokenKind.DotDotDot)
+      else (advance lexer 1, TokenKind.Dot)
+    | _ -> (advance lexer 1, TokenKind.Dot)
+    end
+  | '-' -> begin
+    match peek_char lexer 1 with
+    | '=' -> (advance lexer 2, TokenKind.MinusEqual)
+    | '-' -> (advance lexer 2, TokenKind.MinusMinus)
+    | '>' -> (advance lexer 2, TokenKind.MinusGreaterThan)
+    | _ -> (advance lexer 1, TokenKind.Minus)
+    end
+  | '+' -> begin
+    match peek_char lexer 1 with
+    | '=' -> (advance lexer 2, TokenKind.PlusEqual)
+    | '+' -> (advance lexer 2, TokenKind.PlusPlus)
+    | _ -> (advance lexer 1, TokenKind.Plus)
+    end
+  | '*' -> begin
+    match (peek_char lexer 1, peek_char lexer 2) with
+    | ('=', _) -> (advance lexer 2, TokenKind.StarEqual)
+    | ('*', '=') -> (advance lexer 3, TokenKind.StarStarEqual)
+    | ('*', _) -> (advance lexer 2, TokenKind.StarStar)
+    | _ -> (advance lexer 1, TokenKind.Star)
+    end
+  | '~' -> (advance lexer 1, TokenKind.Tilde)
+  | '!' -> begin
+    match (peek_char lexer 1, peek_char lexer 2) with
+    | ('=', '=') -> (advance lexer 3, TokenKind.ExclamationEqualEqual)
+    | ('=', _) -> (advance lexer 2, TokenKind.ExclamationEqual)
+    | _ -> (advance lexer 1, TokenKind.Exclamation)
+    end
+  | '$' -> scan_dollar_token lexer
+  | '/' ->
+    if (peek_char lexer 1) = '=' then (advance lexer 2, TokenKind.SlashEqual)
+    else (advance lexer 1, TokenKind.Slash)
+  | '%' ->
+    if (peek_char lexer 1) = '=' then (advance lexer 2, TokenKind.PercentEqual)
+    else (advance lexer 1, TokenKind.Percent)
+  | '<' -> begin
+    match (peek_char lexer 1, peek_char lexer 2) with
+    | ('<', '<') -> scan_docstring_literal lexer
+    | ('<', '=') -> (advance lexer 3, TokenKind.LessThanLessThanEqual)
+    (* TODO: We lex and parse the spaceship operator.
+       TODO: This is not in the spec at present.  We should either make it an
+       TODO: error, or add it to the specification. *)
+    | ('=', '>') -> (advance lexer 3, TokenKind.LessThanEqualGreaterThan)
+    | ('>', _) -> (advance lexer 2, TokenKind.LessThanGreaterThan)
+    | ('=', _) -> (advance lexer 2, TokenKind.LessThanEqual)
+    | ('<', _) -> (advance lexer 2, TokenKind.LessThanLessThan)
+    | _ -> (advance lexer 1, TokenKind.LessThan)
+    end
+  | '>' -> begin
+    match (peek_char lexer 1, peek_char lexer 2) with
+    | ('>', '=') -> (advance lexer 3, TokenKind.GreaterThanGreaterThanEqual)
+    | ('>', _) ->
     (* If we are parsing a generic type argument list then we might be
        at the >> in List<List<int>>.  In that case we want to lex two
        >'s, not one >>. *)
-    if in_type then
-      (advance lexer 1, TokenKind.GreaterThan)
-    else
-      (advance lexer 2, TokenKind.GreaterThanGreaterThan)
-  | ('>', '=', _) -> (advance lexer 2, TokenKind.GreaterThanEqual)
-  | ('>', _, _) -> (advance lexer 1, TokenKind.GreaterThan)
-  | ('=', '=', '=') -> (advance lexer 3, TokenKind.EqualEqualEqual)
-  | ('=', '=', '>') -> (advance lexer 3, TokenKind.EqualEqualGreaterThan)
-  | ('=', '=', _) -> (advance lexer 2, TokenKind.EqualEqual)
-  | ('=', '>', _) -> (advance lexer 2, TokenKind.EqualGreaterThan)
-  | ('=', _, _) -> (advance lexer 1, TokenKind.Equal)
-  | ('^', '=', _) -> (advance lexer 2, TokenKind.CaratEqual)
-  | ('^', _, _) -> (advance lexer 1, TokenKind.Carat)
-  | ('|', '=', _) -> (advance lexer 2, TokenKind.BarEqual)
-  | ('|', '>', _) -> (advance lexer 2, TokenKind.BarGreaterThan)
-  | ('|', '|', _) -> (advance lexer 2, TokenKind.BarBar)
-  | ('|', _, _) -> (advance lexer 1, TokenKind.Bar)
-  | ('&', '=', _) -> (advance lexer 2, TokenKind.AmpersandEqual)
-  | ('&', '&', _) -> (advance lexer 2, TokenKind.AmpersandAmpersand)
-  | ('&', _, _) -> (advance lexer 1, TokenKind.Ampersand)
-  | ('?', '-', '>') -> (advance lexer 3, TokenKind.QuestionMinusGreaterThan)
-  | ('?', '?', _) -> (advance lexer 2, TokenKind.QuestionQuestion)
-  | ('?', '>', _) -> (advance lexer 2, TokenKind.QuestionGreaterThan)
-  | ('?', _, _) -> (advance lexer 1, TokenKind.Question)
-  | (':', ':', _) -> (advance lexer 2, TokenKind.ColonColon)
-  | (':', _, _) -> (advance lexer 1, TokenKind.Colon)
-  | (';', _, _) -> (advance lexer 1, TokenKind.Semicolon)
-  | (',', _, _) -> (advance lexer 1, TokenKind.Comma)
-  | ('@', _, _) -> (advance lexer 1, TokenKind.At)
-  | ('0', 'x', _)
-  | ('0', 'X', _) -> scan_hex_literal (advance lexer 2)
-  | ('0', 'b', _)
-  | ('0', 'B', _) -> scan_binary_literal (advance lexer 2)
-  | ('0', _, _) -> scan_octal_or_float lexer
-  | ('1', _, _)
-  | ('2', _, _)
-  | ('3', _, _)
-  | ('4', _, _)
-  | ('5', _, _)
-  | ('6', _, _)
-  | ('7', _, _)
-  | ('8', _, _)
-  | ('9', _, _) -> scan_decimal_or_float lexer
-  | ('`', _, _) -> scan_execution_string_literal lexer
-  | ('\'', _, _) -> scan_single_quote_string_literal lexer
-  | ('"', _, _) -> scan_double_quote_string_literal_from_start lexer
-  | ('\\', _, _) -> scan_qualified_name lexer
+      if in_type then
+        (advance lexer 1, TokenKind.GreaterThan)
+      else
+        (advance lexer 2, TokenKind.GreaterThanGreaterThan)
+    | ('=', _) -> (advance lexer 2, TokenKind.GreaterThanEqual)
+    | _ -> (advance lexer 1, TokenKind.GreaterThan)
+    end
+  | '=' -> begin
+    match (peek_char lexer 1, peek_char lexer 2) with
+    | ('=', '=') -> (advance lexer 3, TokenKind.EqualEqualEqual)
+    | ('=', '>') -> (advance lexer 3, TokenKind.EqualEqualGreaterThan)
+    | ('=', _) -> (advance lexer 2, TokenKind.EqualEqual)
+    | ('>', _) -> (advance lexer 2, TokenKind.EqualGreaterThan)
+    | _ -> (advance lexer 1, TokenKind.Equal)
+    end
+  | '^' ->
+    if (peek_char lexer 1) = '=' then (advance lexer 2, TokenKind.CaratEqual)
+    else (advance lexer 1, TokenKind.Carat)
+  | '|' -> begin
+    match peek_char lexer 1 with
+    | '=' -> (advance lexer 2, TokenKind.BarEqual)
+    | '>' -> (advance lexer 2, TokenKind.BarGreaterThan)
+    | '|' -> (advance lexer 2, TokenKind.BarBar)
+    | _ -> (advance lexer 1, TokenKind.Bar)
+    end
+  | '&' -> begin
+    match peek_char lexer 1 with
+    | '=' -> (advance lexer 2, TokenKind.AmpersandEqual)
+    | '&' -> (advance lexer 2, TokenKind.AmpersandAmpersand)
+    | _ -> (advance lexer 1, TokenKind.Ampersand)
+    end
+  | '?' -> begin
+    match (peek_char lexer 1, peek_char lexer 2) with
+    | ('-', '>') -> (advance lexer 3, TokenKind.QuestionMinusGreaterThan)
+    | ('?', _) -> (advance lexer 2, TokenKind.QuestionQuestion)
+    | ('>', _) -> (advance lexer 2, TokenKind.QuestionGreaterThan)
+    | _ -> (advance lexer 1, TokenKind.Question)
+    end
+  | ':' ->
+    if (peek_char lexer 1) = ':' then (advance lexer 2, TokenKind.ColonColon)
+    else (advance lexer 1, TokenKind.Colon)
+  | ';' -> (advance lexer 1, TokenKind.Semicolon)
+  | ',' -> (advance lexer 1, TokenKind.Comma)
+  | '@' -> (advance lexer 1, TokenKind.At)
+  | '0' -> begin
+    match peek_char lexer 1 with
+    | 'x' | 'X' -> scan_hex_literal (advance lexer 2)
+    | 'b' | 'B' -> scan_binary_literal (advance lexer 2)
+    | _ -> scan_octal_or_float lexer
+    end
+  | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' ->
+    scan_decimal_or_float lexer
+  | '`' -> scan_execution_string_literal lexer
+  | '\'' -> scan_single_quote_string_literal lexer
+  | '"' -> scan_double_quote_string_literal_from_start lexer
+  | '\\' -> scan_qualified_name lexer
   (* Names *)
   | _ ->
     if ch0 = invalid && at_end lexer then
@@ -1091,21 +1127,21 @@ let scan_token_outside_type = scan_token false
  *)
 
 let scan_end_of_line lexer =
-  let ch0 = peek_char lexer 0 in
-  let ch1 = peek_char lexer 1 in
-  match (ch0, ch1) with
-  | ('\r', '\n') ->  (advance lexer 2, Trivia.make_eol 2)
-  | ('\r', _)
-  | ('\n', _) ->  (advance lexer 1, Trivia.make_eol 1)
+  match peek_char lexer 0 with
+  | '\r' ->
+    let w = if peek_char lexer 1 = '\n' then 2 else 1 in
+    advance lexer w, Trivia.make_eol (source lexer) (start lexer) w
+  | '\n' -> (advance lexer 1, Trivia.make_eol (source lexer) (start lexer) 1)
   | _ -> failwith "scan_end_of_line called while not on end of line!"
 
 let scan_whitespace lexer =
   let lexer = skip_whitespace lexer in
-  (lexer, Trivia.make_whitespace (width lexer))
+  (lexer, Trivia.make_whitespace (source lexer) (start lexer) (width lexer))
 
 let scan_hash_comment lexer =
   let lexer = skip_to_end_of_line lexer in
-  let c = Trivia.make_single_line_comment (width lexer) in
+  let c = Trivia.make_single_line_comment
+    (source lexer) (start lexer) (width lexer) in
   (lexer, c)
 
 let scan_single_line_comment lexer =
@@ -1120,24 +1156,31 @@ let scan_single_line_comment lexer =
   let lexer_ws = skip_whitespace lexer in
   let lexer = skip_to_end_of_line_or_end_tag lexer_ws in
   let w = width lexer in
-  let remainder = lexer.offset - lexer_ws.offset in
+  let remainder = offset lexer - offset lexer_ws in
   let c =
     if remainder = 11 && peek_string lexer_ws 11 = "FALLTHROUGH" then
-      Trivia.make_fallthrough w
+      Trivia.make_fallthrough (source lexer) (start lexer) w
     else if remainder >= 6 && peek_string lexer_ws 6 = "UNSAFE" then
-      Trivia.make_unsafe w
+      Trivia.make_unsafe (source lexer) (start lexer) w
     else
-      Trivia.make_single_line_comment w in
+      Trivia.make_single_line_comment (source lexer) (start lexer) w in
   (lexer, c)
 
-let rec skip_to_end_of_delimited_comment lexer =
-  let ch0 = peek_char lexer 0 in
-  let ch1 = peek_char lexer 1 in
-  if ch0 = invalid && at_end lexer then
-    with_error lexer SyntaxError.error0007
-  else if ch0 = '*' && ch1 = '/' then
-    advance lexer 2
-  else skip_to_end_of_delimited_comment (advance lexer 1)
+let skip_to_end_of_delimited_comment lexer =
+  let rec aux lexer offset =
+    let ch0 = peek_char lexer offset in
+    if ch0 = invalid then
+      let lexer = advance lexer offset in
+      if at_end lexer then
+        with_error lexer SyntaxError.error0007
+      else
+        (* TODO: Do we want to give a warning for an embedded zero char
+        inside a comment? *)
+        aux lexer 1
+    else if ch0 = '*' && (peek_char lexer (offset + 1)) = '/' then
+      advance lexer (offset + 2)
+    else aux lexer (offset + 1) in
+  aux lexer 0
 
 let scan_delimited_comment lexer =
   (* An unsafe expression comment is a delimited comment that begins with any
@@ -1161,13 +1204,13 @@ let scan_delimited_comment lexer =
   let w = width lexer in
   let c =
     if match_string lexer_ws "UNSAFE_EXPR" then
-      Trivia.make_unsafe_expression w
+      Trivia.make_unsafe_expression (source lexer) (start lexer) w
     else if match_string lexer_ws "HH_FIXME" then
-      Trivia.make_fix_me w
+      Trivia.make_fix_me (source lexer) (start lexer) w
     else if match_string lexer_ws "HH_IGNORE_ERROR" then
-      Trivia.make_ignore_error w
+      Trivia.make_ignore_error (source lexer) (start lexer) w
     else
-      Trivia.make_delimited_comment w in
+      Trivia.make_delimited_comment (source lexer) (start lexer) w in
   (lexer, c)
 
 let scan_php_trivia lexer =
@@ -1186,24 +1229,24 @@ in Hack.
 TODO: Give an error if this appears in a Hack program.
 *)
   let lexer = start_new_lexeme lexer in
-  let ch0 = peek_char lexer 0 in
-  let ch1 = peek_char lexer 1 in
-  match (ch0, ch1) with
-  | ('#', _) ->
+  match peek_char lexer 0 with
+  | '#' ->
     let (lexer, c) = scan_hash_comment lexer in
     (lexer, Some c)
-  | ('/', '/') ->
-    let (lexer, c) = scan_single_line_comment lexer in
-    (lexer, Some c)
-  | ('/', '*') ->
-    let (lexer, c) = scan_delimited_comment lexer in
-    (lexer, Some c)
-  | (' ', _)
-  | ('\t', _) ->
+  | '/' -> begin
+    match peek_char lexer 1 with
+    | '/' ->
+      let (lexer, c) = scan_single_line_comment lexer in
+      (lexer, Some c)
+    | '*' ->
+      let (lexer, c) = scan_delimited_comment lexer in
+      (lexer, Some c)
+    | _ -> (lexer, None)
+    end
+  | ' ' | '\t' ->
     let (lexer, w) = scan_whitespace lexer in
     (lexer, Some w)
-  | ('\r', _)
-  | ('\n', _) ->
+  | '\r' | '\n' ->
     let (lexer, e) = scan_end_of_line lexer in
     (lexer, Some e)
   | _ -> (* Not trivia *) (lexer, None)
@@ -1212,15 +1255,11 @@ let scan_xhp_trivia lexer =
   (* TODO: Should XHP comments <!-- --> be their own thing, or a kind of
   trivia associated with a token? Right now they are the former. *)
   let lexer = start_new_lexeme lexer in
-  let ch0 = peek_char lexer 0 in
-  let ch1 = peek_char lexer 1 in
-  match (ch0, ch1) with
-  | (' ', _)
-  | ('\t', _) ->
+  match peek_char lexer 0 with
+  | ' ' | '\t' ->
     let (lexer, w) = scan_whitespace lexer in
     (lexer, Some w)
-  | ('\r', _)
-  | ('\n', _) ->
+  | '\r' | '\n' ->
     let (lexer, e) = scan_end_of_line lexer in
     (lexer, Some e)
   | _ -> (* Not trivia *) (lexer, None)
@@ -1228,21 +1267,25 @@ let scan_xhp_trivia lexer =
 let scan_xhp_colon_trivia (lexer : t) : t * Trivia.t =
   (* TODO(T21789285): Take this mess out *)
   let lexer = start_new_lexeme lexer in
-  let rec aux lexer ch0 =
-    let ch1 = peek_char lexer 1 in
+  let rec aux lexer index ch0 =
+    let ch1 = peek_def lexer (succ index) ~def:invalid in
     match ch0, ch1 with
     | '>', _
     | '/', '>'
     | '\n', _
     | '\r', '\n'
     | '}', _
-      -> lexer, Trivia.make_extra_token_error (width lexer)
-    | _ -> aux (advance lexer 1) ch1
+      -> begin
+        let lexer' = with_offset lexer index in
+        lexer', Trivia.make_extra_token_error
+          (source lexer) (start lexer) (width lexer')
+      end
+    | _ -> aux lexer (succ index) ch1
   in
   (* The only valid case to use this scanner is when a name was interrupted by
    * a colon *)
   let () = assert (peek_char lexer 0 = ':') in
-  let lexer, trivia = aux lexer ':' in
+  let lexer, trivia = aux lexer (offset lexer) ':' in
   with_error lexer SyntaxError.error1002, trivia
 
 (*
@@ -1279,7 +1322,7 @@ let scan_trailing_trivia scanner lexer  =
     match trivia with
     | None -> (lexer1, acc)
     | Some t -> begin
-      match t.Trivia.kind with
+      match Trivia.kind t with
       | TriviaKind.EndOfLine -> (lexer1, t :: acc)
       | TriviaKind.FixMe
       | TriviaKind.IgnoreError
@@ -1314,7 +1357,8 @@ let as_case_insensitive_keyword text =
   match lower with
   | "eval" | "isset" | "unset" | "empty" | "const" | "new"
   | "and"  | "or"    | "xor"  | "as" | "print" | "throw"
-  | "true" | "false" | "null" | "array" | "instanceof" -> lower
+  | "true" | "false" | "null" | "array" | "instanceof"
+  | "trait" | "class" | "interface" -> lower
   | _ -> text
 
 let as_keyword kind lexer =
@@ -1349,7 +1393,7 @@ let scan_token_and_trivia scanner as_name lexer  =
   let (lexer, trailing) =
     if suppress_trailing_trivia kind then (lexer, [])
     else scan_trailing_php_trivia lexer in
-  (lexer, Token.make kind w leading trailing)
+  (lexer, Token.make kind (source lexer) (start lexer) w leading trailing)
 
 (* tokenizer takes a lexer, returns a lexer and a token *)
 let scan_assert_progress tokenizer lexer  =
@@ -1362,10 +1406,8 @@ let scan_assert_progress tokenizer lexer  =
     (Token.kind token) = TokenKind.EndOfFile) then
       (lexer, token)
   else begin
-    let message = Printf.sprintf
-      "failed to make progress at %d\n" lexer.offset in
-    print_endline message;
-    assert false
+    Printf.kprintf failwith
+      "failed to make progress at %d\n" (offset lexer)
   end
 
 let scan_next_token as_name scanner lexer =
@@ -1381,9 +1423,11 @@ let scan_next_token_as_keyword = scan_next_token false
 (* This function is the inner loop of the parser, is pure, and
 is frequently called twice in a row with the same lexer due to the
 design of the parser. We get a big win by memoizing it. *)
+
+
 let next_token = (* takes a lexer, returns a (lexer, token) *)
   let next_token_cache = Little_cache.make empty
-    (empty, Full_fidelity_minimal_token.make TokenKind.EndOfFile 0 [] []) in
+    (empty, Token.make TokenKind.EndOfFile SourceText.empty 0 0 [] []) in
   Little_cache.memoize next_token_cache
     (scan_next_token_as_keyword scan_token_outside_type)
 
@@ -1391,7 +1435,7 @@ let next_token_no_trailing lexer =
   let tokenizer lexer =
     let (lexer, kind, w, leading) =
       scan_token_and_leading_trivia scan_token_outside_type false lexer in
-    (lexer, Token.make kind w leading []) in
+    (lexer, Token.make kind (source lexer) (start lexer) w leading []) in
   scan_assert_progress tokenizer lexer
 
 let next_token_in_string lexer name =
@@ -1405,7 +1449,7 @@ let next_token_in_string lexer name =
     | TokenKind.DoubleQuotedStringLiteralTail
     | TokenKind.HeredocStringLiteralTail -> scan_trailing_php_trivia lexer
     | _ -> (lexer, []) in
-  let token = Token.make kind w [] trailing in
+  let token = Token.make kind (source lexer) (start lexer) w [] trailing in
   (lexer, token)
 
 let next_docstring_header lexer =
@@ -1415,7 +1459,8 @@ let next_docstring_header lexer =
   let lexer = start_new_lexeme lexer in
   let (lexer, name, _) = scan_docstring_header lexer in
   let w = width lexer in
-  let token = Token.make TokenKind.HeredocStringLiteralHead w leading [] in
+  let token = Token.make TokenKind.HeredocStringLiteralHead
+    (source lexer) (start lexer) w leading [] in
   (lexer, token, name)
 
 let next_token_as_name lexer =
@@ -1435,20 +1480,23 @@ let next_xhp_element_token ~no_trailing ~attribute lexer =
     let (_, token1) = next_token lexer in
     match kind with
     | TokenKind.GreaterThan when no_trailing ->
-      (lexer, Token.make kind w leading [])
-    | TokenKind.XHPElementName when attribute && token1.Token.kind = TokenKind.Colon ->
+      (lexer, Token.make kind (source lexer) (start lexer) w leading [])
+    | TokenKind.XHPElementName
+      when attribute && Token.kind token1 = TokenKind.Colon ->
       (* TODO(T21789285): Take this hack out when illtyped xhp is gone *)
       let (lexer, dropped) = scan_xhp_colon_trivia lexer in
       let (lexer, trailing) = scan_trailing_xhp_trivia lexer in
-      (lexer, Token.make kind w leading (dropped :: trailing))
+      (lexer, Token.make kind
+        (source lexer) (start lexer) w leading (dropped :: trailing))
     | _ ->
       let (lexer, trailing) = scan_trailing_php_trivia lexer in
-      (lexer, Token.make kind w leading trailing) in
+      (lexer, Token.make
+          kind (source lexer) (start lexer) w leading trailing) in
   let (lexer, token) = scan_assert_progress tokenizer lexer in
   let token_width = Token.width token in
   let trailing_width = Token.trailing_width token in
-  let token_start_offset = lexer.offset - trailing_width - token_width in
-  let token_text = SourceText.sub lexer.text token_start_offset token_width in
+  let token_start_offset = (offset lexer) - trailing_width - token_width in
+  let token_text = SourceText.sub (source lexer) token_start_offset token_width in
   (lexer, token, token_text)
 
 let next_xhp_body_token lexer =
@@ -1467,7 +1515,7 @@ let next_xhp_body_token lexer =
       then scan_trailing_xhp_trivia lexer
       else (lexer, [])
     in
-    (lexer, Token.make kind w leading trailing) in
+    (lexer, Token.make kind (source lexer) (start lexer) w leading trailing) in
   scan_assert_progress scanner lexer
 
 let next_xhp_class_name lexer =
@@ -1477,13 +1525,13 @@ let next_xhp_name lexer =
   scan_token_and_trivia scan_xhp_element_name false lexer
 
 let make_markup_token lexer =
-  Token.make TokenKind.Markup (width lexer) [] []
+  Token.make TokenKind.Markup (source lexer) (start lexer) (width lexer) [] []
 
 let skip_to_end_of_markup lexer ~is_leading_section =
   let make_markup_and_suffix lexer =
     let markup_text = make_markup_token lexer in
     let less_than_question_token =
-      Token.make TokenKind.LessThanQuestion 2 [] []
+      Token.make TokenKind.LessThanQuestion (source lexer) (start lexer) 2 [] []
     in
     let make_long_tag lexer size =
       (* skip name*)
@@ -1495,7 +1543,8 @@ let skip_to_end_of_markup lexer ~is_leading_section =
         if is_leading_section then scan_trailing_php_trivia lexer
         else lexer, []
       in
-      let name = Token.make TokenKind.Name size [] trailing in
+      let name = Token.make TokenKind.Name
+        (source lexer) (start lexer) size [] trailing in
       lexer, markup_text, Some (less_than_question_token, Some name)
     in
     (* skip <? *)
@@ -1510,24 +1559,28 @@ let skip_to_end_of_markup lexer ~is_leading_section =
       begin
         (* skip = *)
         let lexer = advance lexer 1 in
-        let equal = Token.make TokenKind.Equal 1 [] [] in
+        let equal = Token.make TokenKind.Equal
+          (source lexer) (start lexer) 1 [] [] in
         lexer, markup_text, Some (less_than_question_token, Some equal)
       end
     | _ ->
       lexer, markup_text, Some (less_than_question_token, None)
   in
-  let rec aux lexer =
-    let ch0 = peek_char lexer 0 in
-    if ch0 = invalid && at_end lexer then
-      (* It's not an error to run off the end of one of these. *)
-      lexer, (make_markup_token lexer), None
-    else if ch0 = '<' && peek_char lexer 1 = '?' then
-      (* Found a beginning tag that delimits markup from the script *)
-      make_markup_and_suffix lexer
-    else
-      aux (advance lexer 1)
+  let rec aux lexer index =
+    (* It's not an error to run off the end of one of these. *)
+    if at_end_index lexer index then
+      let lexer' = with_offset lexer index in
+      lexer', (make_markup_token lexer'), None
+    else begin
+      let ch = peek lexer index in
+      if ch = '<' && peek_def lexer (succ index) ~def:'\x00' = '?' then
+        (* Found a beginning tag that delimits markup from the script *)
+        make_markup_and_suffix (with_offset lexer index)
+      else
+        aux lexer (succ index)
+    end
   in
-  aux lexer
+  aux lexer (offset lexer)
 
 let scan_markup lexer ~is_leading_section =
   let lexer = start_new_lexeme lexer in
@@ -1549,3 +1602,5 @@ let scan_xhp_category_name lexer =
 
 let next_xhp_category_name lexer =
   scan_token_and_trivia scan_xhp_category_name false lexer
+
+end (* WithToken *)

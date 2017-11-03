@@ -64,14 +64,13 @@ const StaticString
   s_clone("__clone");
 
 static Array convert_to_array(const ObjectData* obj, Class* cls) {
-  auto const lookup = obj->getProp(cls, s_storage.get());
-  auto const prop = lookup.prop;
+  auto const prop = obj->getProp(cls, s_storage.get());
 
   // We currently do not special case ArrayObjects / ArrayIterators in
   // reflectionClass. Until, either ArrayObject moves to HNI or a special
   // case is added to reflection unset should be turned off.
-  assert(prop && lookup.accessible /* && prop.m_type != KindOfUninit */);
-  return tvAsCVarRef(prop).toArray();
+  assert(prop.has_val() /* && prop.type() != KindOfUninit */);
+  return tvAsCVarRef(prop.tv_ptr()).toArray();
 }
 
 #ifdef _MSC_VER
@@ -314,66 +313,29 @@ TypedValue* ObjectData::makeDynProp(K key, AccessFlags flags) {
   return reserveProperties().lvalAt(key, flags).asTypedValue();
 }
 
-Variant* ObjectData::realPropImpl(const String& propName, int flags,
-                                  const String& context,
-                                  bool copyDynArray) {
+Variant ObjectData::o_get(const String& propName, bool error /* = true */,
+                          const String& context /*= null_string*/) {
   assert(kindIsValid());
 
-  /*
-   * Returns a pointer to a place for a property value. This should never
-   * call the magic methods __get or __set. The flags argument describes the
-   * behavior in cases where the named property is nonexistent or
-   * inaccessible.
-   */
+  // This is not (just) a check for empty string; property names that start
+  // with null are intentionally being rejected here.
+  if (UNLIKELY(!*propName.data())) {
+    throw_invalid_property_name(propName);
+  }
+
   Class* ctx = nullptr;
   if (!context.empty()) {
     ctx = Unit::lookupClass(context.get());
   }
 
-  auto const lookup = getPropImpl(ctx, propName.get(), copyDynArray);
+  // Can't use propImpl here because if the property is not accessible and
+  // there is no magic __get, propImpl will raise_error("Cannot access ...",
+  // but o_get will only (maybe) raise_notice("Undefined property ..." :-(
+
+  auto const lookup = getPropImpl(ctx, propName.get(), false);
   auto prop = lookup.prop;
-
-  if (!prop) {
-    // Property is not declared, and not dynamically created yet.
-    if (!(flags & RealPropCreate)) return nullptr;
-
-    prop = makeDynProp(propName, AccessFlags::Key);
-    if (flags & RealPropBind) tvBoxIfNeeded(*prop);
-    return &tvAsVariant(prop);
-  }
-
-  // Property is non-NULL if we reach here.
-  if ((!lookup.accessible || prop->m_type == KindOfUninit) &&
-      !(flags & (RealPropUnchecked|RealPropExist))) {
-    return nullptr;
-  }
-  if (flags & RealPropBind) tvBoxIfNeeded(*prop);
-  return &tvAsVariant(prop);
-}
-
-Variant* ObjectData::o_realProp(const String& propName, int flags,
-                                const String& context /* = null_string */) {
-  return realPropImpl(propName, flags, context, true);
-}
-
-const Variant* ObjectData::o_realProp(const String& propName, int flags,
-                                      const String& context) const {
-  return const_cast<ObjectData*>(this)->realPropImpl(propName, flags, context,
-                                                     false);
-}
-
-inline Variant ObjectData::o_getImpl(const String& propName,
-                                     bool error /* = true */,
-                                     const String& context /*= null_string*/) {
-  assert(kindIsValid());
-
-  if (UNLIKELY(!*propName.data())) {
-    throw_invalid_property_name(propName);
-  }
-
-  if (const Variant* t = o_realProp(propName, 0, context)) {
-    if (t->isInitialized())
-      return *t;
+  if (lookup.accessible && prop && prop->m_type != KindOfUninit) {
+    return tvAsVariant(prop);
   }
 
   if (getAttribute(UseGet)) {
@@ -390,43 +352,43 @@ inline Variant ObjectData::o_getImpl(const String& propName,
   return uninit_null();
 }
 
-Variant ObjectData::o_get(const String& propName, bool error /* = true */,
-                          const String& context /* = null_string */) {
-  return o_getImpl(propName, error, context);
-}
-
-ALWAYS_INLINE Variant ObjectData::o_setImpl(const String& propName,
-                                            const Variant& v,
-                                            const String& context) {
+void ObjectData::o_set(const String& propName, const Variant& v,
+                       const String& context /* = null_string */) {
   assert(kindIsValid());
 
+  // This is not (just) a check for empty string; property names that start
+  // with null are intentionally being rejected here.
   if (UNLIKELY(!*propName.data())) {
     throw_invalid_property_name(propName);
   }
 
-  bool useSet = getAttribute(UseSet);
-  auto flags = useSet ? 0 : RealPropCreate;
+  Class* ctx = nullptr;
+  if (!context.empty()) {
+    ctx = Unit::lookupClass(context.get());
+  }
 
-  if (Variant* t = o_realProp(propName, flags, context)) {
-    if (!useSet || t->isInitialized()) {
-      *t = v;
-      return variant(v);
+  // Can't use setProp here because if the property is not accessible and
+  // there is no magic __set, setProp will raise_error("Cannot access ...",
+  // but o_set will skip writing and return normally. Also, if we try to
+  // invoke __set and fail due to recursion, setProp will fall back to writing
+  // the property normally, but o_set will just skip writing and return :-(
+
+  bool useSet = getAttribute(UseSet);
+
+  auto const lookup = getPropImpl(ctx, propName.get(), true);
+  auto prop = lookup.prop;
+  if (prop && lookup.accessible) {
+    if (!useSet || prop->m_type != KindOfUninit) {
+      tvSet(tvToInitCell(*v.asTypedValue()), *prop);
+      return;
     }
   }
 
   if (useSet) {
     invokeSet(propName.get(), *v.asCell());
+  } else if (!prop) {
+    reserveProperties().set(propName, tvToInitCell(*v.asTypedValue()), true);
   }
-  return variant(v);
-}
-
-Variant ObjectData::o_set(const String& propName, const Variant& v) {
-  return o_setImpl(propName, v, null_string);
-}
-
-Variant ObjectData::o_set(const String& propName, const Variant& v,
-                          const String& context) {
-  return o_setImpl(propName, v, context);
 }
 
 void ObjectData::o_setArray(const Array& properties) {
@@ -514,11 +476,11 @@ Array ObjectData::toArray(bool pubOnly /* = false */) const {
     assert(instanceof(SimpleXMLElement_classof()));
     return SimpleXMLElement_objectCast(this, KindOfArray).toArray();
   } else if (UNLIKELY(instanceof(SystemLib::s_ArrayObjectClass))) {
-    auto const lookup = getProp(SystemLib::s_ArrayObjectClass, s_flags.get());
-    auto const flags = lookup.prop;
+    auto const flags = getProp(SystemLib::s_ArrayObjectClass, s_flags.get());
+    assert(flags.has_val());
 
-    if (UNLIKELY(flags->m_type == KindOfInt64 &&
-                 flags->m_data.num == ARRAYOBJ_STD_PROP_LIST)) {
+    if (UNLIKELY(flags.type() == KindOfInt64 &&
+                 flags.val().num == ARRAYOBJ_STD_PROP_LIST)) {
       auto ret = Array::Create();
       o_getArray(ret, true);
       return ret;
@@ -545,22 +507,21 @@ size_t getPropertyIfAccessible(ObjectData* obj,
                                ObjectData::IterMode mode,
                                Array& properties,
                                size_t propLeft) {
-  auto const lookup = obj->getPropImpl(ctx, key, false);
-  auto const val = lookup.prop;
-
-  if (lookup.accessible && val->m_type != KindOfUninit) {
-    --propLeft;
-    if (mode == ObjectData::CreateRefs) {
-      if (val->m_type != KindOfRef) tvBox(*val);
-
-      properties.setRef(StrNR(key), tvAsVariant(val), true /* isKey */);
-    } else if (mode == ObjectData::EraseRefs) {
-      properties.set(StrNR(key), tvAsCVarRef(val), true /* isKey */);
-    } else {
-      properties.setWithRef(
-        make_tv<KindOfString>(const_cast<StringData*>(key)),
-        *val, true /* isKey */
-      );
+  if (mode == ObjectData::CreateRefs) {
+    auto const prop = obj->vGetProp(ctx, key);
+    if (prop) {
+      --propLeft;
+      properties.setRef(StrNR(key), tvAsVariant(prop.tv_ptr()), true);
+    }
+  } else {
+    auto const prop = obj->getProp(ctx, key);
+    if (prop.has_val() && prop.type() != KindOfUninit) {
+      --propLeft;
+      if (mode == ObjectData::EraseRefs) {
+        properties.set(StrNR(key), prop.tv(), true);
+      } else {
+        properties.setWithRef(StrNR(key), prop.tv(), true);
+      }
     }
   }
   return propLeft;
@@ -602,7 +563,7 @@ Array ObjectData::o_toIterArray(const String& context, IterMode mode) {
     }
     klass = klass->parent();
   }
-  if (!RuntimeOption::RepoAuthoritative && accessibleProps > 0) {
+  if (!(m_cls->attrs() & AttrNoExpandTrait) && accessibleProps > 0) {
     // we may have properties from traits
     for (auto const& prop : m_cls->declProperties()) {
       auto const key = prop.name.get();
@@ -760,44 +721,66 @@ Variant ObjectData::o_invoke_few_args(const String& s, int count,
 }
 
 ObjectData* ObjectData::clone() {
-  if (getAttribute(HasClone) && isCppBuiltin()) {
-    if (isCollection()) {
-      return collections::clone(this);
+  if (isCppBuiltin()) {
+    if (isCollection()) return collections::clone(this);
+    if (instanceof(c_Closure::classof())) {
+      return c_Closure::fromObject(this)->clone();
     }
-    always_assert(instanceof(c_Closure::classof()));
-    return c_Closure::fromObject(this)->clone();
+    assertx(instanceof(c_WaitHandle::classof()));
+    // cloning WaitHandles is not allowed
+    // invoke the instanceCtor to get the right sort of exception
+    auto const ctor = m_cls->instanceCtor();
+    ctor(m_cls);
+    always_assert(false);
   }
 
-  auto obj = instanceof(Generator::getClass()) ? Generator::allocClone(this) :
-             ObjectData::newInstance(m_cls);
   // clone prevents a leak if something throws before clone() returns
-  Object clone = Object::attach(obj);
+  Object clone;
   auto const nProps = m_cls->numDeclProperties();
-  auto const clonePropVec = clone->propVec();
+  if (getAttribute(HasNativeData)) {
+    assertx(m_cls->instanceCtor() == Native::nativeDataInstanceCtor);
+    clone = Object::attach(
+      Native::nativeDataInstanceCopyCtor(this, m_cls, nProps)
+    );
+    assertx(clone->hasExactlyOneRef());
+    assertx(clone->hasInstanceDtor());
+  } else {
+    auto const size = sizeForNProps(nProps);
+    auto const obj = new (tl_heap->objMalloc(size))
+      ObjectData(m_cls, InitRaw{}, m_cls->getODAttrs());
+    clone = Object::attach(obj);
+    assertx(clone->hasExactlyOneRef());
+    assertx(!clone->hasInstanceDtor());
+  }
+
+  auto const clonePropVec = clone->propVecForWrite();
   auto const props = m_cls->declProperties();
   for (auto i = Slot{0}; i < nProps; i++) {
-    if (props[i].attrs & AttrNoSerialize) {
-      continue;
+    if (UNLIKELY(props[i].attrs & AttrNoSerialize)) {
+      // need to write default value, not value from instance we're cloning
+      if (m_cls->pinitVec().size() > 0) {
+        const Class::PropInitVec* propInitVec = m_cls->getPropData();
+        cellCopy((*propInitVec)[i], clonePropVec[i]);
+        if ((*propInitVec)[i].deepInit()) {
+          tvIncRefGen(clonePropVec[i]);
+          collections::deepCopy(&clonePropVec[i]);
+        }
+      } else {
+        cellCopy(m_cls->declPropInit()[i], clonePropVec[i]);
+      }
+    } else {
+      tvDupWithRef(propVec()[i], clonePropVec[i]);
     }
-    tvDecRefGen(&clonePropVec[i]);
-    tvDupWithRef(propVec()[i], clonePropVec[i]);
   }
   if (UNLIKELY(getAttribute(HasDynPropArr))) {
     clone->setAttribute(HasDynPropArr);
     g_context->dynPropTable.emplace(clone.get(), dynPropArray().get());
   }
-  if (UNLIKELY(getAttribute(HasNativeData))) {
-    Native::nativeDataInstanceCopy(clone.get(), this);
-  }
   if (getAttribute(HasClone)) {
+    assertx(!isCppBuiltin());
     auto const method = clone->m_cls->lookupMethod(s_clone.get());
-    // PHP classes that inherit from cpp builtins that have special clone
-    // functionality *may* also define a __clone method, but it's totally
-    // fine if a __clone doesn't exist.
-    if (method || !isCppBuiltin()) {
-      assert(method);
-      g_context->invokeMethodV(clone.get(), method);
-    }
+    assertx(method);
+    g_context->invokeMethodV(clone.get(), method);
   }
   return clone.detach();
 }
@@ -992,7 +975,10 @@ ObjectData::PropLookup<TypedValue*> ObjectData::getPropImpl(
       }
     }
 
-    return PropLookup<TypedValue*> { prop, lookup.accessible };
+    return PropLookup<TypedValue*> {
+     const_cast<TypedValue*>(prop),
+     lookup.accessible
+   };
   }
 
   // We could not find a visible declared property. We need to check for a
@@ -1013,20 +999,39 @@ ObjectData::PropLookup<TypedValue*> ObjectData::getPropImpl(
   return PropLookup<TypedValue*> { nullptr, false };
 }
 
-ObjectData::PropLookup<TypedValue*> ObjectData::getProp(
-  const Class* ctx,
-  const StringData* key
-) {
-  return getPropImpl(ctx, key, true);
+member_lval ObjectData::getPropLval(const Class* ctx, const StringData* key) {
+  auto const lookup = getPropImpl(ctx, key, true);
+  return member_lval {
+    this, lookup.prop && lookup.accessible ? lookup.prop : nullptr
+  };
 }
 
-ObjectData::PropLookup<const TypedValue*> ObjectData::getProp(
-  const Class* ctx,
-  const StringData* key
-) const {
-  auto const lookup = const_cast<ObjectData*>(this)->
-    getPropImpl(ctx, key, false);
-  return PropLookup<const TypedValue*> { lookup.prop, lookup.accessible };
+member_rval ObjectData::getProp(const Class* ctx, const StringData* key) const {
+  auto const lookup = const_cast<ObjectData*>(this)
+    ->getPropImpl(ctx, key, false);
+  return member_rval {
+    this, lookup.prop && lookup.accessible ? lookup.prop : nullptr
+  };
+}
+
+member_lval ObjectData::vGetProp(const Class* ctx, const StringData* key) {
+  auto const lookup = getPropImpl(ctx, key, true);
+  auto prop = lookup.prop;
+  if (lookup.accessible && prop && prop->m_type != KindOfUninit) {
+    tvBoxIfNeeded(*prop);
+    return member_lval { this, prop };
+  }
+  return member_lval { this, nullptr };
+}
+
+member_lval ObjectData::vGetPropIgnoreAccessibility(const StringData* key) {
+  auto const lookup = getPropImpl(nullptr, key, true);
+  auto prop = lookup.prop;
+  if (prop && prop->m_type != KindOfUninit) {
+    tvBoxIfNeeded(*prop);
+    return member_lval { this, prop };
+  }
+  return member_lval { this, nullptr };
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -1390,7 +1395,7 @@ bool ObjectData::propEmpty(const Class* ctx, const StringData* key) {
 }
 
 void ObjectData::setProp(Class* ctx, const StringData* key, Cell val) {
-  auto const lookup = getProp(ctx, key);
+  auto const lookup = getPropImpl(ctx, key, true);
   auto const prop = lookup.prop;
 
   if (prop && lookup.accessible) {
@@ -1430,7 +1435,7 @@ TypedValue* ObjectData::setOpProp(TypedValue& tvRef,
                                   SetOpOp op,
                                   const StringData* key,
                                   Cell* val) {
-  auto const lookup = getProp(ctx, key);
+  auto const lookup = getPropImpl(ctx, key, true);
   auto prop = lookup.prop;
 
   if (prop && lookup.accessible) {
@@ -1520,7 +1525,7 @@ TypedValue* ObjectData::setOpProp(TypedValue& tvRef,
 }
 
 Cell ObjectData::incDecProp(Class* ctx, IncDecOp op, const StringData* key) {
-  auto const lookup = getProp(ctx, key);
+  auto const lookup = getPropImpl(ctx, key, true);
   auto prop = lookup.prop;
 
   if (prop && lookup.accessible) {
@@ -1601,7 +1606,7 @@ Cell ObjectData::incDecProp(Class* ctx, IncDecOp op, const StringData* key) {
 }
 
 void ObjectData::unsetProp(Class* ctx, const StringData* key) {
-  auto const lookup = getProp(ctx, key);
+  auto const lookup = getPropImpl(ctx, key, true);
   auto const prop = lookup.prop;
   auto const propInd = declPropInd(prop);
 

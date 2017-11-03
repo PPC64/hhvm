@@ -1,11 +1,16 @@
 module Types = struct
 
-  type mini_state_target = {
+  (** Commandline arg "--with-mini-state" constructs this record. *)
+  type mini_state_target_info = {
     saved_state_fn   : string;
     corresponding_base_revision : string;
     deptable_fn      : string;
     changes          : Relative_path.t list;
   }
+
+  type mini_state_target =
+    | Mini_state_target_info of mini_state_target_info
+    | Informant_induced_mini_state_target of ServerMonitorUtils.target_mini_state
 
 end
 
@@ -49,5 +54,6 @@ module type S = sig
   (****************************************************************************)
 
   val set_no_load         : options -> bool -> options
+  val set_mini_state_target : options -> ServerMonitorUtils.target_mini_state option -> options
 
 end

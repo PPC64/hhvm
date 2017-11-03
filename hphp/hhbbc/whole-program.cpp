@@ -192,8 +192,15 @@ std::vector<WorkItem> initial_work(const php::Program& program,
         // with a class context are analyzed as part of that context.
         continue;
       }
-      ret.emplace_back(WorkType::Class,
-                       Context { borrow(u), nullptr, borrow(c) });
+      if (is_used_trait(*c)) {
+        for (auto& f : c->methods) {
+          ret.emplace_back(WorkType::Func,
+                           Context { borrow(u), borrow(f), f->cls });
+        }
+      } else {
+        ret.emplace_back(WorkType::Class,
+                         Context { borrow(u), nullptr, borrow(c) });
+      }
     }
     for (auto& f : u->funcs) {
       ret.emplace_back(WorkType::Func, Context { borrow(u), borrow(f) });
@@ -208,21 +215,26 @@ std::vector<WorkItem> initial_work(const php::Program& program,
   return ret;
 }
 
-WorkItem work_item_for(Context ctx, AnalyzeMode mode) {
-  if (mode == AnalyzeMode::ConstPass || !options.HardPrivatePropInference) {
-    return WorkItem { WorkType::Func, ctx };
+WorkItem work_item_for(DependencyContext d, AnalyzeMode mode) {
+  if (auto const cls = d.right()) {
+    assertx(mode != AnalyzeMode::ConstPass &&
+            options.HardPrivatePropInference &&
+            !is_used_trait(*cls));
+    return WorkItem { WorkType::Class, Context { cls->unit, nullptr, cls } };
   }
 
-  return
-    ctx.cls == nullptr ? WorkItem { WorkType::Func, ctx } :
-    ctx.cls->closureContextCls ?
-      WorkItem {
-        WorkType::Class,
-        Context { ctx.unit, nullptr, ctx.cls->closureContextCls }
-      } :
-    WorkItem { WorkType::Class, Context { ctx.unit, nullptr, ctx.cls } };
-}
+  auto const func = d.left();
+  assertx(func);
+  auto const cls = !func->cls ? nullptr :
+    func->cls->closureContextCls ?
+    func->cls->closureContextCls : func->cls;
+  assertx(!cls ||
+          mode == AnalyzeMode::ConstPass ||
+          !options.HardPrivatePropInference ||
+          is_used_trait(*cls));
 
+  return WorkItem { WorkType::Func, Context { func->unit, func, cls } };
+}
 
 /*
  * Algorithm:
@@ -297,10 +309,9 @@ void analyze_iteratively(Index& index, php::Program& program,
     ++round;
     trace_time update_time("updating");
 
-    std::set<WorkItem> revisit;
+    DependencyContextSet deps;
 
     auto update_func = [&] (const FuncAnalysis& fa) {
-      ContextSet deps;
       index.refine_effect_free(fa.ctx.func, fa.effectFree);
       index.refine_return_type(fa.ctx.func, fa.inferredReturn, deps);
       index.refine_constants(fa, deps);
@@ -310,7 +321,6 @@ void analyze_iteratively(Index& index, php::Program& program,
                                      fa.resolvedConstants,
                                      deps);
       }
-      for (auto& d : deps) revisit.insert(work_item_for(d, mode));
       for (auto& kv : fa.closureUseTypes) {
         assert(is_closure(*kv.first));
         if (index.refine_closure_use_vars(kv.first, kv.second)) {
@@ -321,7 +331,7 @@ void analyze_iteratively(Index& index, php::Program& program,
             kv.first->name->data()
           );
           auto const ctx = Context { func->unit, func, kv.first };
-          revisit.insert(work_item_for(ctx, mode));
+          deps.insert(index.dependency_context(ctx));
         }
       }
     };
@@ -347,12 +357,15 @@ void analyze_iteratively(Index& index, php::Program& program,
     }
 
     index.update_class_aliases();
-    work.assign(begin(revisit), end(revisit));
+    work.clear();
+    work.reserve(deps.size());
+    for (auto& d : deps) work.push_back(work_item_for(d, mode));
   }
 }
 
 void constant_pass(Index& index, php::Program& program) {
   if (!options.HardConstProp) return;
+  index.use_class_dependencies(false);
   analyze_iteratively(index, program, AnalyzeMode::ConstPass);
 
   auto save = options.InsertAssertions;
@@ -510,10 +523,10 @@ void UnitEmitterQueue::reset() {
 
 //////////////////////////////////////////////////////////////////////
 
-std::unique_ptr<ArrayTypeTable::Builder>
-whole_program(std::vector<std::unique_ptr<UnitEmitter>> ues,
-              UnitEmitterQueue& ueq,
-              int num_threads) {
+void whole_program(std::vector<std::unique_ptr<UnitEmitter>> ues,
+                   UnitEmitterQueue& ueq,
+                   std::unique_ptr<ArrayTypeTable::Builder>& arrTable,
+                   int num_threads) {
   trace_time tracer("whole program");
 
   RuntimeOption::EvalLowStaticArrays = false;
@@ -533,6 +546,7 @@ whole_program(std::vector<std::unique_ptr<UnitEmitter>> ues,
       try {
         assert(check(*program));
         constant_pass(*index, *program);
+        index->use_class_dependencies(options.HardPrivatePropInference);
         analyze_iteratively(*index, *program, AnalyzeMode::NormalPass);
         if (options.AnalyzePublicStatics) {
           analyze_public_statics(*index, *program);
@@ -564,8 +578,8 @@ whole_program(std::vector<std::unique_ptr<UnitEmitter>> ues,
     ueq.push(std::move(ue));
   });
   LitstrTable::get().setReading();
-
-  return std::move(index->array_table_builder());
+  arrTable = std::move(index->array_table_builder());
+  ueq.push(nullptr);
 }
 
 //////////////////////////////////////////////////////////////////////

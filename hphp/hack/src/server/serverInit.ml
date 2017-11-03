@@ -8,7 +8,7 @@
  *
  *)
 
-open Core
+open Hh_core
 open ServerEnv
 open ServerCheckUtils
 open Reordered_argument_collections
@@ -16,21 +16,21 @@ open Utils
 open String_utils
 open SearchServiceRunner
 
-open Result.Export
-open Result.Monad_infix
+open Core_result.Export
+open Core_result.Monad_infix
 
 module DepSet = Typing_deps.DepSet
 module Dep = Typing_deps.Dep
 module SLC = ServerLocalConfig
-module LSC = LoadScriptConfig
 
 exception No_loader
 exception Loader_timeout of string
 
 type load_mini_approach =
   | Load_mini_script of Path.t
-  | Precomputed of ServerArgs.mini_state_target
+  | Precomputed of ServerArgs.mini_state_target_info
   | Load_state_natively
+  | Load_state_natively_with_target of ServerMonitorUtils.target_mini_state
 
 (** Docs are in .mli *)
 type init_result =
@@ -119,7 +119,7 @@ module ServerInitCommon = struct
       let kv = Hh_json.get_object_exn json in
       check_json_obj_error kv;
       let state_fn = Hh_json.get_string_exn @@ List.Assoc.find_exn kv "state" in
-      let corresponding_base_revision = Hh_json.get_string_exn @@
+      let corresponding_rev = Hh_json.get_string_exn @@
         List.Assoc.find_exn kv "corresponding_base_revision" in
       let is_cached =
         Hh_json.get_bool_exn @@ List.Assoc.find_exn kv "is_cached" in
@@ -134,7 +134,7 @@ module ServerInitCommon = struct
       Daemon.to_channel oc
         @@ Ok (`Fst (
           state_fn,
-          corresponding_base_revision,
+          Hg.Svn_rev (int_of_string corresponding_rev),
           is_cached,
           end_time,
           deptable_fn,
@@ -152,7 +152,7 @@ module ServerInitCommon = struct
       Daemon.to_channel oc @@ Error e
 
   let with_loader_timeout timeout stage f =
-    Result.join @@ Result.try_with @@ fun () ->
+    Core_result.join @@ Core_result.try_with @@ fun () ->
     Timeout.with_timeout ~timeout ~do_:(fun _ -> f ())
       ~on_timeout:(fun _ -> raise @@ Loader_timeout stage)
 
@@ -162,7 +162,7 @@ module ServerInitCommon = struct
    *)
   let mk_state_future root cmd =
     let start_time = Unix.gettimeofday () in
-    Result.try_with @@ fun () ->
+    Core_result.try_with @@ fun () ->
     let log_file =
       Sys_utils.make_link_of_timestamped (ServerFiles.load_log root) in
     let log_fd = Daemon.fd_of_path log_file in
@@ -176,7 +176,7 @@ module ServerInitCommon = struct
       | `Snd _ -> assert false
       | `Fst (
         fn,
-        corresponding_base_revision,
+        corresponding_rev,
         is_cached,
         end_time,
         deptable_fn,
@@ -199,14 +199,14 @@ module ServerInitCommon = struct
             List.map dirty_files Relative_path.from_root in
             HackEventLogger.vcs_changed_files_end t (List.length dirty_files);
             let _ = Hh_logger.log_duration "Finding changed files" t in
-            Result.Ok (
+            Ok (
               fn,
-              corresponding_base_revision,
+              corresponding_rev,
               Relative_path.set_of_list dirty_files,
               old_saved,
               state_distance)
         end in
-        Result.Ok get_dirty_files
+        Ok get_dirty_files
     with e ->
       (* We have failed to load the saved state in the allotted time. Kill
        * the daemon so it doesn't write to shared memory while the type-decl
@@ -216,42 +216,64 @@ module ServerInitCommon = struct
       (try Daemon.kill daemon with e -> Hh_logger.exc e);
       raise e
 
-  let invoke_approach genv root approach = match approach with
-   | Load_mini_script cmd ->
-     mk_state_future root cmd
-   | Precomputed { ServerArgs.saved_state_fn;
-     corresponding_base_revision; deptable_fn; changes } ->
-     lock_and_load_deptable deptable_fn;
-     let changes = Relative_path.set_of_list changes in
-     let chan = open_in saved_state_fn in
-     let old_saved = Marshal.from_channel chan in
-     let get_dirty_files = (fun () -> Result.Ok (
-       saved_state_fn,
-       corresponding_base_revision,
-       changes,
-       old_saved,
-       None
-     )) in
-     Result.try_with (fun () -> fun () -> Result.Ok get_dirty_files)
-   | Load_state_natively ->
-     let result = State_loader.mk_state_future
-       (ServerConfig.config_hash genv.config) root in
-     lock_and_load_deptable result.State_loader.deptable_fn;
-     let old_saved = open_in result.State_loader.saved_state_fn
-       |> Marshal.from_channel in
-     let get_dirty_files = (fun () ->
-       let dirty_files = Future.get result.State_loader.dirty_files in
-       let dirty_files = List.map dirty_files Relative_path.from_root in
-       let dirty_files = Relative_path.set_of_list dirty_files in
-       Result.Ok (
-         result.State_loader.saved_state_fn,
-         result.State_loader.corresponding_base_rev,
-         dirty_files,
-         old_saved,
-         Some result.State_loader.state_distance
-       )
-     ) in
-     Result.try_with (fun () -> fun () -> Result.Ok get_dirty_files)
+  let invoke_loading_state_natively ~tiny ?target genv root =
+    let mini_state_handle = begin match target with
+    | None -> None
+    | Some { ServerMonitorUtils.mini_state_everstore_handle; target_svn_rev; } ->
+      Some
+      {
+        State_loader.mini_state_everstore_handle = mini_state_everstore_handle;
+        mini_state_for_svn_rev = target_svn_rev;
+      }
+    end in
+    let result = State_loader.mk_state_future ?mini_state_handle
+      ~config_hash:(ServerConfig.config_hash genv.config) root ~tiny in
+    lock_and_load_deptable result.State_loader.deptable_fn;
+    let old_saved = open_in result.State_loader.saved_state_fn
+      |> Marshal.from_channel in
+    let get_dirty_files = (fun () ->
+      let dirty_files = Future.get result.State_loader.dirty_files in
+      let dirty_files = List.map dirty_files Relative_path.from_root in
+      let dirty_files = Relative_path.set_of_list dirty_files in
+      Ok (
+        result.State_loader.saved_state_fn,
+        result.State_loader.corresponding_rev,
+        dirty_files,
+        old_saved,
+        Some result.State_loader.state_distance
+      )
+    ) in
+    (fun () -> Ok get_dirty_files)
+
+  let invoke_approach genv root approach ~tiny = match approach with
+    | Load_mini_script cmd ->
+      mk_state_future root cmd
+    | Precomputed { ServerArgs.saved_state_fn;
+      corresponding_base_revision; deptable_fn; changes } ->
+      lock_and_load_deptable deptable_fn;
+      let changes = Relative_path.set_of_list changes in
+      let chan = open_in saved_state_fn in
+      let old_saved = Marshal.from_channel chan in
+      let get_dirty_files = (fun () -> Ok (
+        saved_state_fn,
+        (Hg.Svn_rev (int_of_string (corresponding_base_revision))),
+        changes,
+        old_saved,
+        None
+      )) in
+      Core_result.try_with (fun () -> fun () -> Ok get_dirty_files)
+    | Load_state_natively ->
+      let result =
+      Core_result.try_with (fun () -> invoke_loading_state_natively ~tiny genv root) in
+      begin match result, tiny with
+      | Error _, true ->
+        (* Turn off use tiny state *)
+        HackEventLogger.set_use_tiny_state false;
+        Core_result.try_with (fun () -> invoke_loading_state_natively ~tiny:false genv root)
+      | _ -> result
+      end
+    | Load_state_natively_with_target target ->
+      Core_result.try_with (fun () -> invoke_loading_state_natively ~tiny ~target genv root)
 
   let is_check_mode options =
     ServerArgs.check_mode options &&
@@ -432,8 +454,18 @@ module ServerInitCommon = struct
    * current files in the repository (fast). We grab the declarations from both
    * , to account for both the declaratons that were deleted and those that
    * are newly created. Then we use the deptable to figure out the files
-   * that referred to them. Finally we recheck the lot. *)
-  let type_check_dirty genv env old_fast fast dirty_files t =
+   * that referred to them. Finally we recheck the lot.
+   * Args:
+   *
+   * genv, env : environments
+   * old_fast: old file-ast from saved state
+   * fast: newly parsed file ast
+   * dirty_files: we need to typecheck these and,
+   *    since their decl have changed, also all of their dependencies
+   * similar_files: we only need to typecheck these,
+   *    not their dependencies since their decl are unchanged
+   **)
+  let type_check_dirty genv env old_fast fast dirty_files similar_files t =
     let start_time = Unix.gettimeofday () in
     let fast = get_dirty_fast old_fast fast dirty_files in
     let names = Relative_path.Map.fold fast ~f:begin fun _k v acc ->
@@ -441,6 +473,8 @@ module ServerInitCommon = struct
     end ~init:FileInfo.empty_names in
     let deps = get_all_deps names in
     let to_recheck = Typing_deps.get_files deps in
+    (* We still need to typecheck files whose declarations did not change *)
+    let to_recheck = Relative_path.Set.union to_recheck similar_files in
     let fast = extend_fast fast env.files_info to_recheck in
     let result = type_check genv env fast t in
     HackEventLogger.type_check_dirty start_time
@@ -462,7 +496,7 @@ module ServerInitCommon = struct
     >>= with_loader_timeout timeout "wait_for_changes"
     >>= fun (
       saved_state_fn,
-      corresponding_base_revision,
+      corresponding_rev,
       dirty_files,
       old_saved,
       state_distance
@@ -492,7 +526,7 @@ module ServerInitCommon = struct
       string_starts_with p root && ServerEnv.file_filter p) in
     let changed_while_parsing = Relative_path.(relativize_set Root updates) in
     Ok (saved_state_fn,
-      corresponding_base_revision,
+      corresponding_rev,
       dirty_files,
       changed_while_parsing,
       old_saved,
@@ -519,22 +553,22 @@ module ServerInitCommon = struct
 end
 
 type saved_state_fn = string
-type corresponding_base_rev = string
+type corresponding_rev = Hg.rev
 (** Newer versions of load script also output the distance of the
  * saved state's revision to the node's merge base. *)
 type state_distance = int option
 
 type state_result =
- (saved_state_fn * corresponding_base_rev * Relative_path.Set.t
+ (saved_state_fn * corresponding_rev * Relative_path.Set.t
    * Relative_path.Set.t * FileInfo.saved_state_info * state_distance, exn)
- Result.t
+ result
 
 (* Laziness *)
 type lazy_level = Off | Decl | Parse | Init | Incremental
 
 module type InitKind = sig
   val init :
-    load_mini_approach:(load_mini_approach, exn) Result.t ->
+    load_mini_approach:(load_mini_approach, exn) result ->
     ServerEnv.genv ->
     lazy_level ->
     ServerEnv.env ->
@@ -575,7 +609,7 @@ module ServerEagerInit : InitKind = struct
      * in the Result monad provides a convenient way to locate the error
      * handling code in one place. *)
     let state_future =
-     load_mini_approach >>= invoke_approach genv root in
+     load_mini_approach >>= invoke_approach genv root ~tiny:false in
     let get_next, t = indexing genv in
     let lazy_parse = lazy_level = Parse in
     let env, t = parsing ~lazy_parse genv env ~get_next t in
@@ -599,7 +633,7 @@ module ServerEagerInit : InitKind = struct
     match state with
     | Ok (
       saved_state_fn,
-      corresponding_base_revision,
+      corresponding_rev,
       dirty_files,
       changed_while_parsing,
       old_saved,
@@ -613,7 +647,7 @@ module ServerEagerInit : InitKind = struct
       let global_state = ServerGlobalState.save () in
       let loaded_event = Debug_event.Loaded_saved_state ({
         Debug_event.filename = saved_state_fn;
-        corresponding_base_revision;
+        corresponding_rev;
         dirty_files;
         changed_while_parsing;
         build_targets;
@@ -636,7 +670,7 @@ module ServerEagerInit : InitKind = struct
         failed_parsing =
           Relative_path.Set.union env.failed_parsing changed_while_parsing;
       } in
-      type_check_dirty genv env old_fast fast dirty_files t, state
+      type_check_dirty genv env old_fast fast dirty_files Relative_path.Set.empty t, state
     | Error err ->
       (* Fall back to type-checking everything *)
       SharedMem.cleanup_sqlite ();
@@ -699,7 +733,7 @@ module ServerIncrementalInit : InitKind = struct
   let init ~load_mini_approach genv lazy_level env  root =
     assert (lazy_level = Incremental);
     let state_future =
-      load_mini_approach >>= invoke_approach genv root in
+      load_mini_approach >>= invoke_approach genv root ~tiny:false in
 
     let timeout = genv.local_config.SLC.load_mini_script_timeout in
     let state_future = state_future >>= fun f ->
@@ -709,14 +743,14 @@ module ServerIncrementalInit : InitKind = struct
     let state = get_state_future genv root state_future timeout in
     match state with
     | Ok (
-      saved_state_fn, corresponding_base_revision,
+      saved_state_fn, corresponding_rev,
       dirty_files, changed_while_parsing, old_saved, _state_distance) ->
       let build_targets, tracked_targets = get_build_targets env in
       Hh_logger.log "Successfully loaded mini-state";
       let global_state = ServerGlobalState.save () in
       let loaded_event = Debug_event.Loaded_saved_state ({
         Debug_event.filename = saved_state_fn;
-        corresponding_base_revision;
+        corresponding_rev;
         dirty_files;
         changed_while_parsing;
         build_targets;
@@ -733,7 +767,7 @@ module ServerIncrementalInit : InitKind = struct
         List.map dirty_file_list (Relative_path.suffix) in
       (* Send the hg cat command *)
       let pid, t = send_hg_cat_command
-        root corresponding_base_revision dirty_file_paths_list t in
+        root corresponding_rev dirty_file_paths_list t in
       (* Find the temporary directories *)
       let tmp_files_list = List.map ~f:Relative_path.to_tmp dirty_file_list in
       (* Build targets are untracked by version control, so we must always
@@ -798,9 +832,9 @@ module ServerLazyInit : InitKind = struct
 
   let init ~load_mini_approach genv lazy_level env root =
     assert(lazy_level = Init);
+    let tiny = genv.local_config.SLC.load_tiny_state in
     let state_future =
-      load_mini_approach >>= invoke_approach genv root in
-
+      load_mini_approach >>= invoke_approach genv root ~tiny in
     let timeout = genv.local_config.SLC.load_mini_script_timeout in
     let state_future = state_future >>= fun f ->
       with_loader_timeout timeout "wait_for_state" f
@@ -810,14 +844,14 @@ module ServerLazyInit : InitKind = struct
 
     match state with
     | Ok (
-      saved_state_fn, corresponding_base_revision,
+      saved_state_fn, corresponding_rev,
       dirty_files, changed_while_parsing, old_saved, _state_distance) ->
       let build_targets, tracked_targets = get_build_targets env in
       Hh_logger.log "Successfully loaded mini-state";
       let global_state = ServerGlobalState.save () in
       let loaded_event = Debug_event.Loaded_saved_state ({
         Debug_event.filename = saved_state_fn;
-        corresponding_base_revision;
+        corresponding_rev;
         dirty_files;
         changed_while_parsing;
         build_targets;
@@ -872,6 +906,28 @@ module ServerLazyInit : InitKind = struct
         failed_parsing =
           Relative_path.Set.union env.failed_parsing changed_while_parsing;
       } in
+
+      (* Separate the dirty files from the files whose decl only changed *)
+      (* Here, for each dirty file, we compare its hash to the one saved
+      in the saved state. If the hashes are the same, then the declarations
+      on the file have not changed and we only need to retypecheck that file,
+      not all of its dependencies.
+      We call these files "similar" to their previous versions. *)
+      let similar_files, dirty_files = Relative_path.Set.partition
+      (fun f ->
+          let info1 = Relative_path.Map.get old_info f in
+          let info2 = Relative_path.Map.get env.files_info f in
+          match info1, info2 with
+          | Some x, Some y ->
+            (match x.FileInfo.hash, y.FileInfo.hash with
+            | Some x, Some y ->
+              Digest.equal x y
+            | _ ->
+              false)
+          | _ ->
+            false
+        ) dirty_files in
+
       let env = { env with
         files_info=Relative_path.Map.union env.files_info old_info;
       } in
@@ -879,14 +935,13 @@ module ServerLazyInit : InitKind = struct
       let t = update_files genv env.files_info t in
 
       let t = update_search old_saved t in
-      type_check_dirty genv env old_fast fast dirty_files t, state
+
+      type_check_dirty genv env old_fast fast dirty_files similar_files t, state
     | Error err ->
       (* Fall back to type-checking everything *)
       fallback_init genv env err, state
 end
 
-
-module SIC = ServerInitCommon
 
 let ai_check genv files_info env t =
   match ServerArgs.ai_mode genv.options with
@@ -971,7 +1026,7 @@ let init_to_save_state genv =
 (* entry point *)
 let init ?load_mini_approach genv =
   let lazy_lev = get_lazy_level genv in
-  let load_mini_approach = Result.of_option load_mini_approach
+  let load_mini_approach = Core_result.of_option load_mini_approach
     ~error:No_loader in
   let env = ServerEnvBuild.make_env genv.config in
   let root = ServerArgs.root genv.options in
@@ -989,15 +1044,15 @@ let init ?load_mini_approach genv =
   SharedMem.init_done ();
   ServerUtils.print_hash_stats ();
   let result = match state with
-    | Result.Ok (
+    | Ok (
       _saved_state_fn,
-      _corresponding_base_revision,
+      _corresponding_rev,
       _dirty_files,
       _changed_while_parsing,
       _old_saved,
       state_distance) ->
         Mini_load state_distance
-    | Result.Error e ->
+    | Error e ->
       Mini_load_failed (Printexc.to_string e)
   in
   env, result

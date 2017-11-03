@@ -1,11 +1,11 @@
 (* @generated from nast.src.ml by hphp/hack/tools/ppx/ppx_gen. *)
-(* SourceShasum<<5df516ab9028bc5102e73e88e28dee4c73b917cc>> *)
+(* SourceShasum<<19f66ff5e38469b999f5de6649b9a6b09087f06f>> *)
 
 (* DO NOT EDIT MANUALLY. *)
 [@@@ocaml.text
   "\n * Copyright (c) 2015, Facebook, Inc.\n * All rights reserved.\n *\n * This source code is licensed under the BSD-style license found in the\n * LICENSE file in the \"hack\" directory of this source tree. An additional grant\n * of patent rights can be found in the PATENTS file in the same directory.\n *\n "]
 module SN = Naming_special_names
-type id = (Pos.t* Local_id.t)[@@deriving show]
+type id = (Pos.t * Local_id.t)[@@deriving show]
 let rec pp_id : Format.formatter -> id -> Ppx_deriving_runtime.unit =
   let __1 () = Local_id.pp
   
@@ -77,19 +77,19 @@ let rec (pp_is_coroutine :
 and show_is_coroutine : is_coroutine -> Ppx_deriving_runtime.string =
   fun x  -> Format.asprintf "%a" pp_is_coroutine x
 
-type hint = (Pos.t* hint_)
+type hint = (Pos.t * hint_)
 and hint_ =
   | Hoption of hint 
-  | Hfun of is_coroutine* hint list* bool* hint 
+  | Hfun of is_coroutine * hint list * bool * hint 
   | Htuple of hint list 
-  | Happly of sid* hint list 
+  | Happly of sid * hint list 
   | Hshape of nast_shape_info 
-  | Haccess of hint* sid list 
+  | Haccess of hint * sid list 
   | Hany 
   | Hmixed 
   | Habstr of string 
-  | Harray of hint option* hint option 
-  | Hdarray of hint* hint 
+  | Harray of hint option * hint option 
+  | Hdarray of hint * hint 
   | Hvarray of hint 
   | Hvarray_or_darray of hint 
   | Hprim of tprim 
@@ -363,8 +363,8 @@ let pp_kvc_kind fmt _ = Format.pp_print_string fmt "<kvc_kind>"
 type vc_kind =
   [ `Vector  | `ImmVector  | `Vec  | `Set  | `ImmSet  | `Pair  | `Keyset ]
 let pp_vc_kind fmt _ = Format.pp_print_string fmt "<vc_kind>" 
-type tparam = (Ast.variance* sid* (Ast.constraint_kind* hint) list)[@@deriving
-                                                                    show]
+type tparam = (Ast.variance * sid * (Ast.constraint_kind * hint) list)
+[@@deriving show]
 let rec pp_tparam : Format.formatter -> tparam -> Ppx_deriving_runtime.unit =
   let __3 () = pp_hint
   
@@ -466,7 +466,7 @@ let rec pp_enum_ : Format.formatter -> enum_ -> Ppx_deriving_runtime.unit =
 and show_enum_ : enum_ -> Ppx_deriving_runtime.string =
   fun x  -> Format.asprintf "%a" pp_enum_ x
 
-type instantiated_sid = (sid* hint list)[@@deriving show]
+type instantiated_sid = (sid * hint list)[@@deriving show]
 let rec pp_instantiated_sid :
   Format.formatter -> instantiated_sid -> Ppx_deriving_runtime.unit =
   let __1 () = pp_hint
@@ -495,7 +495,7 @@ let rec pp_instantiated_sid :
 and show_instantiated_sid : instantiated_sid -> Ppx_deriving_runtime.string =
   fun x  -> Format.asprintf "%a" pp_instantiated_sid x
 
-type where_constraint = (hint* Ast.constraint_kind* hint)[@@deriving show]
+type where_constraint = (hint * Ast.constraint_kind * hint)[@@deriving show]
 let rec pp_where_constraint :
   Format.formatter -> where_constraint -> Ppx_deriving_runtime.unit =
   let __2 () = pp_hint
@@ -526,25 +526,26 @@ module AnnotatedAST(Annotation:AnnotationType) =
       | Expr of expr 
       | Break of Pos.t 
       | Continue of Pos.t 
-      | Throw of is_terminal* expr 
-      | Return of Pos.t* expr option 
+      | Throw of is_terminal * expr 
+      | Return of Pos.t * expr option 
       | GotoLabel of pstring 
       | Goto of pstring 
       | Static_var of expr list 
       | Global_var of expr list 
-      | If of expr* block* block 
-      | Do of block* expr 
-      | While of expr* block 
-      | For of expr* expr* expr* block 
-      | Switch of expr* case list 
-      | Foreach of expr* as_expr* block 
-      | Try of block* catch list* block 
+      | If of expr * block * block 
+      | Do of block * expr 
+      | While of expr * block 
+      | Using of bool * expr * block 
+      | For of expr * expr * expr * block 
+      | Switch of expr * case list 
+      | Foreach of expr * as_expr * block 
+      | Try of block * catch list * block 
       | Noop 
     and as_expr =
       | As_v of expr 
-      | As_kv of expr* expr 
-      | Await_as_v of Pos.t* expr 
-      | Await_as_kv of Pos.t* expr* expr 
+      | As_kv of expr * expr 
+      | Await_as_v of Pos.t * expr 
+      | Await_as_kv of Pos.t * expr * expr 
     and block = stmt list
     and class_id =
       | CIparent 
@@ -552,28 +553,28 @@ module AnnotatedAST(Annotation:AnnotationType) =
       | CIstatic 
       | CIexpr of expr 
       | CI of instantiated_sid 
-    and expr = (Annotation.t* expr_)
+    and expr = (Annotation.t * expr_)
     and expr_ =
       | Array of afield list 
-      | Darray of (expr* expr) list 
+      | Darray of (expr * expr) list 
       | Varray of expr list 
       | Shape of expr ShapeMap.t 
-      | ValCollection of vc_kind* expr list 
-      | KeyValCollection of kvc_kind* field list 
+      | ValCollection of vc_kind * expr list 
+      | KeyValCollection of kvc_kind * field list 
       | Null 
       | This 
       | True 
       | False 
       | Id of sid 
       | Lvar of id 
-      | Lvarvar of int* id 
+      | Lvarvar of int * id 
       | Dollardollar of id 
       | Clone of expr 
-      | Obj_get of expr* expr* og_null_flavor 
-      | Array_get of expr* expr option 
-      | Class_get of class_id* pstring 
-      | Class_const of class_id* pstring 
-      | Call of call_type* expr* hint list* expr list* expr list 
+      | Obj_get of expr * expr * og_null_flavor 
+      | Array_get of expr * expr option 
+      | Class_get of class_id * pstring 
+      | Class_const of class_id * pstring 
+      | Call of call_type * expr * hint list * expr list * expr list 
       | Int of pstring 
       | Float of pstring 
       | String of pstring 
@@ -584,25 +585,27 @@ module AnnotatedAST(Annotation:AnnotationType) =
       | Suspend of expr 
       | List of expr list 
       | Expr_list of expr list 
-      | Cast of hint* expr 
-      | Unop of Ast.uop* expr 
-      | Binop of Ast.bop* expr* expr
+      | Cast of hint * expr 
+      | Unop of Ast.uop * expr 
+      | Binop of Ast.bop * expr * expr
       [@ocaml.doc
         " The ID of the $$ that is implicitly declared by this pipe. "]
-      | Pipe of id* expr* expr 
-      | Eif of expr* expr option* expr 
-      | NullCoalesce of expr* expr 
-      | InstanceOf of expr* class_id 
-      | New of class_id* expr list* expr list 
-      | Efun of fun_* id list 
-      | Xml of sid* (pstring* expr) list* expr list 
+      | Pipe of id * expr * expr 
+      | Eif of expr * expr option * expr 
+      | NullCoalesce of expr * expr 
+      | InstanceOf of expr * class_id 
+      | Is of expr * hint 
+      | New of class_id * expr list * expr list 
+      | Efun of fun_ * id list 
+      | Xml of sid * (pstring * expr) list * expr list 
+      | Callconv of Ast.param_kind * expr 
       | Lplaceholder of Pos.t 
       | Fun_id of sid 
-      | Method_id of expr* pstring 
-      | Method_caller of sid* pstring 
-      | Smethod_id of sid* pstring 
+      | Method_id of expr * pstring 
+      | Method_caller of sid * pstring 
+      | Smethod_id of sid * pstring 
       | Special_func of special_func 
-      | Pair of expr* expr 
+      | Pair of expr * expr 
       | Assert of assert_expr 
       | Typename of sid 
       | Any 
@@ -610,12 +613,12 @@ module AnnotatedAST(Annotation:AnnotationType) =
       | AE_assert of expr 
     and case =
       | Default of block 
-      | Case of expr* block 
-    and catch = (sid* id* block)
-    and field = (expr* expr)
+      | Case of expr * block 
+    and catch = (sid * id * block)
+    and field = (expr * expr)
     and afield =
       | AFvalue of expr 
-      | AFkvalue of expr* expr 
+      | AFkvalue of expr * expr 
     and special_func =
       | Gena of expr 
       | Genva of expr list 
@@ -629,7 +632,8 @@ module AnnotatedAST(Annotation:AnnotationType) =
       param_is_variadic: is_variadic ;
       param_pos: Pos.t ;
       param_name: string ;
-      param_expr: expr option }
+      param_expr: expr option ;
+      param_callconv: Ast.param_kind option }
     and fun_variadicity =
       | FVvariadicArg of fun_param 
       | FVellipsis 
@@ -645,7 +649,8 @@ module AnnotatedAST(Annotation:AnnotationType) =
       f_params: fun_param list ;
       f_body: func_body ;
       f_fun_kind: Ast.fun_kind ;
-      f_user_attributes: user_attribute list }
+      f_user_attributes: user_attribute list ;
+      f_ret_by_ref: bool }
     and func_body =
       | UnnamedBody of func_unnamed_body 
       | NamedBody of func_named_body 
@@ -661,27 +666,31 @@ module AnnotatedAST(Annotation:AnnotationType) =
       ua_name: sid ;
       ua_params: expr list }[@@deriving show]
     let rec pp_stmt : Format.formatter -> stmt -> Ppx_deriving_runtime.unit =
-      let __29 () = pp_block
+      let __31 () = pp_block
       
-      and __28 () = pp_catch
+      and __30 () = pp_catch
       
-      and __27 () = pp_block
+      and __29 () = pp_block
       
-      and __26 () = pp_block
+      and __28 () = pp_block
       
-      and __25 () = pp_as_expr
+      and __27 () = pp_as_expr
+      
+      and __26 () = pp_expr
+      
+      and __25 () = pp_case
       
       and __24 () = pp_expr
       
-      and __23 () = pp_case
+      and __23 () = pp_block
       
       and __22 () = pp_expr
       
-      and __21 () = pp_block
+      and __21 () = pp_expr
       
       and __20 () = pp_expr
       
-      and __19 () = pp_expr
+      and __19 () = pp_block
       
       and __18 () = pp_expr
       
@@ -809,19 +818,27 @@ module AnnotatedAST(Annotation:AnnotationType) =
                   Format.fprintf fmt ",@ ";
                   ((__17 ()) fmt) a1);
                  Format.fprintf fmt "@,))@]")
+            | Using (a0,a1,a2) ->
+                (Format.fprintf fmt "(@[<2>AnnotatedAST.Using (@,";
+                 (((Format.fprintf fmt "%B") a0;
+                   Format.fprintf fmt ",@ ";
+                   ((__18 ()) fmt) a1);
+                  Format.fprintf fmt ",@ ";
+                  ((__19 ()) fmt) a2);
+                 Format.fprintf fmt "@,))@]")
             | For (a0,a1,a2,a3) ->
                 (Format.fprintf fmt "(@[<2>AnnotatedAST.For (@,";
-                 (((((__18 ()) fmt) a0;
+                 (((((__20 ()) fmt) a0;
                     Format.fprintf fmt ",@ ";
-                    ((__19 ()) fmt) a1);
+                    ((__21 ()) fmt) a1);
                    Format.fprintf fmt ",@ ";
-                   ((__20 ()) fmt) a2);
+                   ((__22 ()) fmt) a2);
                   Format.fprintf fmt ",@ ";
-                  ((__21 ()) fmt) a3);
+                  ((__23 ()) fmt) a3);
                  Format.fprintf fmt "@,))@]")
             | Switch (a0,a1) ->
                 (Format.fprintf fmt "(@[<2>AnnotatedAST.Switch (@,";
-                 (((__22 ()) fmt) a0;
+                 (((__24 ()) fmt) a0;
                   Format.fprintf fmt ",@ ";
                   ((fun x  ->
                       Format.fprintf fmt "@[<2>[";
@@ -830,21 +847,21 @@ module AnnotatedAST(Annotation:AnnotationType) =
                            (fun sep  ->
                               fun x  ->
                                 if sep then Format.fprintf fmt ";@ ";
-                                ((__23 ()) fmt) x;
+                                ((__25 ()) fmt) x;
                                 true) false x);
                       Format.fprintf fmt "@,]@]")) a1);
                  Format.fprintf fmt "@,))@]")
             | Foreach (a0,a1,a2) ->
                 (Format.fprintf fmt "(@[<2>AnnotatedAST.Foreach (@,";
-                 ((((__24 ()) fmt) a0;
+                 ((((__26 ()) fmt) a0;
                    Format.fprintf fmt ",@ ";
-                   ((__25 ()) fmt) a1);
+                   ((__27 ()) fmt) a1);
                   Format.fprintf fmt ",@ ";
-                  ((__26 ()) fmt) a2);
+                  ((__28 ()) fmt) a2);
                  Format.fprintf fmt "@,))@]")
             | Try (a0,a1,a2) ->
                 (Format.fprintf fmt "(@[<2>AnnotatedAST.Try (@,";
-                 ((((__27 ()) fmt) a0;
+                 ((((__29 ()) fmt) a0;
                    Format.fprintf fmt ",@ ";
                    ((fun x  ->
                        Format.fprintf fmt "@[<2>[";
@@ -853,11 +870,11 @@ module AnnotatedAST(Annotation:AnnotationType) =
                             (fun sep  ->
                                fun x  ->
                                  if sep then Format.fprintf fmt ";@ ";
-                                 ((__28 ()) fmt) x;
+                                 ((__30 ()) fmt) x;
                                  true) false x);
                        Format.fprintf fmt "@,]@]")) a1);
                   Format.fprintf fmt ",@ ";
-                  ((__29 ()) fmt) a2);
+                  ((__31 ()) fmt) a2);
                  Format.fprintf fmt "@,))@]")
             | Noop  -> Format.pp_print_string fmt "AnnotatedAST.Noop")
         [@ocaml.warning "-A"])
@@ -976,49 +993,57 @@ module AnnotatedAST(Annotation:AnnotationType) =
       fun x  -> Format.asprintf "%a" pp_expr x
     
     and pp_expr_ : Format.formatter -> expr_ -> Ppx_deriving_runtime.unit =
-      let __76 () = pp_sid
+      let __80 () = pp_sid
       
-      and __75 () = pp_assert_expr
+      and __79 () = pp_assert_expr
       
-      and __74 () = pp_expr
+      and __78 () = pp_expr
       
-      and __73 () = pp_expr
+      and __77 () = pp_expr
       
-      and __72 () = pp_special_func
+      and __76 () = pp_special_func
+      
+      and __75 () = pp_pstring
+      
+      and __74 () = pp_sid
+      
+      and __73 () = pp_pstring
+      
+      and __72 () = pp_sid
       
       and __71 () = pp_pstring
       
-      and __70 () = pp_sid
+      and __70 () = pp_expr
       
-      and __69 () = pp_pstring
+      and __69 () = pp_sid
       
-      and __68 () = pp_sid
+      and __68 () = Pos.pp
       
-      and __67 () = pp_pstring
+      and __67 () = pp_expr
       
-      and __66 () = pp_expr
+      and __66 () = Ast.pp_param_kind
       
-      and __65 () = pp_sid
+      and __65 () = pp_expr
       
-      and __64 () = Pos.pp
+      and __64 () = pp_expr
       
-      and __63 () = pp_expr
+      and __63 () = pp_pstring
       
-      and __62 () = pp_expr
+      and __62 () = pp_sid
       
-      and __61 () = pp_pstring
+      and __61 () = pp_id
       
-      and __60 () = pp_sid
+      and __60 () = pp_fun_
       
-      and __59 () = pp_id
+      and __59 () = pp_expr
       
-      and __58 () = pp_fun_
+      and __58 () = pp_expr
       
-      and __57 () = pp_expr
+      and __57 () = pp_class_id
       
-      and __56 () = pp_expr
+      and __56 () = pp_hint
       
-      and __55 () = pp_class_id
+      and __55 () = pp_expr
       
       and __54 () = pp_class_id
       
@@ -1425,9 +1450,15 @@ module AnnotatedAST(Annotation:AnnotationType) =
                   Format.fprintf fmt ",@ ";
                   ((__54 ()) fmt) a1);
                  Format.fprintf fmt "@,))@]")
+            | Is (a0,a1) ->
+                (Format.fprintf fmt "(@[<2>AnnotatedAST.Is (@,";
+                 (((__55 ()) fmt) a0;
+                  Format.fprintf fmt ",@ ";
+                  ((__56 ()) fmt) a1);
+                 Format.fprintf fmt "@,))@]")
             | New (a0,a1,a2) ->
                 (Format.fprintf fmt "(@[<2>AnnotatedAST.New (@,";
-                 ((((__55 ()) fmt) a0;
+                 ((((__57 ()) fmt) a0;
                    Format.fprintf fmt ",@ ";
                    ((fun x  ->
                        Format.fprintf fmt "@[<2>[";
@@ -1436,7 +1467,7 @@ module AnnotatedAST(Annotation:AnnotationType) =
                             (fun sep  ->
                                fun x  ->
                                  if sep then Format.fprintf fmt ";@ ";
-                                 ((__56 ()) fmt) x;
+                                 ((__58 ()) fmt) x;
                                  true) false x);
                        Format.fprintf fmt "@,]@]")) a1);
                   Format.fprintf fmt ",@ ";
@@ -1447,13 +1478,13 @@ module AnnotatedAST(Annotation:AnnotationType) =
                            (fun sep  ->
                               fun x  ->
                                 if sep then Format.fprintf fmt ";@ ";
-                                ((__57 ()) fmt) x;
+                                ((__59 ()) fmt) x;
                                 true) false x);
                       Format.fprintf fmt "@,]@]")) a2);
                  Format.fprintf fmt "@,))@]")
             | Efun (a0,a1) ->
                 (Format.fprintf fmt "(@[<2>AnnotatedAST.Efun (@,";
-                 (((__58 ()) fmt) a0;
+                 (((__60 ()) fmt) a0;
                   Format.fprintf fmt ",@ ";
                   ((fun x  ->
                       Format.fprintf fmt "@[<2>[";
@@ -1462,13 +1493,13 @@ module AnnotatedAST(Annotation:AnnotationType) =
                            (fun sep  ->
                               fun x  ->
                                 if sep then Format.fprintf fmt ";@ ";
-                                ((__59 ()) fmt) x;
+                                ((__61 ()) fmt) x;
                                 true) false x);
                       Format.fprintf fmt "@,]@]")) a1);
                  Format.fprintf fmt "@,))@]")
             | Xml (a0,a1,a2) ->
                 (Format.fprintf fmt "(@[<2>AnnotatedAST.Xml (@,";
-                 ((((__60 ()) fmt) a0;
+                 ((((__62 ()) fmt) a0;
                    Format.fprintf fmt ",@ ";
                    ((fun x  ->
                        Format.fprintf fmt "@[<2>[";
@@ -1479,9 +1510,9 @@ module AnnotatedAST(Annotation:AnnotationType) =
                                  if sep then Format.fprintf fmt ";@ ";
                                  ((fun (a0,a1)  ->
                                      Format.fprintf fmt "(@[";
-                                     (((__61 ()) fmt) a0;
+                                     (((__63 ()) fmt) a0;
                                       Format.fprintf fmt ",@ ";
-                                      ((__62 ()) fmt) a1);
+                                      ((__64 ()) fmt) a1);
                                      Format.fprintf fmt "@])")) x;
                                  true) false x);
                        Format.fprintf fmt "@,]@]")) a1);
@@ -1493,53 +1524,59 @@ module AnnotatedAST(Annotation:AnnotationType) =
                            (fun sep  ->
                               fun x  ->
                                 if sep then Format.fprintf fmt ";@ ";
-                                ((__63 ()) fmt) x;
+                                ((__65 ()) fmt) x;
                                 true) false x);
                       Format.fprintf fmt "@,]@]")) a2);
                  Format.fprintf fmt "@,))@]")
-            | Lplaceholder a0 ->
-                (Format.fprintf fmt "(@[<2>AnnotatedAST.Lplaceholder@ ";
-                 ((__64 ()) fmt) a0;
-                 Format.fprintf fmt "@])")
-            | Fun_id a0 ->
-                (Format.fprintf fmt "(@[<2>AnnotatedAST.Fun_id@ ";
-                 ((__65 ()) fmt) a0;
-                 Format.fprintf fmt "@])")
-            | Method_id (a0,a1) ->
-                (Format.fprintf fmt "(@[<2>AnnotatedAST.Method_id (@,";
+            | Callconv (a0,a1) ->
+                (Format.fprintf fmt "(@[<2>AnnotatedAST.Callconv (@,";
                  (((__66 ()) fmt) a0;
                   Format.fprintf fmt ",@ ";
                   ((__67 ()) fmt) a1);
                  Format.fprintf fmt "@,))@]")
-            | Method_caller (a0,a1) ->
-                (Format.fprintf fmt "(@[<2>AnnotatedAST.Method_caller (@,";
-                 (((__68 ()) fmt) a0;
-                  Format.fprintf fmt ",@ ";
-                  ((__69 ()) fmt) a1);
-                 Format.fprintf fmt "@,))@]")
-            | Smethod_id (a0,a1) ->
-                (Format.fprintf fmt "(@[<2>AnnotatedAST.Smethod_id (@,";
+            | Lplaceholder a0 ->
+                (Format.fprintf fmt "(@[<2>AnnotatedAST.Lplaceholder@ ";
+                 ((__68 ()) fmt) a0;
+                 Format.fprintf fmt "@])")
+            | Fun_id a0 ->
+                (Format.fprintf fmt "(@[<2>AnnotatedAST.Fun_id@ ";
+                 ((__69 ()) fmt) a0;
+                 Format.fprintf fmt "@])")
+            | Method_id (a0,a1) ->
+                (Format.fprintf fmt "(@[<2>AnnotatedAST.Method_id (@,";
                  (((__70 ()) fmt) a0;
                   Format.fprintf fmt ",@ ";
                   ((__71 ()) fmt) a1);
                  Format.fprintf fmt "@,))@]")
+            | Method_caller (a0,a1) ->
+                (Format.fprintf fmt "(@[<2>AnnotatedAST.Method_caller (@,";
+                 (((__72 ()) fmt) a0;
+                  Format.fprintf fmt ",@ ";
+                  ((__73 ()) fmt) a1);
+                 Format.fprintf fmt "@,))@]")
+            | Smethod_id (a0,a1) ->
+                (Format.fprintf fmt "(@[<2>AnnotatedAST.Smethod_id (@,";
+                 (((__74 ()) fmt) a0;
+                  Format.fprintf fmt ",@ ";
+                  ((__75 ()) fmt) a1);
+                 Format.fprintf fmt "@,))@]")
             | Special_func a0 ->
                 (Format.fprintf fmt "(@[<2>AnnotatedAST.Special_func@ ";
-                 ((__72 ()) fmt) a0;
+                 ((__76 ()) fmt) a0;
                  Format.fprintf fmt "@])")
             | Pair (a0,a1) ->
                 (Format.fprintf fmt "(@[<2>AnnotatedAST.Pair (@,";
-                 (((__73 ()) fmt) a0;
+                 (((__77 ()) fmt) a0;
                   Format.fprintf fmt ",@ ";
-                  ((__74 ()) fmt) a1);
+                  ((__78 ()) fmt) a1);
                  Format.fprintf fmt "@,))@]")
             | Assert a0 ->
                 (Format.fprintf fmt "(@[<2>AnnotatedAST.Assert@ ";
-                 ((__75 ()) fmt) a0;
+                 ((__79 ()) fmt) a0;
                  Format.fprintf fmt "@])")
             | Typename a0 ->
                 (Format.fprintf fmt "(@[<2>AnnotatedAST.Typename@ ";
-                 ((__76 ()) fmt) a0;
+                 ((__80 ()) fmt) a0;
                  Format.fprintf fmt "@])")
             | Any  -> Format.pp_print_string fmt "AnnotatedAST.Any")
         [@ocaml.warning "-A"])
@@ -1707,7 +1744,9 @@ module AnnotatedAST(Annotation:AnnotationType) =
     
     and pp_fun_param :
       Format.formatter -> fun_param -> Ppx_deriving_runtime.unit =
-      let __4 () = pp_expr
+      let __5 () = Ast.pp_param_kind
+      
+      and __4 () = pp_expr
       
       and __3 () = Pos.pp
       
@@ -1721,38 +1760,47 @@ module AnnotatedAST(Annotation:AnnotationType) =
           fun fmt  ->
             fun x  ->
               Format.fprintf fmt "@[<2>{ ";
-              ((((((Format.fprintf fmt "@[%s =@ " "AnnotatedAST.param_hint";
-                    ((function
-                      | None  -> Format.pp_print_string fmt "None"
-                      | Some x ->
-                          (Format.pp_print_string fmt "(Some ";
-                           ((__0 ()) fmt) x;
-                           Format.pp_print_string fmt ")"))) x.param_hint;
+              (((((((Format.fprintf fmt "@[%s =@ " "AnnotatedAST.param_hint";
+                     ((function
+                       | None  -> Format.pp_print_string fmt "None"
+                       | Some x ->
+                           (Format.pp_print_string fmt "(Some ";
+                            ((__0 ()) fmt) x;
+                            Format.pp_print_string fmt ")"))) x.param_hint;
+                     Format.fprintf fmt "@]");
+                    Format.fprintf fmt ";@ ";
+                    Format.fprintf fmt "@[%s =@ " "param_is_reference";
+                    ((__1 ()) fmt) x.param_is_reference;
                     Format.fprintf fmt "@]");
                    Format.fprintf fmt ";@ ";
-                   Format.fprintf fmt "@[%s =@ " "param_is_reference";
-                   ((__1 ()) fmt) x.param_is_reference;
+                   Format.fprintf fmt "@[%s =@ " "param_is_variadic";
+                   ((__2 ()) fmt) x.param_is_variadic;
                    Format.fprintf fmt "@]");
                   Format.fprintf fmt ";@ ";
-                  Format.fprintf fmt "@[%s =@ " "param_is_variadic";
-                  ((__2 ()) fmt) x.param_is_variadic;
+                  Format.fprintf fmt "@[%s =@ " "param_pos";
+                  ((__3 ()) fmt) x.param_pos;
                   Format.fprintf fmt "@]");
                  Format.fprintf fmt ";@ ";
-                 Format.fprintf fmt "@[%s =@ " "param_pos";
-                 ((__3 ()) fmt) x.param_pos;
+                 Format.fprintf fmt "@[%s =@ " "param_name";
+                 (Format.fprintf fmt "%S") x.param_name;
                  Format.fprintf fmt "@]");
                 Format.fprintf fmt ";@ ";
-                Format.fprintf fmt "@[%s =@ " "param_name";
-                (Format.fprintf fmt "%S") x.param_name;
+                Format.fprintf fmt "@[%s =@ " "param_expr";
+                ((function
+                  | None  -> Format.pp_print_string fmt "None"
+                  | Some x ->
+                      (Format.pp_print_string fmt "(Some ";
+                       ((__4 ()) fmt) x;
+                       Format.pp_print_string fmt ")"))) x.param_expr;
                 Format.fprintf fmt "@]");
                Format.fprintf fmt ";@ ";
-               Format.fprintf fmt "@[%s =@ " "param_expr";
+               Format.fprintf fmt "@[%s =@ " "param_callconv";
                ((function
                  | None  -> Format.pp_print_string fmt "None"
                  | Some x ->
                      (Format.pp_print_string fmt "(Some ";
-                      ((__4 ()) fmt) x;
-                      Format.pp_print_string fmt ")"))) x.param_expr;
+                      ((__5 ()) fmt) x;
+                      Format.pp_print_string fmt ")"))) x.param_callconv;
                Format.fprintf fmt "@]");
               Format.fprintf fmt "@ }@]")
         [@ocaml.warning "-A"])
@@ -1802,25 +1850,38 @@ module AnnotatedAST(Annotation:AnnotationType) =
           fun fmt  ->
             fun x  ->
               Format.fprintf fmt "@[<2>{ ";
-              ((((((((((Format.fprintf fmt "@[%s =@ " "AnnotatedAST.f_mode";
-                        ((fun _  -> Format.pp_print_string fmt "<opaque>"))
-                          x.f_mode;
+              (((((((((((Format.fprintf fmt "@[%s =@ " "AnnotatedAST.f_mode";
+                         ((fun _  -> Format.pp_print_string fmt "<opaque>"))
+                           x.f_mode;
+                         Format.fprintf fmt "@]");
+                        Format.fprintf fmt ";@ ";
+                        Format.fprintf fmt "@[%s =@ " "f_ret";
+                        ((function
+                          | None  -> Format.pp_print_string fmt "None"
+                          | Some x ->
+                              (Format.pp_print_string fmt "(Some ";
+                               ((__0 ()) fmt) x;
+                               Format.pp_print_string fmt ")"))) x.f_ret;
                         Format.fprintf fmt "@]");
                        Format.fprintf fmt ";@ ";
-                       Format.fprintf fmt "@[%s =@ " "f_ret";
-                       ((function
-                         | None  -> Format.pp_print_string fmt "None"
-                         | Some x ->
-                             (Format.pp_print_string fmt "(Some ";
-                              ((__0 ()) fmt) x;
-                              Format.pp_print_string fmt ")"))) x.f_ret;
+                       Format.fprintf fmt "@[%s =@ " "f_name";
+                       ((__1 ()) fmt) x.f_name;
                        Format.fprintf fmt "@]");
                       Format.fprintf fmt ";@ ";
-                      Format.fprintf fmt "@[%s =@ " "f_name";
-                      ((__1 ()) fmt) x.f_name;
+                      Format.fprintf fmt "@[%s =@ " "f_tparams";
+                      ((fun x  ->
+                          Format.fprintf fmt "@[<2>[";
+                          ignore
+                            (List.fold_left
+                               (fun sep  ->
+                                  fun x  ->
+                                    if sep then Format.fprintf fmt ";@ ";
+                                    ((__2 ()) fmt) x;
+                                    true) false x);
+                          Format.fprintf fmt "@,]@]")) x.f_tparams;
                       Format.fprintf fmt "@]");
                      Format.fprintf fmt ";@ ";
-                     Format.fprintf fmt "@[%s =@ " "f_tparams";
+                     Format.fprintf fmt "@[%s =@ " "f_where_constraints";
                      ((fun x  ->
                          Format.fprintf fmt "@[<2>[";
                          ignore
@@ -1828,60 +1889,51 @@ module AnnotatedAST(Annotation:AnnotationType) =
                               (fun sep  ->
                                  fun x  ->
                                    if sep then Format.fprintf fmt ";@ ";
-                                   ((__2 ()) fmt) x;
+                                   ((__3 ()) fmt) x;
                                    true) false x);
-                         Format.fprintf fmt "@,]@]")) x.f_tparams;
+                         Format.fprintf fmt "@,]@]")) x.f_where_constraints;
                      Format.fprintf fmt "@]");
                     Format.fprintf fmt ";@ ";
-                    Format.fprintf fmt "@[%s =@ " "f_where_constraints";
-                    ((fun x  ->
-                        Format.fprintf fmt "@[<2>[";
-                        ignore
-                          (List.fold_left
-                             (fun sep  ->
-                                fun x  ->
-                                  if sep then Format.fprintf fmt ";@ ";
-                                  ((__3 ()) fmt) x;
-                                  true) false x);
-                        Format.fprintf fmt "@,]@]")) x.f_where_constraints;
+                    Format.fprintf fmt "@[%s =@ " "f_variadic";
+                    ((__4 ()) fmt) x.f_variadic;
                     Format.fprintf fmt "@]");
                    Format.fprintf fmt ";@ ";
-                   Format.fprintf fmt "@[%s =@ " "f_variadic";
-                   ((__4 ()) fmt) x.f_variadic;
+                   Format.fprintf fmt "@[%s =@ " "f_params";
+                   ((fun x  ->
+                       Format.fprintf fmt "@[<2>[";
+                       ignore
+                         (List.fold_left
+                            (fun sep  ->
+                               fun x  ->
+                                 if sep then Format.fprintf fmt ";@ ";
+                                 ((__5 ()) fmt) x;
+                                 true) false x);
+                       Format.fprintf fmt "@,]@]")) x.f_params;
                    Format.fprintf fmt "@]");
                   Format.fprintf fmt ";@ ";
-                  Format.fprintf fmt "@[%s =@ " "f_params";
-                  ((fun x  ->
-                      Format.fprintf fmt "@[<2>[";
-                      ignore
-                        (List.fold_left
-                           (fun sep  ->
-                              fun x  ->
-                                if sep then Format.fprintf fmt ";@ ";
-                                ((__5 ()) fmt) x;
-                                true) false x);
-                      Format.fprintf fmt "@,]@]")) x.f_params;
+                  Format.fprintf fmt "@[%s =@ " "f_body";
+                  ((__6 ()) fmt) x.f_body;
                   Format.fprintf fmt "@]");
                  Format.fprintf fmt ";@ ";
-                 Format.fprintf fmt "@[%s =@ " "f_body";
-                 ((__6 ()) fmt) x.f_body;
+                 Format.fprintf fmt "@[%s =@ " "f_fun_kind";
+                 ((__7 ()) fmt) x.f_fun_kind;
                  Format.fprintf fmt "@]");
                 Format.fprintf fmt ";@ ";
-                Format.fprintf fmt "@[%s =@ " "f_fun_kind";
-                ((__7 ()) fmt) x.f_fun_kind;
+                Format.fprintf fmt "@[%s =@ " "f_user_attributes";
+                ((fun x  ->
+                    Format.fprintf fmt "@[<2>[";
+                    ignore
+                      (List.fold_left
+                         (fun sep  ->
+                            fun x  ->
+                              if sep then Format.fprintf fmt ";@ ";
+                              ((__8 ()) fmt) x;
+                              true) false x);
+                    Format.fprintf fmt "@,]@]")) x.f_user_attributes;
                 Format.fprintf fmt "@]");
                Format.fprintf fmt ";@ ";
-               Format.fprintf fmt "@[%s =@ " "f_user_attributes";
-               ((fun x  ->
-                   Format.fprintf fmt "@[<2>[";
-                   ignore
-                     (List.fold_left
-                        (fun sep  ->
-                           fun x  ->
-                             if sep then Format.fprintf fmt ";@ ";
-                             ((__8 ()) fmt) x;
-                             true) false x);
-                   Format.fprintf fmt "@,]@]")) x.f_user_attributes;
+               Format.fprintf fmt "@[%s =@ " "f_ret_by_ref";
+               (Format.fprintf fmt "%B") x.f_ret_by_ref;
                Format.fprintf fmt "@]");
               Format.fprintf fmt "@ }@]")
         [@ocaml.warning "-A"])
@@ -1998,7 +2050,7 @@ module AnnotatedAST(Annotation:AnnotationType) =
       c_is_xhp: bool ;
       c_kind: Ast.class_kind ;
       c_name: sid ;
-      c_tparams: (tparam list* (Ast.constraint_kind* Ast.hint) list SMap.t)
+      c_tparams: (tparam list * (Ast.constraint_kind * Ast.hint) list SMap.t)
         [@opaque ];
       c_extends: hint list ;
       c_uses: hint list ;
@@ -2016,7 +2068,7 @@ module AnnotatedAST(Annotation:AnnotationType) =
       c_methods: method_ list ;
       c_user_attributes: user_attribute list ;
       c_enum: enum_ option }
-    and class_const = (hint option* sid* expr option)
+    and class_const = (hint option * sid * expr option)
     and class_typeconst =
       {
       c_tconst_name: sid ;
@@ -2043,7 +2095,8 @@ module AnnotatedAST(Annotation:AnnotationType) =
       m_body: func_body ;
       m_fun_kind: Ast.fun_kind ;
       m_user_attributes: user_attribute list ;
-      m_ret: hint option }
+      m_ret: hint option ;
+      m_ret_by_ref: bool }
     and typedef =
       {
       t_name: sid ;
@@ -2492,24 +2545,37 @@ module AnnotatedAST(Annotation:AnnotationType) =
           fun fmt  ->
             fun x  ->
               Format.fprintf fmt "@[<2>{ ";
-              ((((((((((((Format.fprintf fmt "@[%s =@ "
-                            "AnnotatedAST.m_final";
-                          (Format.fprintf fmt "%B") x.m_final;
+              (((((((((((((Format.fprintf fmt "@[%s =@ "
+                             "AnnotatedAST.m_final";
+                           (Format.fprintf fmt "%B") x.m_final;
+                           Format.fprintf fmt "@]");
+                          Format.fprintf fmt ";@ ";
+                          Format.fprintf fmt "@[%s =@ " "m_abstract";
+                          (Format.fprintf fmt "%B") x.m_abstract;
                           Format.fprintf fmt "@]");
                          Format.fprintf fmt ";@ ";
-                         Format.fprintf fmt "@[%s =@ " "m_abstract";
-                         (Format.fprintf fmt "%B") x.m_abstract;
+                         Format.fprintf fmt "@[%s =@ " "m_visibility";
+                         ((__0 ()) fmt) x.m_visibility;
                          Format.fprintf fmt "@]");
                         Format.fprintf fmt ";@ ";
-                        Format.fprintf fmt "@[%s =@ " "m_visibility";
-                        ((__0 ()) fmt) x.m_visibility;
+                        Format.fprintf fmt "@[%s =@ " "m_name";
+                        ((__1 ()) fmt) x.m_name;
                         Format.fprintf fmt "@]");
                        Format.fprintf fmt ";@ ";
-                       Format.fprintf fmt "@[%s =@ " "m_name";
-                       ((__1 ()) fmt) x.m_name;
+                       Format.fprintf fmt "@[%s =@ " "m_tparams";
+                       ((fun x  ->
+                           Format.fprintf fmt "@[<2>[";
+                           ignore
+                             (List.fold_left
+                                (fun sep  ->
+                                   fun x  ->
+                                     if sep then Format.fprintf fmt ";@ ";
+                                     ((__2 ()) fmt) x;
+                                     true) false x);
+                           Format.fprintf fmt "@,]@]")) x.m_tparams;
                        Format.fprintf fmt "@]");
                       Format.fprintf fmt ";@ ";
-                      Format.fprintf fmt "@[%s =@ " "m_tparams";
+                      Format.fprintf fmt "@[%s =@ " "m_where_constraints";
                       ((fun x  ->
                           Format.fprintf fmt "@[<2>[";
                           ignore
@@ -2517,69 +2583,60 @@ module AnnotatedAST(Annotation:AnnotationType) =
                                (fun sep  ->
                                   fun x  ->
                                     if sep then Format.fprintf fmt ";@ ";
-                                    ((__2 ()) fmt) x;
+                                    ((__3 ()) fmt) x;
                                     true) false x);
-                          Format.fprintf fmt "@,]@]")) x.m_tparams;
+                          Format.fprintf fmt "@,]@]")) x.m_where_constraints;
                       Format.fprintf fmt "@]");
                      Format.fprintf fmt ";@ ";
-                     Format.fprintf fmt "@[%s =@ " "m_where_constraints";
-                     ((fun x  ->
-                         Format.fprintf fmt "@[<2>[";
-                         ignore
-                           (List.fold_left
-                              (fun sep  ->
-                                 fun x  ->
-                                   if sep then Format.fprintf fmt ";@ ";
-                                   ((__3 ()) fmt) x;
-                                   true) false x);
-                         Format.fprintf fmt "@,]@]")) x.m_where_constraints;
+                     Format.fprintf fmt "@[%s =@ " "m_variadic";
+                     ((__4 ()) fmt) x.m_variadic;
                      Format.fprintf fmt "@]");
                     Format.fprintf fmt ";@ ";
-                    Format.fprintf fmt "@[%s =@ " "m_variadic";
-                    ((__4 ()) fmt) x.m_variadic;
+                    Format.fprintf fmt "@[%s =@ " "m_params";
+                    ((fun x  ->
+                        Format.fprintf fmt "@[<2>[";
+                        ignore
+                          (List.fold_left
+                             (fun sep  ->
+                                fun x  ->
+                                  if sep then Format.fprintf fmt ";@ ";
+                                  ((__5 ()) fmt) x;
+                                  true) false x);
+                        Format.fprintf fmt "@,]@]")) x.m_params;
                     Format.fprintf fmt "@]");
                    Format.fprintf fmt ";@ ";
-                   Format.fprintf fmt "@[%s =@ " "m_params";
-                   ((fun x  ->
-                       Format.fprintf fmt "@[<2>[";
-                       ignore
-                         (List.fold_left
-                            (fun sep  ->
-                               fun x  ->
-                                 if sep then Format.fprintf fmt ";@ ";
-                                 ((__5 ()) fmt) x;
-                                 true) false x);
-                       Format.fprintf fmt "@,]@]")) x.m_params;
+                   Format.fprintf fmt "@[%s =@ " "m_body";
+                   ((__6 ()) fmt) x.m_body;
                    Format.fprintf fmt "@]");
                   Format.fprintf fmt ";@ ";
-                  Format.fprintf fmt "@[%s =@ " "m_body";
-                  ((__6 ()) fmt) x.m_body;
+                  Format.fprintf fmt "@[%s =@ " "m_fun_kind";
+                  ((__7 ()) fmt) x.m_fun_kind;
                   Format.fprintf fmt "@]");
                  Format.fprintf fmt ";@ ";
-                 Format.fprintf fmt "@[%s =@ " "m_fun_kind";
-                 ((__7 ()) fmt) x.m_fun_kind;
+                 Format.fprintf fmt "@[%s =@ " "m_user_attributes";
+                 ((fun x  ->
+                     Format.fprintf fmt "@[<2>[";
+                     ignore
+                       (List.fold_left
+                          (fun sep  ->
+                             fun x  ->
+                               if sep then Format.fprintf fmt ";@ ";
+                               ((__8 ()) fmt) x;
+                               true) false x);
+                     Format.fprintf fmt "@,]@]")) x.m_user_attributes;
                  Format.fprintf fmt "@]");
                 Format.fprintf fmt ";@ ";
-                Format.fprintf fmt "@[%s =@ " "m_user_attributes";
-                ((fun x  ->
-                    Format.fprintf fmt "@[<2>[";
-                    ignore
-                      (List.fold_left
-                         (fun sep  ->
-                            fun x  ->
-                              if sep then Format.fprintf fmt ";@ ";
-                              ((__8 ()) fmt) x;
-                              true) false x);
-                    Format.fprintf fmt "@,]@]")) x.m_user_attributes;
+                Format.fprintf fmt "@[%s =@ " "m_ret";
+                ((function
+                  | None  -> Format.pp_print_string fmt "None"
+                  | Some x ->
+                      (Format.pp_print_string fmt "(Some ";
+                       ((__9 ()) fmt) x;
+                       Format.pp_print_string fmt ")"))) x.m_ret;
                 Format.fprintf fmt "@]");
                Format.fprintf fmt ";@ ";
-               Format.fprintf fmt "@[%s =@ " "m_ret";
-               ((function
-                 | None  -> Format.pp_print_string fmt "None"
-                 | Some x ->
-                     (Format.pp_print_string fmt "(Some ";
-                      ((__9 ()) fmt) x;
-                      Format.pp_print_string fmt ")"))) x.m_ret;
+               Format.fprintf fmt "@[%s =@ " "m_ret_by_ref";
+               (Format.fprintf fmt "%B") x.m_ret_by_ref;
                Format.fprintf fmt "@]");
               Format.fprintf fmt "@ }@]")
         [@ocaml.warning "-A"])
@@ -2754,9 +2811,11 @@ module AnnotatedAST(Annotation:AnnotationType) =
       | Eif _ -> "Eif"
       | NullCoalesce _ -> "NullCoalesce"
       | InstanceOf _ -> "InstanceOf"
+      | Is _ -> "Is"
       | New _ -> "New"
       | Efun _ -> "Efun"
       | Xml _ -> "Xml"
+      | Callconv _ -> "Callconv"
       | Assert _ -> "Assert"
       | Clone _ -> "Clone"
       | Typename _ -> "Typename" 
@@ -2846,6 +2905,7 @@ module AnnotatedAST(Annotation:AnnotationType) =
             method  on_throw : 'a -> is_terminal -> expr -> 'a
             method  on_try : 'a -> block -> catch list -> block -> 'a
             method  on_while : 'a -> expr -> block -> 'a
+            method  on_using : 'a -> bool -> expr -> block -> 'a
             method  on_as_expr : 'a -> as_expr -> 'a
             method  on_array : 'a -> afield list -> 'a
             method  on_shape : 'a -> expr ShapeMap.t -> 'a
@@ -2889,15 +2949,29 @@ module AnnotatedAST(Annotation:AnnotationType) =
             method  on_nullCoalesce : 'a -> expr -> expr -> 'a
             method  on_typename : 'a -> sid -> 'a
             method  on_instanceOf : 'a -> expr -> class_id -> 'a
+            method  on_is : 'a -> expr -> hint -> 'a
             method  on_class_id : 'a -> class_id -> 'a
             method  on_new : 'a -> class_id -> expr list -> expr list -> 'a
             method  on_efun : 'a -> fun_ -> id list -> 'a
             method  on_xml :
-              'a -> sid -> (pstring* expr) list -> expr list -> 'a
+              'a -> sid -> (pstring * expr) list -> expr list -> 'a
+            method  on_param_kind : 'a -> Ast.param_kind -> 'a
+            method  on_callconv : 'a -> Ast.param_kind -> expr -> 'a
             method  on_assert : 'a -> assert_expr -> 'a
             method  on_clone : 'a -> expr -> 'a
             method  on_field : 'a -> field -> 'a
             method  on_afield : 'a -> afield -> 'a
+            method  on_func_named_body : 'a -> func_named_body -> 'a
+            method  on_func_unnamed_body : 'a -> func_unnamed_body -> 'a
+            method  on_func_body : 'a -> func_body -> 'a
+            method  on_method_ : 'a -> method_ -> 'a
+            method  on_fun_ : 'a -> fun_ -> 'a
+            method  on_class_ : 'a -> class_ -> 'a
+            method  on_gconst : 'a -> gconst -> 'a
+            method  on_typedef : 'a -> typedef -> 'a
+            method  on_hint : 'a -> hint -> 'a
+            method  on_def : 'a -> def -> 'a
+            method  on_program : 'a -> program -> 'a
           end
         class virtual ['a] visitor : ['a] visitor_type =
           object (this)
@@ -2920,6 +2994,9 @@ module AnnotatedAST(Annotation:AnnotationType) =
               let acc = this#on_block acc b  in
               let acc = this#on_expr acc e  in acc
             method on_while acc e b =
+              let acc = this#on_expr acc e  in
+              let acc = this#on_block acc b  in acc
+            method on_using acc _has_await e b =
               let acc = this#on_expr acc e  in
               let acc = this#on_block acc b  in acc
             method on_for acc e1 e2 e3 b =
@@ -2965,6 +3042,7 @@ module AnnotatedAST(Annotation:AnnotationType) =
               | If (e,b1,b2) -> this#on_if acc e b1 b2
               | Do (b,e) -> this#on_do acc b e
               | While (e,b) -> this#on_while acc e b
+              | Using (has_await,e,b) -> this#on_using acc has_await e b
               | For (e1,e2,e3,b) -> this#on_for acc e1 e2 e3 b
               | Switch (e,cl) -> this#on_switch acc e cl
               | Foreach (e,ae,b) -> this#on_foreach acc e ae b
@@ -3021,10 +3099,12 @@ module AnnotatedAST(Annotation:AnnotationType) =
               | Eif (e1,e2,e3) -> this#on_eif acc e1 e2 e3
               | NullCoalesce (e1,e2) -> this#on_nullCoalesce acc e1 e2
               | InstanceOf (e1,e2) -> this#on_instanceOf acc e1 e2
+              | Is (e,h) -> this#on_is acc e h
               | Typename n -> this#on_typename acc n
               | New (cid,el,uel) -> this#on_new acc cid el uel
               | Efun (f,idl) -> this#on_efun acc f idl
               | Xml (sid,attrl,el) -> this#on_xml acc sid attrl el
+              | Callconv (kind,e) -> this#on_callconv acc kind e
               | ValCollection (s,el) -> this#on_valCollection acc s el
               | KeyValCollection (s,fl) -> this#on_keyValCollection acc s fl
             method on_array acc afl = List.fold_left this#on_afield acc afl
@@ -3105,6 +3185,7 @@ module AnnotatedAST(Annotation:AnnotationType) =
             method on_instanceOf acc e1 e2 =
               let acc = this#on_expr acc e1  in
               let acc = this#on_class_id acc e2  in acc
+            method on_is acc e _ = this#on_expr acc e
             method on_class_id acc =
               function | CIexpr e -> this#on_expr acc e | _ -> acc
             method on_new acc cid el uel =
@@ -3123,6 +3204,10 @@ module AnnotatedAST(Annotation:AnnotationType) =
                   acc attrl
                  in
               let acc = List.fold_left this#on_expr acc el  in acc
+            method on_param_kind acc _ = acc
+            method on_callconv acc kind e =
+              let acc = this#on_param_kind acc kind  in
+              let acc = this#on_expr acc e  in acc
             method on_assert acc =
               function | AE_assert e -> this#on_expr acc e
             method on_clone acc e = this#on_expr acc e
@@ -3135,6 +3220,69 @@ module AnnotatedAST(Annotation:AnnotationType) =
               | AFkvalue (e1,e2) ->
                   let acc = this#on_expr acc e1  in
                   let acc = this#on_expr acc e2  in acc
+            method on_hint acc _ = acc
+            method on_fun_ acc f =
+              let acc = this#on_id acc f.f_name  in
+              let acc = this#on_func_body acc f.f_body  in
+              let acc =
+                match f.f_ret with
+                | Some h -> this#on_hint acc h
+                | None  -> acc  in
+              acc
+            method on_func_named_body acc fnb =
+              this#on_block acc fnb.fnb_nast
+            method on_func_unnamed_body acc _ = acc
+            method on_func_body acc =
+              function
+              | UnnamedBody unb -> this#on_func_unnamed_body acc unb
+              | NamedBody nb -> this#on_func_named_body acc nb
+            method on_method_ acc m =
+              let acc = this#on_id acc m.m_name  in
+              let acc = this#on_func_body acc m.m_body  in acc
+            method on_class_ acc c =
+              let acc = this#on_id acc c.c_name  in
+              let acc = List.fold_left this#on_hint acc c.c_extends  in
+              let acc = List.fold_left this#on_hint acc c.c_uses  in
+              let acc = List.fold_left this#on_hint acc c.c_implements  in
+              let acc =
+                match c.c_constructor with
+                | Some ctor -> this#on_method_ acc ctor
+                | None  -> acc  in
+              let acc = List.fold_left this#on_method_ acc c.c_methods  in
+              let acc = List.fold_left this#on_method_ acc c.c_static_methods
+                 in
+              acc
+            method on_gconst acc g =
+              let acc = this#on_id acc g.cst_name  in
+              let acc =
+                match g.cst_value with
+                | Some e -> this#on_expr acc e
+                | None  -> acc  in
+              let acc =
+                match g.cst_type with
+                | Some h -> this#on_hint acc h
+                | None  -> acc  in
+              acc
+            method on_typedef acc t =
+              let acc = this#on_id acc t.t_name  in
+              let acc = this#on_hint acc t.t_kind  in
+              let acc =
+                match t.t_constraint with
+                | Some c -> this#on_hint acc c
+                | None  -> acc  in
+              acc
+            method on_def acc =
+              function
+              | Fun f -> this#on_fun_ acc f
+              | Class c -> this#on_class_ acc c
+              | Typedef t -> this#on_typedef acc t
+              | Constant g -> this#on_gconst acc g
+            method on_program acc p =
+              let acc =
+                List.fold_left (fun acc  -> fun d  -> this#on_def acc d) acc
+                  p
+                 in
+              acc
           end
         module HasReturn : sig val block : block -> bool end =
           struct
@@ -3182,7 +3330,7 @@ module PosAnnotation =
       fun x  -> Format.asprintf "%a" pp x
     
   end
-module PosAnnotatedAST = AnnotatedAST(PosAnnotation)
+module PosAnnotatedAST = (AnnotatedAST)(PosAnnotation)
 include PosAnnotatedAST
 let assert_named_body =
   function

@@ -96,7 +96,29 @@ inline bool operator<(Context a, Context b) {
          std::make_tuple(b.unit, b.func, b.cls);
 }
 
-using ContextSet = std::unordered_set<Context, Context::Hash>;
+/*
+ * A DependencyContext encodes enough of the context to record a
+ * dependency - either a php::Func, or, if we're doing private
+ * property analysis and its a suitable class, a php::Class
+ */
+using DependencyContext = Either<borrowed_ptr<php::Func>,
+                                 borrowed_ptr<const php::Class>>;
+
+struct DependencyContextLess {
+  bool operator()(const DependencyContext& a,
+                  const DependencyContext& b) const {
+    return a.toOpaque() < b.toOpaque();
+  }
+};
+
+struct DependencyContextHash {
+  size_t operator()(const DependencyContext& d) const {
+    return pointer_hash<void>{}(reinterpret_cast<void*>(d.toOpaque()));
+  }
+};
+
+using DependencyContextSet = std::unordered_set<DependencyContext,
+                                                DependencyContextHash>;
 
 std::string show(Context);
 
@@ -127,9 +149,6 @@ using PropState = std::map<LSString,Type>;
 //////////////////////////////////////////////////////////////////////
 
 // private types
-struct IndexData;
-struct FuncFamily;
-struct FuncInfo;
 struct ClassInfo;
 
 //////////////////////////////////////////////////////////////////////
@@ -307,6 +326,11 @@ struct Func {
    * looking for a caller's frame.
    */
   bool mightBeSkipFrame() const;
+
+  struct FuncInfo;
+  struct MethTabEntryPair;
+  struct FuncFamily;
+
 private:
   friend struct ::HPHP::HHBBC::Index;
   struct FuncName {
@@ -320,6 +344,7 @@ private:
   using Rep = boost::variant< FuncName
                             , MethodName
                             , borrowed_ptr<FuncInfo>
+                            , borrowed_ptr<const MethTabEntryPair>
                             , borrowed_ptr<FuncFamily>
                             >;
 
@@ -424,6 +449,13 @@ struct Index {
    */
   const CompactVector<borrowed_ptr<const php::Class>>*
     lookup_closures(borrowed_ptr<const php::Class>) const;
+
+  /*
+   * Find all the extra methods associated with a class from its
+   * traits.
+   */
+  const std::set<borrowed_ptr<php::Func>>*
+    lookup_extra_methods(borrowed_ptr<const php::Class>) const;
 
   /*
    * Attempt to record a new alias in the index. May be called from
@@ -712,6 +744,19 @@ struct Index {
   Slot lookup_iface_vtable_slot(borrowed_ptr<const php::Class>) const;
 
   /*
+   * Return the DependencyContext for ctx.
+   */
+  DependencyContext dependency_context(const Context& ctx) const;
+
+  /*
+   * Determine whether to use class-at-a-time, or function-at-a-time
+   * dependencies.
+   *
+   * Must be called in single-threaded context.
+   */
+  void use_class_dependencies(bool f);
+
+  /*
    * Refine the types of the class constants defined by an 86cinit,
    * based on a round of analysis.
    *
@@ -724,7 +769,7 @@ struct Index {
   void refine_class_constants(
     const Context& ctx,
     const CompactVector<std::pair<size_t, TypedValue>>& resolved,
-    ContextSet& deps);
+    DependencyContextSet& deps);
 
   /*
    * Refine the types of the constants defined by a function, based on
@@ -738,7 +783,7 @@ struct Index {
    * Merges the set of Contexts that depended on the constants defined
    * by this php::Func into deps.
    */
-  void refine_constants(const FuncAnalysis& fa, ContextSet& deps);
+  void refine_constants(const FuncAnalysis& fa, DependencyContextSet& deps);
 
   /*
    * Refine the types of the local statics owned by the function.
@@ -762,7 +807,7 @@ struct Index {
    * this php::Func into deps.
    */
   void refine_return_type(borrowed_ptr<const php::Func>, Type,
-                          ContextSet& deps);
+                          DependencyContextSet& deps);
 
   /*
    * Refine the used var types for a closure, based on a round of
@@ -841,11 +886,13 @@ struct Index {
   bool must_be_derived_from(borrowed_ptr<const php::Class>,
                             borrowed_ptr<const php::Class>) const;
 
+  struct IndexData;
 private:
   Index(const Index&) = delete;
   Index& operator=(Index&&) = delete;
 
 private:
+  friend struct PublicSPropIndexer;
   template<class FuncRange>
   res::Func resolve_func_helper(const FuncRange&, SString) const;
   res::Func do_resolve(borrowed_ptr<const php::Func>) const;
@@ -890,7 +937,11 @@ struct PublicSPropIndexer {
    * This routine may be safely called concurrently by multiple analysis
    * threads.
    */
-  void merge(Context ctx, Type cls, Type name, Type val);
+  void merge(Context ctx, const Type& cls, const Type& name, const Type& val);
+  void merge(Context ctx, ClassInfo* cinfo,
+             const Type& name, const Type& val);
+  void merge(Context ctx, const php::Class& cls,
+             const Type& name, const Type& val);
 
 private:
   friend struct Index;

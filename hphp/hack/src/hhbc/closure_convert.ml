@@ -8,7 +8,7 @@
  *
  *)
 
-open Core
+open Hh_core
 open Ast
 open Ast_scope
 
@@ -154,15 +154,19 @@ let env_with_longlambda env is_static fd =
 
 let strip_id id = SU.strip_global_ns (snd id)
 
-let rec make_scope_name scope =
+let rec make_scope_name ns scope =
   match scope with
-  | [] -> ""
+  | [] ->
+    begin match ns.Namespace_env.ns_name with
+    | None -> ""
+    | Some n -> n ^ "\\"
+    end
   | ScopeItem.Function fd :: _ -> strip_id fd.f_name
   | ScopeItem.Method md :: scope ->
-    make_scope_name scope ^ "::" ^ strip_id md.m_name
+    make_scope_name ns scope ^ "::" ^ strip_id md.m_name
   | ScopeItem.Class cd :: _ ->
     SU.Xhp.mangle_id (strip_id cd.c_name)
-  | _ :: scope -> make_scope_name scope
+  | _ :: scope -> make_scope_name ns scope
 
 let env_with_function env fd =
   env_with_function_like env (ScopeItem.Function fd) ~is_closure_body:false fd
@@ -228,7 +232,7 @@ let add_class env st cd =
 
 let make_closure_name total_count env st =
   SU.Closures.mangle_closure
-    (make_scope_name env.scope) st.per_function_count total_count
+    (make_scope_name st.namespace env.scope) st.per_function_count total_count
 
 let make_closure ~class_num
   p total_count env st lambda_vars tparams fd body =
@@ -341,6 +345,29 @@ let convert_id (env:env) p (pid, str as id) =
   | _ ->
     (p, Id id)
 
+let check_if_in_async_context { scope; _ } =
+  let p = Pos.none in
+  let check_valid_fun_kind (_, name) =
+    function | FAsync | FAsyncGenerator -> ()
+             | _ -> Emit_fatal.raise_fatal_parse p @@
+    "Function '"
+    ^ (SU.strip_global_ns name)
+    ^ "' contains 'await' but is not declared as async."
+  in
+  match scope with
+  | [] -> Emit_fatal.raise_fatal_parse p
+            "'await' can only be used inside a function"
+  | ScopeItem.Lambda :: _
+  | ScopeItem.LongLambda _ :: _ ->
+   (* TODO: In a lambda, we dont see whether there is a
+    * async keyword in front or not >.> so assume this is fine, for now. *)
+    ()
+  | ScopeItem.Class _ :: _ -> () (* Syntax error, wont get here *)
+  | ScopeItem.Function fd :: _ ->
+    check_valid_fun_kind fd.f_name fd.f_fun_kind
+  | ScopeItem.Method md :: _ ->
+    check_valid_fun_kind md.m_name md.m_fun_kind
+
 let rec convert_expr env st (p, expr_ as expr) =
   match expr_ with
   | Varray es ->
@@ -384,7 +411,8 @@ let rec convert_expr env st (p, expr_ as expr) =
       ~trait:false
       ~fallback_to_empty_string:false
       env p pe
-  | Call ((_, (Class_const ((_, cid), _) | Class_get ((_, cid), _))) as e, el1, el2, el3)
+  | Call ((_, (Class_const ((_, Id (_, cid)), _) | Class_get ((_, Id (_, cid)), _))) as e,
+    el1, el2, el3)
   when cid = "parent" ->
     let st = add_var env st "$this" in
     let st, e = convert_expr env st e in
@@ -403,6 +431,7 @@ let rec convert_expr env st (p, expr_ as expr) =
     let st, af = convert_afield env st af in
     st, (p, Yield af)
   | Await e ->
+    check_if_in_async_context env;
     let st, e = convert_expr env st e in
     st, (p, Await e)
   | List el ->
@@ -468,13 +497,13 @@ let rec convert_expr env st (p, expr_ as expr) =
     st, (p, ast_id)
   | Id id ->
     st, convert_id env p id
-  | Class_get (cid, _)
-  | Class_const (cid, _) ->
-    let st = begin match (Ast_class_expr.id_to_expr cid) with
-    | _, Lvar (_, id) -> add_var env st id
-    | _ -> st
-    end in
-    st, expr
+  | Class_get (cid, n) ->
+    let st, e = convert_expr env st cid in
+    let st, n = convert_expr env st n in
+    st, (p, Class_get (e, n))
+  | Class_const (cid, n) ->
+    let st, e = convert_expr env st cid in
+    st, (p, Class_const (e, n))
   | _ ->
     st, expr
 
@@ -609,6 +638,7 @@ and convert_stmt env st stmt =
     let st, cl = List.map_env st cl (convert_case env) in
     st, Switch (e, cl)
   | Foreach (e, p, ae, b) ->
+    if p <> None then check_if_in_async_context env;
     let st, e = convert_expr env st e in
     let st, ae = convert_as_expr env st ae in
     let st, b = convert_block env st b in
@@ -618,6 +648,11 @@ and convert_stmt env st stmt =
     let st, cl = List.map_env st cl (convert_catch env) in
     let st, b2 = convert_block env st b2 in
     st, Try (b1, cl, b2)
+  | Using (has_await, e, b) ->
+    if has_await then check_if_in_async_context env;
+    let st, e = convert_expr env st e in
+    let st, b = convert_block env st b in
+    st, Using (has_await, e, b)
   | Def_inline ((Class _) as d) ->
     let cd =
       (* propagate namespace information to nested classes *)
@@ -738,6 +773,15 @@ and convert_class_elt env st ce =
     let st, iel = List.map_env st iel (convert_class_const env) in
     st, Const (ho, iel)
 
+  | XhpAttr (h, c, v, es) ->
+    let st, c = convert_class_var env st c in
+    let st, es =
+      match es with
+      | None -> st, es
+      | Some (p, es) ->
+        let st, es = convert_exprs env st es in
+        st, Some (p, es) in
+    st, XhpAttr (h, c, v, es)
   | _ ->
     st, ce
 
@@ -814,5 +858,5 @@ let convert_toplevel_prog defs =
     Emit_env.(
       { global_explicit_use_set = st.explicit_use_set
       ; global_closure_namespaces = st.closure_namespaces
-      ; global_closure_enclosing_classes = st.closure_enclosing_classes })
+      ; global_closure_enclosing_classes = st.closure_enclosing_classes})
   )

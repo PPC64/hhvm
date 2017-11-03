@@ -144,8 +144,8 @@ module LineConf = struct
  let line_width = 80
 end
 module Comparator = WidthConstrainedDocComparator(LineConf)
-module Core = Pretty_printing_library.Make(Comparator)
-module Printer = Utility(Core)
+module Hh_core = Pretty_printing_library.Make(Comparator)
+module Printer = Utility(Hh_core)
 module Syntax = Full_fidelity_editable_syntax
 module EditableToken = Full_fidelity_editable_token
 open Syntax
@@ -571,19 +571,25 @@ let rec get_doc node =
   | ParameterDeclaration {
     parameter_attribute;
     parameter_visibility;
+    parameter_call_convention;
     parameter_type;
     parameter_name;
     parameter_default_value } ->
     let attr = get_doc parameter_attribute in
     let visibility = get_doc parameter_visibility in
+    let callconv = get_doc parameter_call_convention in
     let parameter_type = get_doc parameter_type in
     let parameter_name = get_doc parameter_name in
     let parameter_default = get_doc parameter_default_value in
     group_doc
-      ( attr ^| visibility ^| parameter_type ^| parameter_name
+      ( attr ^| visibility ^| callconv ^| parameter_type ^| parameter_name
       ^| parameter_default )
-  | VariadicParameter { variadic_parameter_ellipsis } ->
-      get_doc variadic_parameter_ellipsis
+  | VariadicParameter {
+    variadic_parameter_type;
+    variadic_parameter_ellipsis } ->
+    let t = get_doc variadic_parameter_type in
+    let ell = get_doc variadic_parameter_ellipsis in
+    t ^| ell
   | AttributeSpecification {
       attribute_specification_left_double_angle;
       attribute_specification_attributes;
@@ -1009,6 +1015,11 @@ let rec get_doc node =
     let left = get_doc x.instanceof_left_operand in
     let op = get_doc x.instanceof_operator in
     let right = get_doc x.instanceof_right_operand in
+    group_doc (left ^| op ^| right)
+  | IsExpression x ->
+    let left = get_doc x.is_left_operand in
+    let op = get_doc x.is_operator in
+    let right = get_doc x.is_right_operand in
     group_doc (left ^| op ^| right)
   | ConditionalExpression x ->
     let tst = get_doc x.conditional_test in

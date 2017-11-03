@@ -515,6 +515,8 @@ inline const TypedValue* Elem(TypedValue& tvRef,
     return ElemKeyset<mode, keyType>(base->m_data.parr, key).tv_ptr();
   }
 
+  if (mode == MOpMode::InOut) throw_invalid_inout_base();
+
   return ElemSlow<mode, keyType, intishWarn>(tvRef, base, key).tv_ptr();
 }
 
@@ -822,13 +824,13 @@ inline TypedValue* ElemDObject(TypedValue& tvRef, TypedValue* base,
     }
     return collections::atLval(obj, &scratchKey);
   } else if (obj->getVMClass()->classof(SystemLib::s_ArrayObjectClass)) {
-    auto storage = obj->o_realProp(s_storage, 0,
-                                   SystemLib::s_ArrayObjectClass->nameStr());
-    // ArrayObject should have the 'storage' property...
-    assert(storage != nullptr);
+    auto storage = obj->getPropLval(SystemLib::s_ArrayObjectClass,
+                                    s_storage.get());
+    // ArrayObject should always have the 'storage' property...
+    assert(storage.has_ref());
     return UNLIKELY(RuntimeOption::EvalHackArrCompatNotices)
-      ? ElemDArray<mode, reffy, true, keyType>(storage->asTypedValue(), key)
-      : ElemDArray<mode, reffy, false, keyType>(storage->asTypedValue(), key);
+      ? ElemDArray<mode, reffy, true, keyType>(storage.tv_ptr(), key)
+      : ElemDArray<mode, reffy, false, keyType>(storage.tv_ptr(), key);
   }
 
 

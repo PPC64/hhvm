@@ -8,7 +8,7 @@
  *
  *)
 
-open Core
+open Hh_core
 
 module Reason = Typing_reason
 module SN = Naming_special_names
@@ -353,6 +353,7 @@ and 'phase fun_type = {
   ft_where_constraints : 'phase where_constraint list  ;
   ft_params     : 'phase fun_params   ;
   ft_ret        : 'phase ty           ;
+  ft_ret_by_ref : bool                ;
 }
 
 (* Arity information for a fun_type; indicating the minimum number of
@@ -365,13 +366,16 @@ and 'phase fun_arity =
   (* HH-style ... anonymous variadic arg; body presumably uses func_get_args *)
   | Fellipsis of int       (* min *)
 
+and param_mode =
+  | FPnormal
+  | FPref
+  | FPinout
 
 and 'phase fun_param = {
-  fp_pos    : Pos.t;
-  fp_name   : string option;
-  fp_type   : 'phase ty;
-  (* true if this parameter is passed by reference *)
-  fp_is_ref : bool;
+  fp_pos  : Pos.t;
+  fp_name : string option;
+  fp_type : 'phase ty;
+  fp_kind : param_mode;
 }
 
 and 'phase fun_params = 'phase fun_param list
@@ -504,6 +508,13 @@ let this = Local_id.make "$this"
 let arity_min ft_arity : int = match ft_arity with
   | Fstandard (min, _) | Fvariadic (min, _) | Fellipsis min -> min
 
+let get_param_mode is_ref callconv =
+  (* If a param has both & and inout, this should have errored in parsing. *)
+  match callconv with
+  | Some Ast.Pinout -> FPinout
+  | None when is_ref -> FPref
+  | None -> FPnormal
+
 module AbstractKind = struct
   let to_string = function
     | AKnewtype (name, _) -> name
@@ -551,13 +562,13 @@ module ShapeFieldMap = struct
 end
 
 module ShapeFieldList = struct
-  include Core.List
+  include Hh_core.List
 
   let map_env env xs ~f =
     let f_over_shape_field_type env ({ sft_ty; _ } as shape_field_type) =
       let env, sft_ty = f env sft_ty in
       env, { shape_field_type with sft_ty } in
-    Core.List.map_env env xs ~f:f_over_shape_field_type
+    Hh_core.List.map_env env xs ~f:f_over_shape_field_type
 end
 
 (*****************************************************************************)

@@ -15,8 +15,6 @@
  *
  *   buck run //hphp/hack/src:generate_full_fidelity
  *
- * This module contains the type describing the structure of a syntax tree.
- *
  **
  *
  */
@@ -330,6 +328,8 @@ abstract class EditableSyntax implements ArrayAccess {
       return BinaryExpression::from_json($json, $position, $source);
     case 'instanceof_expression':
       return InstanceofExpression::from_json($json, $position, $source);
+    case 'is_expression':
+      return IsExpression::from_json($json, $position, $source);
     case 'conditional_expression':
       return ConditionalExpression::from_json($json, $position, $source);
     case 'eval_expression':
@@ -885,6 +885,8 @@ abstract class EditableToken extends EditableSyntax {
        return new IncludeToken($leading, $trailing);
     case 'include_once':
        return new Include_onceToken($leading, $trailing);
+    case 'inout':
+       return new InoutToken($leading, $trailing);
     case 'instanceof':
        return new InstanceofToken($leading, $trailing);
     case 'insteadof':
@@ -893,6 +895,8 @@ abstract class EditableToken extends EditableSyntax {
        return new IntToken($leading, $trailing);
     case 'interface':
        return new InterfaceToken($leading, $trailing);
+    case 'is':
+       return new IsToken($leading, $trailing);
     case 'isset':
        return new IssetToken($leading, $trailing);
     case 'keyset':
@@ -2002,6 +2006,21 @@ final class Include_onceToken extends EditableToken {
     return new Include_onceToken($this->leading(), $trailing);
   }
 }
+final class InoutToken extends EditableToken {
+  public function __construct(
+    EditableSyntax $leading,
+    EditableSyntax $trailing) {
+    parent::__construct('inout', $leading, $trailing, 'inout');
+  }
+
+  public function with_leading(EditableSyntax $leading): InoutToken {
+    return new InoutToken($leading, $this->trailing());
+  }
+
+  public function with_trailing(EditableSyntax $trailing): InoutToken {
+    return new InoutToken($this->leading(), $trailing);
+  }
+}
 final class InstanceofToken extends EditableToken {
   public function __construct(
     EditableSyntax $leading,
@@ -2060,6 +2079,21 @@ final class InterfaceToken extends EditableToken {
 
   public function with_trailing(EditableSyntax $trailing): InterfaceToken {
     return new InterfaceToken($this->leading(), $trailing);
+  }
+}
+final class IsToken extends EditableToken {
+  public function __construct(
+    EditableSyntax $leading,
+    EditableSyntax $trailing) {
+    parent::__construct('is', $leading, $trailing, 'is');
+  }
+
+  public function with_leading(EditableSyntax $leading): IsToken {
+    return new IsToken($leading, $this->trailing());
+  }
+
+  public function with_trailing(EditableSyntax $trailing): IsToken {
+    return new IsToken($this->leading(), $trailing);
   }
 }
 final class IssetToken extends EditableToken {
@@ -8332,18 +8366,21 @@ final class DecoratedExpression extends EditableSyntax {
 final class ParameterDeclaration extends EditableSyntax {
   private EditableSyntax $_attribute;
   private EditableSyntax $_visibility;
+  private EditableSyntax $_call_convention;
   private EditableSyntax $_type;
   private EditableSyntax $_name;
   private EditableSyntax $_default_value;
   public function __construct(
     EditableSyntax $attribute,
     EditableSyntax $visibility,
+    EditableSyntax $call_convention,
     EditableSyntax $type,
     EditableSyntax $name,
     EditableSyntax $default_value) {
     parent::__construct('parameter_declaration');
     $this->_attribute = $attribute;
     $this->_visibility = $visibility;
+    $this->_call_convention = $call_convention;
     $this->_type = $type;
     $this->_name = $name;
     $this->_default_value = $default_value;
@@ -8353,6 +8390,9 @@ final class ParameterDeclaration extends EditableSyntax {
   }
   public function visibility(): EditableSyntax {
     return $this->_visibility;
+  }
+  public function call_convention(): EditableSyntax {
+    return $this->_call_convention;
   }
   public function type(): EditableSyntax {
     return $this->_type;
@@ -8367,6 +8407,7 @@ final class ParameterDeclaration extends EditableSyntax {
     return new ParameterDeclaration(
       $attribute,
       $this->_visibility,
+      $this->_call_convention,
       $this->_type,
       $this->_name,
       $this->_default_value);
@@ -8375,6 +8416,16 @@ final class ParameterDeclaration extends EditableSyntax {
     return new ParameterDeclaration(
       $this->_attribute,
       $visibility,
+      $this->_call_convention,
+      $this->_type,
+      $this->_name,
+      $this->_default_value);
+  }
+  public function with_call_convention(EditableSyntax $call_convention): ParameterDeclaration {
+    return new ParameterDeclaration(
+      $this->_attribute,
+      $this->_visibility,
+      $call_convention,
       $this->_type,
       $this->_name,
       $this->_default_value);
@@ -8383,6 +8434,7 @@ final class ParameterDeclaration extends EditableSyntax {
     return new ParameterDeclaration(
       $this->_attribute,
       $this->_visibility,
+      $this->_call_convention,
       $type,
       $this->_name,
       $this->_default_value);
@@ -8391,6 +8443,7 @@ final class ParameterDeclaration extends EditableSyntax {
     return new ParameterDeclaration(
       $this->_attribute,
       $this->_visibility,
+      $this->_call_convention,
       $this->_type,
       $name,
       $this->_default_value);
@@ -8399,6 +8452,7 @@ final class ParameterDeclaration extends EditableSyntax {
     return new ParameterDeclaration(
       $this->_attribute,
       $this->_visibility,
+      $this->_call_convention,
       $this->_type,
       $this->_name,
       $default_value);
@@ -8412,12 +8466,14 @@ final class ParameterDeclaration extends EditableSyntax {
     array_push($new_parents, $this);
     $attribute = $this->attribute()->rewrite($rewriter, $new_parents);
     $visibility = $this->visibility()->rewrite($rewriter, $new_parents);
+    $call_convention = $this->call_convention()->rewrite($rewriter, $new_parents);
     $type = $this->type()->rewrite($rewriter, $new_parents);
     $name = $this->name()->rewrite($rewriter, $new_parents);
     $default_value = $this->default_value()->rewrite($rewriter, $new_parents);
     if (
       $attribute === $this->attribute() &&
       $visibility === $this->visibility() &&
+      $call_convention === $this->call_convention() &&
       $type === $this->type() &&
       $name === $this->name() &&
       $default_value === $this->default_value()) {
@@ -8426,6 +8482,7 @@ final class ParameterDeclaration extends EditableSyntax {
       return $rewriter(new ParameterDeclaration(
         $attribute,
         $visibility,
+        $call_convention,
         $type,
         $name,
         $default_value), $parents ?? []);
@@ -8439,6 +8496,9 @@ final class ParameterDeclaration extends EditableSyntax {
     $visibility = EditableSyntax::from_json(
       $json->parameter_visibility, $position, $source);
     $position += $visibility->width();
+    $call_convention = EditableSyntax::from_json(
+      $json->parameter_call_convention, $position, $source);
+    $position += $call_convention->width();
     $type = EditableSyntax::from_json(
       $json->parameter_type, $position, $source);
     $position += $type->width();
@@ -8451,6 +8511,7 @@ final class ParameterDeclaration extends EditableSyntax {
     return new ParameterDeclaration(
         $attribute,
         $visibility,
+        $call_convention,
         $type,
         $name,
         $default_value);
@@ -8458,6 +8519,7 @@ final class ParameterDeclaration extends EditableSyntax {
   public function children(): Generator<string, EditableSyntax, void> {
     yield $this->_attribute;
     yield $this->_visibility;
+    yield $this->_call_convention;
     yield $this->_type;
     yield $this->_name;
     yield $this->_default_value;
@@ -8465,17 +8527,29 @@ final class ParameterDeclaration extends EditableSyntax {
   }
 }
 final class VariadicParameter extends EditableSyntax {
+  private EditableSyntax $_type;
   private EditableSyntax $_ellipsis;
   public function __construct(
+    EditableSyntax $type,
     EditableSyntax $ellipsis) {
     parent::__construct('variadic_parameter');
+    $this->_type = $type;
     $this->_ellipsis = $ellipsis;
+  }
+  public function type(): EditableSyntax {
+    return $this->_type;
   }
   public function ellipsis(): EditableSyntax {
     return $this->_ellipsis;
   }
+  public function with_type(EditableSyntax $type): VariadicParameter {
+    return new VariadicParameter(
+      $type,
+      $this->_ellipsis);
+  }
   public function with_ellipsis(EditableSyntax $ellipsis): VariadicParameter {
     return new VariadicParameter(
+      $this->_type,
       $ellipsis);
   }
 
@@ -8485,24 +8559,32 @@ final class VariadicParameter extends EditableSyntax {
     ?array<EditableSyntax> $parents = null): ?EditableSyntax {
     $new_parents = $parents ?? [];
     array_push($new_parents, $this);
+    $type = $this->type()->rewrite($rewriter, $new_parents);
     $ellipsis = $this->ellipsis()->rewrite($rewriter, $new_parents);
     if (
+      $type === $this->type() &&
       $ellipsis === $this->ellipsis()) {
       return $rewriter($this, $parents ?? []);
     } else {
       return $rewriter(new VariadicParameter(
+        $type,
         $ellipsis), $parents ?? []);
     }
   }
 
   public static function from_json(mixed $json, int $position, string $source) {
+    $type = EditableSyntax::from_json(
+      $json->variadic_parameter_type, $position, $source);
+    $position += $type->width();
     $ellipsis = EditableSyntax::from_json(
       $json->variadic_parameter_ellipsis, $position, $source);
     $position += $ellipsis->width();
     return new VariadicParameter(
+        $type,
         $ellipsis);
   }
   public function children(): Generator<string, EditableSyntax, void> {
+    yield $this->_type;
     yield $this->_ellipsis;
     yield break;
   }
@@ -14657,6 +14739,91 @@ final class InstanceofExpression extends EditableSyntax {
       $json->instanceof_right_operand, $position, $source);
     $position += $right_operand->width();
     return new InstanceofExpression(
+        $left_operand,
+        $operator,
+        $right_operand);
+  }
+  public function children(): Generator<string, EditableSyntax, void> {
+    yield $this->_left_operand;
+    yield $this->_operator;
+    yield $this->_right_operand;
+    yield break;
+  }
+}
+final class IsExpression extends EditableSyntax {
+  private EditableSyntax $_left_operand;
+  private EditableSyntax $_operator;
+  private EditableSyntax $_right_operand;
+  public function __construct(
+    EditableSyntax $left_operand,
+    EditableSyntax $operator,
+    EditableSyntax $right_operand) {
+    parent::__construct('is_expression');
+    $this->_left_operand = $left_operand;
+    $this->_operator = $operator;
+    $this->_right_operand = $right_operand;
+  }
+  public function left_operand(): EditableSyntax {
+    return $this->_left_operand;
+  }
+  public function operator(): EditableSyntax {
+    return $this->_operator;
+  }
+  public function right_operand(): EditableSyntax {
+    return $this->_right_operand;
+  }
+  public function with_left_operand(EditableSyntax $left_operand): IsExpression {
+    return new IsExpression(
+      $left_operand,
+      $this->_operator,
+      $this->_right_operand);
+  }
+  public function with_operator(EditableSyntax $operator): IsExpression {
+    return new IsExpression(
+      $this->_left_operand,
+      $operator,
+      $this->_right_operand);
+  }
+  public function with_right_operand(EditableSyntax $right_operand): IsExpression {
+    return new IsExpression(
+      $this->_left_operand,
+      $this->_operator,
+      $right_operand);
+  }
+
+  public function rewrite(
+    ( function
+      (EditableSyntax, ?array<EditableSyntax>): ?EditableSyntax ) $rewriter,
+    ?array<EditableSyntax> $parents = null): ?EditableSyntax {
+    $new_parents = $parents ?? [];
+    array_push($new_parents, $this);
+    $left_operand = $this->left_operand()->rewrite($rewriter, $new_parents);
+    $operator = $this->operator()->rewrite($rewriter, $new_parents);
+    $right_operand = $this->right_operand()->rewrite($rewriter, $new_parents);
+    if (
+      $left_operand === $this->left_operand() &&
+      $operator === $this->operator() &&
+      $right_operand === $this->right_operand()) {
+      return $rewriter($this, $parents ?? []);
+    } else {
+      return $rewriter(new IsExpression(
+        $left_operand,
+        $operator,
+        $right_operand), $parents ?? []);
+    }
+  }
+
+  public static function from_json(mixed $json, int $position, string $source) {
+    $left_operand = EditableSyntax::from_json(
+      $json->is_left_operand, $position, $source);
+    $position += $left_operand->width();
+    $operator = EditableSyntax::from_json(
+      $json->is_operator, $position, $source);
+    $position += $operator->width();
+    $right_operand = EditableSyntax::from_json(
+      $json->is_right_operand, $position, $source);
+    $position += $right_operand->width();
+    return new IsExpression(
         $left_operand,
         $operator,
         $right_operand);

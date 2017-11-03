@@ -8,7 +8,7 @@
  *
 *)
 
-open Core
+open Hh_core
 open Hhbc_string_utils
 
 module A = Ast
@@ -88,9 +88,13 @@ let can_be_nullable h =
   | A.Haccess (_, _, _) -> false
   | _ -> true
 
-let rec hint_to_type_constraint ~tparams ~skipawaitable ~namespace (_, h) =
+let rec hint_to_type_constraint
+  ~kind ~tparams ~skipawaitable ~namespace (_, h) =
 match h with
-| A.Happly ((_, ("mixed" | "void")), []) ->
+| A.Happly ((_, "mixed"), []) ->
+  TC.make None []
+
+| A.Happly ((_, "void"), []) when kind <> TypeDef ->
   TC.make None []
 
 | A.Hfun _ ->
@@ -109,11 +113,11 @@ match h with
 | A.Happly ((_, ("WaitHandle" | "Awaitable")), [h])
 | A.Hoption (_, A.Happly ((_, ("WaitHandle" | "Awaitable")), [h]))
   when skipawaitable ->
-  hint_to_type_constraint ~tparams ~skipawaitable:false ~namespace h
+  hint_to_type_constraint ~kind ~tparams ~skipawaitable:false ~namespace h
 
 | A.Hoption (_, A.Hsoft (_, A.Happly ((_, ("WaitHandle" | "Awaitable")), [h])))
   when skipawaitable ->
-  make_tc_with_flags_if_non_empty_flags ~tparams ~skipawaitable ~namespace
+  make_tc_with_flags_if_non_empty_flags ~kind ~tparams ~skipawaitable ~namespace
     h [TC.Soft; TC.HHType; TC.ExtendedHint]
 
 | A.Happly ((_, ("WaitHandle" | "Awaitable")), [])
@@ -122,12 +126,16 @@ match h with
   TC.make None []
 
 (* Need to differentiate between type params and classes *)
-| A.Happly (id, _) ->
-  if List.mem tparams (snd id) then
+| A.Happly ((pos,name) as id, _) ->
+  if List.mem tparams name then
     let tc_name = Some "" in
     let tc_flags = [TC.HHType; TC.ExtendedHint; TC.TypeVar] in
     TC.make tc_name tc_flags
   else
+    if kind = TypeDef && (name = "self" || name = "parent")
+    then Emit_fatal.raise_fatal_runtime pos
+      (Printf.sprintf "Cannot access %s when no class scope is active" name)
+    else
     let tc_name =
       let fq_id, _ = Hhbc_id.Class.elaborate_id namespace id in
       Hhbc_id.Class.to_raw_string fq_id in
@@ -141,16 +149,16 @@ match h with
   TC.make tc_name tc_flags
 
 | A.Hoption t ->
-  make_tc_with_flags_if_non_empty_flags ~tparams ~skipawaitable ~namespace
+  make_tc_with_flags_if_non_empty_flags ~kind ~tparams ~skipawaitable ~namespace
     t [TC.Nullable; TC.HHType; TC.ExtendedHint]
 
 | A.Hsoft t ->
-  make_tc_with_flags_if_non_empty_flags ~tparams ~skipawaitable ~namespace
+  make_tc_with_flags_if_non_empty_flags ~kind ~tparams ~skipawaitable ~namespace
     t [TC.Soft; TC.HHType; TC.ExtendedHint]
 
 and make_tc_with_flags_if_non_empty_flags
-  ~tparams ~skipawaitable ~namespace t flags =
-  let tc = hint_to_type_constraint ~tparams ~skipawaitable ~namespace t in
+  ~kind ~tparams ~skipawaitable ~namespace t flags =
+  let tc = hint_to_type_constraint ~kind ~tparams ~skipawaitable ~namespace t in
   let tc_name = TC.name tc in
   let tc_flags = TC.flags tc in
   match tc_name, tc_flags with
@@ -170,8 +178,8 @@ let make_type_info ~tparams ~namespace h tc_name tc_flags =
   let type_info_type_constraint = TC.make tc_name tc_flags in
   Hhas_type_info.make type_info_user_type type_info_type_constraint
 
-let param_hint_to_type_info ~skipawaitable ~nullable
-  ~tparams ~namespace h =
+let param_hint_to_type_info
+  ~kind ~skipawaitable ~nullable ~tparams ~namespace h =
   let is_simple_hint =
     match snd h with
     | A.Hsoft _ | A.Hoption _ | A.Haccess _
@@ -181,14 +189,11 @@ let param_hint_to_type_info ~skipawaitable ~nullable
     | A.Happly ((_, id), _) when List.mem tparams id -> false
     | _ -> true
   in
-  let tc = hint_to_type_constraint ~tparams ~skipawaitable ~namespace h in
+  let tc = hint_to_type_constraint ~kind ~tparams ~skipawaitable ~namespace h in
   let tc_name = TC.name tc in
   if is_simple_hint
   then
-    let is_hh_type =
-      Emit_env.is_hh_file ()
-      || Hhbc_options.enable_hiphop_syntax !Hhbc_options.compiler_options
-    in
+    let is_hh_type = Emit_env.is_hh_syntax_enabled () in
     let tc_flags = if is_hh_type then [TC.HHType] else [] in
     let tc_flags = try_add_nullable ~nullable h tc_flags in
     make_type_info ~tparams ~namespace h tc_name tc_flags
@@ -200,11 +205,11 @@ let param_hint_to_type_info ~skipawaitable ~nullable
 let hint_to_type_info ~kind ~skipawaitable ~nullable ~tparams ~namespace h =
   match kind with
   | Param ->
-    param_hint_to_type_info ~skipawaitable ~nullable ~tparams ~namespace h
+    param_hint_to_type_info ~kind ~skipawaitable ~nullable ~tparams ~namespace h
   | _ ->
   let tc =
     if kind = Property then TC.make None []
-    else hint_to_type_constraint ~tparams ~skipawaitable ~namespace h
+    else hint_to_type_constraint ~kind ~tparams ~skipawaitable ~namespace h
   in
   let tc_name = TC.name tc in
   let tc_flags = TC.flags tc in

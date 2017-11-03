@@ -585,6 +585,7 @@ void logLoad(
   case RequestKind::Warmup: ent.setStr("request_kind", "warmup"); break;
   case RequestKind::Profile: ent.setStr("request_kind", "profile"); break;
   case RequestKind::Standard: ent.setStr("request_kind", "standard"); break;
+  case RequestKind::NonVM: ent.setStr("request_kind", "nonVM"); break;
   }
   ent.setInt("request_count", requestCount());
 
@@ -655,10 +656,11 @@ std::string mangleUnitMd5(const std::string& fileMd5) {
     + (RuntimeOption::EvalEnableCallBuiltin ? '1' : '0')
     + (RuntimeOption::EvalHackArrCompatNotices ? '1' : '0')
     + (RuntimeOption::EvalHackCompilerFallback ? '1' : '0')
-    + (RuntimeOption::EvalHackCompilerVerify ? '1' : '0')
     + (RuntimeOption::EvalJitEnableRenameFunction ? '1' : '0')
     + (RuntimeOption::EvalLoadFilepathFromUnitCache ? '1' : '0')
     + (RuntimeOption::IntsOverflowToInts ? '1' : '0')
+    + (RuntimeOption::EvalReffinessInvariance ? '1' : '0')
+    + (RuntimeOption::EvalCreateInOutWrapperFunctions ? '1' : '0')
     + RuntimeOption::EvalHackCompilerCommand + '\0'
     + mangleUnitPHP7Options()
     + mangleAliasedNamespaces()

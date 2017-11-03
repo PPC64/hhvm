@@ -8,7 +8,7 @@
  *
 *)
 
-open Core
+open Hh_core
 open Hhbc_ast
 open Instruction_sequence
 open Ast_class_expr
@@ -40,7 +40,7 @@ let is_special_function e args =
     match s with
     | "isset" -> n > 0
     | "empty" -> n = 1
-    | "tuple" -> true
+    | "tuple" when Emit_env.is_hh_syntax_enabled () -> true
     | "define" ->
       begin match args with
       | [_, A.String _; _] -> true
@@ -144,18 +144,25 @@ let collection_type = function
   | x -> failwith ("unknown collection type '" ^ x ^ "'")
 
 let istype_op id =
-  match id with
+  (* TODO: figure out why HHVM constraints some intrinsics to simple names
+     and some can appear in simple and qualified forms *)
+  let enable_hh_syntax = Emit_env.is_hh_syntax_enabled () in
+  match String.lowercase_ascii id with
   | "is_int" | "is_integer" | "is_long" -> Some OpInt
   | "is_bool" -> Some OpBool
   | "is_float" | "is_real" | "is_double" -> Some OpDbl
   | "is_string" -> Some OpStr
-  | "is_array" | "is_varray_or_darray" -> Some OpArr
+  | "is_varray_or_darray" when enable_hh_syntax -> Some OpArr
+  | "is_array"  | "hh\\is_varray_or_darray" -> Some OpArr
   | "is_object" -> Some OpObj
   | "is_null" -> Some OpNull
   | "is_scalar" -> Some OpScalar
-  | "is_keyset" -> Some OpKeyset
-  | "is_dict" -> Some OpDict
-  | "is_vec" -> Some OpVec
+  | "is_keyset" when enable_hh_syntax -> Some OpKeyset
+  | "hh\\is_keyset" -> Some OpKeyset
+  | "is_dict" when enable_hh_syntax -> Some OpDict
+  | "hh\\is_dict" -> Some OpDict
+  | "is_vec" when enable_hh_syntax -> Some OpVec
+  | "hh\\is_vec" -> Some OpVec
   | _ -> None
 
 (* See EmitterVisitor::getPassByRefKind in emitter.cpp *)
@@ -209,7 +216,7 @@ let check_shape_key name =
 let extract_shape_field_name_pstring = function
   | A.SFlit (_, s as p) ->
     check_shape_key s; A.String p
-  | A.SFclass_const (id, p) -> A.Class_const (id, p)
+  | A.SFclass_const ((pn, _) as id, p) -> A.Class_const ((pn, A.Id id), p)
 
 let rec expr_and_new env instr_to_add_new instr_to_add = function
   | A.AFvalue e ->
@@ -372,6 +379,9 @@ and emit_instanceof env e1 e2 =
       emit_expr ~need_ref:false env e2;
       instr_instanceof ]
 
+and emit_is _env _e _h =
+  emit_nyi "is expression"
+
 and emit_null_coalesce env e1 e2 =
   let end_label = Label.next_regular () in
   gather [
@@ -480,6 +490,9 @@ and emit_tuple env p es =
   emit_expr ~need_ref:false env (p, A.Array af_list)
 
 and emit_call_expr ~need_ref env expr =
+  (match expr with
+    | _, A.Call ((_, A.Id (_, s)), _, _, _) -> Emit_symbol_refs.add_function s
+    | _ -> ());
   let instrs, flavor = emit_flavored_expr env expr in
   gather [
     instrs;
@@ -506,13 +519,12 @@ and emit_load_class_ref env cexpr =
   | Class_parent -> instr (IMisc (Parent 0))
   | Class_self -> instr (IMisc (Self 0))
   | Class_id id -> emit_known_class_id env id
+  | Class_unnamed_local l -> instr (IGet (ClsRefGetL (l, 0)))
   | Class_expr expr ->
   begin match snd expr with
-  | A.Lvar (_, id) when id <> SN.SpecialIdents.this ->
-    stash_in_local ~always_stash_this:true env expr
-    begin fun temp _ ->
-    instr (IGet (ClsRefGetL (temp, 0)))
-    end
+  | A.Lvar ((_, id) as pos_id) when id <> SN.SpecialIdents.this ->
+    let local = get_local env pos_id in
+    instr (IGet (ClsRefGetL (local, 0)))
   | _ ->
     gather [
       emit_expr ~need_ref:false env expr;
@@ -521,15 +533,23 @@ and emit_load_class_ref env cexpr =
   end
 
 and emit_load_class_const env cexpr id =
-  let load_const =
-    if SU.is_class id
-    then instr (IMisc (ClsRefName 0))
-    else instr (ILitConst (ClsCns (Hhbc_id.Const.from_ast_name id, 0)))
-  in
-  gather [
-    emit_load_class_ref env cexpr;
-    load_const
-  ]
+  (* TODO(T21932293): HHVM does not match Zend here.
+   * Eventually remove this to match PHP7 *)
+  match Ast_scope.Scope.get_class (Emit_env.get_scope env) with
+  | Some cd when cd.A.c_kind = A.Ctrait
+              && cexpr = Class_self
+              && SU.is_class id ->
+    instr_string @@ SU.strip_global_ns @@ snd cd.A.c_name
+  | _ ->
+    let load_const =
+      if SU.is_class id
+      then instr (IMisc (ClsRefName 0))
+      else instr (ILitConst (ClsCns (Hhbc_id.Const.from_ast_name id, 0)))
+    in
+    gather [
+      emit_load_class_ref env cexpr;
+      load_const
+    ]
 
 and emit_class_expr_parts env cexpr prop =
   let load_prop, load_prop_first =
@@ -550,12 +570,43 @@ and emit_class_expr_parts env cexpr prop =
   else load_cls_ref, load_prop
 
 and emit_class_expr env cexpr prop =
+  match cexpr with
+  | Class_expr ((_, (A.BracedExpr _ | A.Lvarvar _ | A.Call _ | A.Lvar (_, "$this"))) as e) ->
+    (* if class is stored as lvarvar or braced expression (computed dynamically)
+       it needs to be stored in unnamed local and eventually cleaned.
+       Here we don't use stash_in_local because shape of the code generated
+       for class case is different (PopC / UnsetL is the part of try block) *)
+    let cexpr_local =
+      Local.scope @@ fun () -> emit_expr ~need_ref:false env e in
+    Local.scope @@ fun () ->
+      let temp = Local.get_unnamed_local () in
+      let instrs = emit_class_expr env (Class_unnamed_local temp) prop in
+      let fault_label = Label.next_fault () in
+      let block =
+        instr_try_fault
+          fault_label
+          (* try block *)
+          (gather [
+            instr_popc;
+            instrs;
+            instr_unsetl temp
+          ])
+          (* fault block *)
+          (gather [
+            instr_unsetl temp;
+            instr_unwind ]) in
+      gather [
+        cexpr_local;
+        instr_setl temp;
+        block
+      ]
+  | _ ->
   let cexpr_begin, cexpr_end = emit_class_expr_parts env cexpr prop in
   gather [cexpr_begin ; cexpr_end]
 
 and emit_class_get env param_num_opt qop need_ref cid prop =
   let cexpr, _ = expr_to_class_expr ~resolve_self:false
-    (Emit_env.get_scope env) (id_to_expr cid)
+    (Emit_env.get_scope env) cid
   in
   gather [
     emit_class_expr env cexpr prop;
@@ -573,13 +624,15 @@ and emit_class_get env param_num_opt qop need_ref cid prop =
  *)
 and emit_class_const env cid (_, id) =
   let cexpr, _ = expr_to_class_expr ~resolve_self:true
-    (Emit_env.get_scope env) (id_to_expr cid) in
+    (Emit_env.get_scope env) cid in
   match cexpr with
   | Class_id cid ->
     let fq_id, _id_opt =
       Hhbc_id.Class.elaborate_id (Emit_env.get_namespace env) cid in
+    let fq_id_str = Hhbc_id.Class.to_raw_string fq_id in
+    Emit_symbol_refs.add_class fq_id_str;
     if SU.is_class id
-    then instr_string (Hhbc_id.Class.to_raw_string fq_id)
+    then instr_string fq_id_str
     else instr (ILitConst (ClsCnsD (Hhbc_id.Const.from_ast_name id, fq_id)))
   | _ ->
     emit_load_class_const env cexpr id
@@ -651,8 +704,13 @@ and emit_id env (p, s as id) =
     let fq_id, id_opt, contains_backslash =
       Hhbc_id.Const.elaborate_id (Emit_env.get_namespace env) id in
     begin match id_opt with
-    | Some id -> instr (ILitConst (CnsU (fq_id, id)))
-    | None -> instr (ILitConst
+    | Some id ->
+      Emit_symbol_refs.add_constant (Hhbc_id.Const.to_raw_string fq_id);
+      Emit_symbol_refs.add_constant id;
+      instr (ILitConst (CnsU (fq_id, id)))
+    | None ->
+      Emit_symbol_refs.add_constant (snd id);
+      instr (ILitConst
         (if contains_backslash then CnsE fq_id else Cns fq_id))
     end
 
@@ -672,9 +730,11 @@ and emit_xhp env p id attributes children =
   let children_vec = make_varray p dec_children in
   let filename = p, A.Id (p, "__FILE__") in
   let line = p, A.Id (p, "__LINE__") in
+  let renamed_id = rename_xhp id in
+  Emit_symbol_refs.add_class (snd renamed_id);
   emit_expr ~need_ref:false env @@
     (p, A.New (
-      (p, A.Id (rename_xhp id)),
+      (p, A.Id renamed_id),
       [attribute_map ; children_vec ; filename ; line],
       []))
 
@@ -685,6 +745,9 @@ and emit_import env flavor e =
     | A.IncludeOnce -> instr @@ IIncludeEvalDefine InclOnce
     | A.RequireOnce -> instr @@ IIncludeEvalDefine ReqOnce
   in
+  (match e with
+    | _, A.String (_, s) -> Emit_symbol_refs.add_include s
+    | _ -> ());
   gather [
     emit_expr ~need_ref:false env e;
     import_instr;
@@ -750,9 +813,9 @@ and emit_call_empty_expr env (_, expr_ as expr) =
     emit_class_get env None QueryOp.Empty false cid id
   | A.Obj_get (expr, prop, nullflavor) ->
     emit_obj_get ~need_ref:false env None QueryOp.Empty expr prop nullflavor
-  | A.Lvar(_, id) when id = SN.Superglobals.globals ->
+  | A.Lvar(_, id) when SN.Superglobals.is_superglobal id ->
     gather [
-      instr_string @@ SU.Locals.strip_dollar SN.Superglobals.globals;
+      instr_string @@ SU.Locals.strip_dollar id;
       instr_emptyg
     ]
   | A.Lvar id when not (is_local_this env (snd id)) ->
@@ -855,6 +918,21 @@ and emit_class_alias es =
     instr_alias_cls c1 c2
   ]
 
+and emit_await env e =
+  let after_await = Label.next_regular () in
+  gather [
+    emit_expr ~need_ref:false env e;
+    instr_dup;
+    instr_istypec OpNull;
+    instr_jmpnz after_await;
+    instr_await;
+    instr_label after_await;
+  ]
+
+and emit_callconv _env _kind _e =
+  (* TODO(mqian) implement *)
+  emit_nyi "inout argument"
+
 and emit_expr env (pos, expr_ as expr) ~need_ref =
   Emit_pos.emit_pos_then pos @@
   match expr_ with
@@ -873,6 +951,8 @@ and emit_expr env (pos, expr_ as expr) ~need_ref =
     emit_box_if_necessary need_ref @@ emit_pipe env e1 e2
   | A.InstanceOf (e1, e2) ->
     emit_box_if_necessary need_ref @@ emit_instanceof env e1 e2
+  | A.Is (e, h) ->
+    emit_box_if_necessary need_ref @@ emit_is env e h
   | A.NullCoalesce (e1, e2) ->
     emit_box_if_necessary need_ref @@ emit_null_coalesce env e1 e2
   | A.Cast((_, hint), e) ->
@@ -908,7 +988,8 @@ and emit_expr env (pos, expr_ as expr) ~need_ref =
   | A.Call ((_, A.Id (_, "empty")), _, [expr], []) ->
     emit_box_if_necessary need_ref @@ emit_call_empty_expr env expr
   (* Did you know that tuples are functions? *)
-  | A.Call ((p, A.Id (_, "tuple")), _, es, _) ->
+  | A.Call ((p, A.Id (_, "tuple")), _, es, _)
+    when Emit_env.is_hh_syntax_enabled () ->
     emit_box_if_necessary need_ref @@ emit_tuple env p es
   | A.Call ((_, A.Id (_, "idx")), _, es, _) ->
     emit_box_if_necessary need_ref @@ emit_idx env es
@@ -942,7 +1023,7 @@ and emit_expr env (pos, expr_ as expr) ~need_ref =
     emit_box_if_necessary need_ref @@ emit_clone env e
   | A.Shape fl ->
     emit_box_if_necessary need_ref @@ emit_shape env expr fl
-  | A.Await _ -> emit_nyi "complex await expression"
+  | A.Await e -> emit_await env e
   | A.Yield e -> emit_yield env e
   | A.Yield_break ->
     failwith "yield break should be in statement position"
@@ -968,6 +1049,8 @@ and emit_expr env (pos, expr_ as expr) ~need_ref =
   | A.Id id -> emit_id env id
   | A.Xml (id, attributes, children) ->
     emit_xhp env (fst expr) id attributes children
+  | A.Callconv (kind, e) ->
+    emit_box_if_necessary need_ref @@ emit_callconv env kind e
   | A.Import (flavor, e) -> emit_import env flavor e
   | A.Lvarvar (n, id) -> emit_lvarvar ~need_ref n id
   | A.Id_type_arguments (id, _) -> emit_id env id
@@ -1357,52 +1440,62 @@ and emit_array_get ~need_ref env param_num_hint_opt qop base_expr opt_elem_expr 
  * then this is the i'th parameter to a function
  *)
 and emit_obj_get ~need_ref env param_num_hint_opt qop expr prop null_flavor =
-  match snd prop with
-  | A.Id (_, s) when SU.Xhp.is_xhp s ->
-    emit_xhp_obj_get ~need_ref env param_num_hint_opt expr s null_flavor
+  match snd expr with
+  | A.Lvar (_, id)
+    when id = SN.SpecialIdents.this && null_flavor = A.OG_nullsafe ->
+    Emit_fatal.raise_fatal_parse
+      Pos.none "?-> is not allowed with $this"
   | _ ->
-    let param_num_opt = Option.map ~f:(fun (n, _h) -> n) param_num_hint_opt in
-    let mode = get_queryMOpMode need_ref qop in
-    let prop_expr_instrs, prop_stack_size = emit_prop_instrs env prop in
-    let base_expr_instrs_begin,
-        base_expr_instrs_end,
-        base_setup_instrs,
-        base_stack_size =
-      emit_base
-        ~is_object:true ~notice:Notice
-        env mode prop_stack_size param_num_opt expr
-    in
-    let mk = get_prop_member_key env null_flavor 0 prop in
-    let total_stack_size = prop_stack_size + base_stack_size in
-    let final_instr =
-      instr (IFinal (
-        match param_num_hint_opt with
-        | None ->
-          if need_ref then
-            VGetM (total_stack_size, mk)
-          else
-            QueryM (total_stack_size, qop, mk)
-        | Some (i, h) -> FPassM (i, total_stack_size, mk, h)
-      )) in
-    gather [
-      base_expr_instrs_begin;
-      prop_expr_instrs;
-      base_expr_instrs_end;
-      base_setup_instrs;
-      final_instr
-    ]
+    begin match snd prop with
+    | A.Id (_, s) when SU.Xhp.is_xhp s ->
+      emit_xhp_obj_get ~need_ref env param_num_hint_opt expr s null_flavor
+    | _ ->
+      let param_num_opt = Option.map ~f:(fun (n, _h) -> n) param_num_hint_opt in
+      let mode = get_queryMOpMode need_ref qop in
+      let prop_expr_instrs, prop_stack_size = emit_prop_instrs env prop in
+      let base_expr_instrs_begin,
+          base_expr_instrs_end,
+          base_setup_instrs,
+          base_stack_size =
+        emit_base
+          ~is_object:true ~notice:Notice
+          env mode prop_stack_size param_num_opt expr
+      in
+      let mk = get_prop_member_key env null_flavor 0 prop in
+      let total_stack_size = prop_stack_size + base_stack_size in
+      let final_instr =
+        instr (IFinal (
+          match param_num_hint_opt with
+          | None ->
+            if need_ref then
+              VGetM (total_stack_size, mk)
+            else
+              QueryM (total_stack_size, qop, mk)
+          | Some (i, h) -> FPassM (i, total_stack_size, mk, h)
+        )) in
+      gather [
+        base_expr_instrs_begin;
+        prop_expr_instrs;
+        base_expr_instrs_end;
+        base_setup_instrs;
+        final_instr
+      ]
+    end
 
-and is_special_class_constant_accessed_with_class_id (_, cName) id =
+and is_special_class_constant_accessed_with_class_id env (_, cName) id =
+  (* TODO(T21932293): HHVM does not match Zend here.
+   * Eventually remove this to match PHP7 *)
   SU.is_class id &&
-  not (SU.is_self cName || SU.is_parent cName || SU.is_static cName)
+  (not (SU.is_self cName || SU.is_parent cName || SU.is_static cName)
+  || (Ast_scope.Scope.is_in_trait (Emit_env.get_scope env)) && SU.is_self cName)
 
 and emit_elem_instrs env opt_elem_expr =
   match opt_elem_expr with
   (* These all have special inline versions of member keys *)
   | Some (_, (A.Int _ | A.String _)) -> empty, 0
   | Some (_, (A.Lvar (_, id))) when not (is_local_this env id) -> empty, 0
-  | Some (_, (A.Class_const (cid, (_, id))))
-    when is_special_class_constant_accessed_with_class_id cid id -> empty, 0
+  | Some (_, (A.Class_const ((_, A.Id cid), (_, id))))
+    when is_special_class_constant_accessed_with_class_id env cid id -> empty, 0
   | Some expr -> emit_expr ~need_ref:false env expr, 1
   | None -> empty, 0
 
@@ -1427,8 +1520,19 @@ and get_elem_member_key env stack_index opt_expr =
   (* Special case for literal string *)
   | Some (_, A.String (_, str)) -> MemberKey.ET str
   (* Special case for class name *)
-  | Some (_, (A.Class_const ((_, cName) as cid, (_, id))))
-    when is_special_class_constant_accessed_with_class_id cid id ->
+  | Some (_, (A.Class_const ((_, A.Id (_, cName as cid)), (_, id))))
+    when is_special_class_constant_accessed_with_class_id env cid id ->
+    (* Special case for self::class in traits *)
+    (* TODO(T21932293): HHVM does not match Zend here.
+     * Eventually remove this to match PHP7 *)
+    let cName =
+      match SU.is_self cName,
+            SU.is_class id,
+            Ast_scope.Scope.get_class (Emit_env.get_scope env)
+      with
+      | true, true, Some cd -> SU.strip_global_ns @@ snd cd.A.c_name
+      | _ -> cName
+    in
     MemberKey.ET cName
   (* General case *)
   | Some _ -> MemberKey.EC stack_index
@@ -1606,7 +1710,7 @@ and emit_base ~is_object ~notice env mode base_offset param_num_opt (_, expr_ as
 
    | A.Class_get(cid, (_, A.Lvarvar (1, id))) ->
      let cexpr, _ = expr_to_class_expr ~resolve_self:false
-       (Emit_env.get_scope env) (id_to_expr cid) in
+       (Emit_env.get_scope env) cid in
      (* special case for $x->$$y: use BaseSL *)
      emit_load_class_ref env cexpr,
      empty,
@@ -1615,7 +1719,7 @@ and emit_base ~is_object ~notice env mode base_offset param_num_opt (_, expr_ as
 
    | A.Class_get(cid, prop) ->
      let cexpr, _ = expr_to_class_expr ~resolve_self:false
-       (Emit_env.get_scope env) (id_to_expr cid) in
+       (Emit_env.get_scope env) cid in
      let cexpr_begin, cexpr_end = emit_class_expr_parts env cexpr prop in
      cexpr_begin,
      cexpr_end,
@@ -1653,23 +1757,25 @@ and emit_base ~is_object ~notice env mode base_offset param_num_opt (_, expr_ as
      1
 
 and emit_arg env i is_splatted (pos, expr_ as expr) =
-  let force_hh =
-    Hhbc_options.enable_hiphop_syntax !Hhbc_options.compiler_options in
-  let is_hh = Emit_env.is_hh_file () in
   let with_ref = expr_starts_with_ref expr in
-  let hint = match (is_hh || force_hh, with_ref) with
-  | (true, true) -> Ref
-  | (true, false) -> Cell
-  | (false, _) -> Any in
+  let hint =
+    if Emit_env.is_hh_syntax_enabled ()
+    then if with_ref then Ref else Cell
+    else Any in
   let expr_ = match expr_ with
   | A.Unop (A.Uref, (_, e)) -> e
   | _ -> expr_ in
   let default () =
     let instrs, flavor = emit_flavored_expr env expr in
-    let fpass_kind = match flavor with
-      | Flavor.Cell -> instr_fpass (get_passByRefKind is_splatted expr) i hint
-      | Flavor.Ref -> instr_fpassv i hint
-      | Flavor.ReturnVal -> instr_fpassr i hint
+    let instrs =
+      if is_splatted && flavor = Flavor.ReturnVal
+      then gather [ instrs; instr_unboxr ] else instrs
+    in
+    let fpass_kind = match is_splatted, flavor with
+      | false, Flavor.Ref -> instr_fpassv i hint
+      | false, Flavor.ReturnVal -> instr_fpassr i hint
+      | false, Flavor.Cell
+      | true, _ -> instr_fpass (get_passByRefKind is_splatted expr) i hint
     in
     gather [
       instrs;
@@ -1772,7 +1878,7 @@ and emit_call_lhs_with_this env instrs = Local.scope @@ fun () ->
     end
   ]
 
-and emit_call_lhs env (_, expr_ as expr) nargs =
+and emit_call_lhs env (_, expr_ as expr) nargs has_splat =
   match expr_ with
   | A.Obj_get (obj, (_, A.Id ((_, str) as id)), null_flavor)
     when str.[0] = '$' ->
@@ -1797,7 +1903,7 @@ and emit_call_lhs env (_, expr_ as expr) nargs =
 
   | A.Class_const (cid, (_, id)) ->
     let cexpr, forward = expr_to_class_expr ~resolve_self:false
-      (Emit_env.get_scope env) (id_to_expr cid) in
+      (Emit_env.get_scope env) cid in
     let method_id = Hhbc_id.Method.from_ast_name id in
     begin match cexpr with
     (* Statically known *)
@@ -1821,7 +1927,7 @@ and emit_call_lhs env (_, expr_ as expr) nargs =
 
   | A.Class_get (cid, e) ->
     let cexpr, forward = expr_to_class_expr ~resolve_self:false
-      (Emit_env.get_scope env) (id_to_expr cid) in
+      (Emit_env.get_scope env) cid in
     let expr_instrs = emit_expr ~need_ref:false env e in
     let body_instrs =
       match cexpr with
@@ -1840,9 +1946,9 @@ and emit_call_lhs env (_, expr_ as expr) nargs =
       Hhbc_id.Function.elaborate_id (Emit_env.get_namespace env) id in
     let fq_id, id_opt =
       match id_opt, SU.strip_global_ns s with
-      | None, "min" when nargs = 2 ->
+      | None, "min" when nargs = 2 && not has_splat ->
         Hhbc_id.Function.from_raw_string "__SystemLib\\min2", None
-      | None, "max" when nargs = 2 ->
+      | None, "max" when nargs = 2 && not has_splat ->
         Hhbc_id.Function.from_raw_string  "__SystemLib\\max2", None
       | _ -> fq_id, id_opt in
     begin match id_opt with
@@ -1873,19 +1979,25 @@ and is_call_user_func id num_args =
   is_fn && num_args >= min_args && num_args <= max_args
 
 and get_call_builtin_func_info fn_name =
-  match SU.strip_global_ns fn_name with
+  let name = SU.strip_global_ns fn_name in
+  match name with
   | "array_key_exists" -> Some (2, IMisc AKExists)
   | "hphp_array_idx" -> Some (3, IMisc ArrayIdx)
   | "intval" -> Some (1, IOp CastInt)
   | "boolval" -> Some (1, IOp CastBool)
   | "strval" -> Some (1, IOp CastString)
   | "floatval" | "doubleval" -> Some (1, IOp CastDouble)
-  | "vec" -> Some (1, IOp CastVec)
-  | "keyset" -> Some (1, IOp CastKeyset)
-  | "dict" -> Some (1, IOp CastDict)
-  | "varray" -> Some (1, IOp CastVArray)
-  | "darray" -> Some (1, IOp CastDArray)
-  | _ -> None
+  | _ ->
+    (* HH-specific *)
+    if not (Emit_env.is_hh_syntax_enabled ())
+    then None
+    else match name with
+    | "vec" -> Some (1, IOp CastVec)
+    | "keyset" -> Some (1, IOp CastKeyset)
+    | "dict" -> Some (1, IOp CastDict)
+    | "varray" -> Some (1, IOp CastVArray)
+    | "darray" -> Some (1, IOp CastDArray)
+    | _ -> None
 
 and emit_call_user_func_args env i expr =
   gather [
@@ -2043,7 +2155,7 @@ and emit_call env (_, expr_ as expr) args uargs =
   let nargs = List.length args + List.length uargs in
   let default () =
     gather [
-      emit_call_lhs env expr nargs;
+      emit_call_lhs env expr nargs (not (List.is_empty uargs));
       emit_args_and_call env args uargs;
     ], Flavor.ReturnVal in
 
@@ -2061,7 +2173,7 @@ and emit_call env (_, expr_ as expr) args uargs =
         ], Flavor.Cell
 
       | _ ->
-        begin match args, istype_op id with
+        begin match args, istype_op (SU.strip_global_ns id) with
         | [(_, A.Lvar (_, arg_str as arg_id))], Some i
           when not (is_local_this env arg_str) ->
           instr (IIsset (IsTypeL (get_local env arg_id, i))),
@@ -2126,6 +2238,11 @@ and emit_final_global_op op =
   | LValOp.IncDec op -> instr (IMutator (IncDecG op))
   | LValOp.Unset -> instr (IMutator UnsetG)
 
+and text_of_expr e =
+  match e with
+  | A.Id id | A.Lvar id | A.Lvarvar (_, id) -> id
+  | _ -> Pos.none, "unknown" (* TODO: get text of expression *)
+
 and emit_final_static_op cid prop op =
   match op with
   | LValOp.Set -> instr (IMutator (SetS 0))
@@ -2133,12 +2250,10 @@ and emit_final_static_op cid prop op =
   | LValOp.SetOp op -> instr (IMutator (SetOpS (op, 0)))
   | LValOp.IncDec op -> instr (IMutator (IncDecS (op, 0)))
   | LValOp.Unset ->
-    let id =
-      match snd prop with
-      | A.Lvar id | A.Lvarvar (_, id) -> id
-      | _ -> (Pos.none, "unknown") (* TODO: get text of property name  *)
-    in Emit_fatal.emit_fatal_runtime (fst id)
-      ("Attempt to unset static property " ^ cid ^ "::" ^ snd id)
+    let cid = text_of_expr cid in
+    let id = text_of_expr (snd prop) in
+    Emit_fatal.emit_fatal_runtime (fst id)
+      ("Attempt to unset static property " ^ snd cid ^ "::" ^ snd id)
 
 (* Given a local $local and a list of integer array indices i_1, ..., i_n,
  * generate code to extract the value of $local[i_n]...[i_1]:
@@ -2289,6 +2404,11 @@ and emit_lval_op env op expr1 opt_expr2 =
               instr_popc;
               instr_pushl temp;
             ], 1
+          | Some (_, A.Unop (A.Uref, (_, A.Obj_get (_, _, A.OG_nullsafe)
+                                    | _, A.Array_get ((_,
+                                      A.Obj_get (_, _, A.OG_nullsafe)), _)))) ->
+            Emit_fatal.raise_fatal_runtime
+              Pos.none "?-> is not allowed in write context"
           | Some e -> emit_expr_and_unbox_if_necessary ~need_ref:false env e, 1
         in
         emit_lval_op_nonlist env op expr1 rhs_instrs rhs_stack_size
@@ -2396,6 +2516,8 @@ and emit_lval_op_nonlist_steps env op (pos, expr_) rhs_instrs rhs_stack_size =
     ]
 
   | A.Obj_get (e1, e2, null_flavor) ->
+    if null_flavor = A.OG_nullsafe then
+     Emit_fatal.raise_fatal_parse pos "?-> is not allowed in write context";
     let mode =
       match op with
       | LValOp.Unset -> MemberOpMode.Unset
@@ -2426,7 +2548,7 @@ and emit_lval_op_nonlist_steps env op (pos, expr_) rhs_instrs rhs_stack_size =
 
   | A.Class_get (cid, prop) ->
     let cexpr, _ = expr_to_class_expr ~resolve_self:false
-      (Emit_env.get_scope env) (id_to_expr cid) in
+      (Emit_env.get_scope env) cid in
     begin match snd prop with
     | A.Lvarvar (_, id) | A.BracedExpr (_, A.Lvar id)  ->
       let n = match snd prop with A.Lvarvar (n, _) -> n | _ -> 1 in

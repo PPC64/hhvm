@@ -153,6 +153,41 @@ void impl_vec(ISS& env, bool reduce, std::vector<Bytecode>&& bcs) {
   }
 }
 
+LocalId equivLocalRange(ISS& env, const LocalRange& range) {
+  auto bestRange = range.first;
+  auto equivFirst = findLocEquiv(env, range.first);
+  if (equivFirst == NoLocalId) return bestRange;
+  do {
+    if (equivFirst < bestRange) {
+      auto equivRange = [&] {
+        // local equivalency includes differing by Uninit, so we need
+        // to check the types.
+        if (peekLocRaw(env, equivFirst) != peekLocRaw(env, range.first)) {
+          return false;
+        }
+
+        for (uint32_t i = 1; i <= range.restCount; ++i) {
+          if (!locsAreEquiv(env, equivFirst + i, range.first + i) ||
+              peekLocRaw(env, equivFirst + i) !=
+              peekLocRaw(env, range.first + i)) {
+            return false;
+          }
+        }
+
+        return true;
+      }();
+
+      if (equivRange) {
+        bestRange = equivFirst;
+      }
+    }
+    equivFirst = findLocEquiv(env, equivFirst);
+    assert(equivFirst != NoLocalId);
+  } while (equivFirst != range.first);
+
+  return bestRange;
+}
+
 namespace interp_step {
 
 void in(ISS& env, const bc::Nop&)  { effect_free(env); }
@@ -315,17 +350,17 @@ void in(ISS& env, const bc::Keyset& op) {
 
 void in(ISS& env, const bc::NewArray& op) {
   push(env, op.arg1 == 0 ?
-       effect_free(env), aempty() : counted_aempty());
+       effect_free(env), aempty() : some_aempty());
 }
 
 void in(ISS& env, const bc::NewDictArray& op) {
   push(env, op.arg1 == 0 ?
-       effect_free(env), dict_empty() : counted_dict_empty());
+       effect_free(env), dict_empty() : some_dict_empty());
 }
 
 void in(ISS& env, const bc::NewMixedArray& op) {
   push(env, op.arg1 == 0 ?
-       effect_free(env), aempty() : counted_aempty());
+       effect_free(env), aempty() : some_aempty());
 }
 
 void in(ISS& env, const bc::NewPackedArray& op) {
@@ -393,7 +428,7 @@ void in(ISS& env, const bc::NewKeysetArray& op) {
 
 void in(ISS& env, const bc::NewLikeArrayL& op) {
   locAsCell(env, op.loc1);
-  push(env, counted_aempty());
+  push(env, some_aempty());
 }
 
 void in(ISS& env, const bc::AddElemC& /*op*/) {
@@ -2225,7 +2260,9 @@ void in(ISS& env, const bc::FPushFuncD& op) {
 void in(ISS& env, const bc::FPushFunc& op) {
   auto const t1 = topC(env);
   auto const v1 = tv(t1);
-  if (v1 && v1->m_type == KindOfPersistentString) {
+  // FPushFuncD and FPushFuncU require that the names of inout functions be
+  // mangled, so skip those for now.
+  if (v1 && v1->m_type == KindOfPersistentString && op.argv.size() == 0) {
     auto const name = normalizeNS(v1->m_data.pstr);
     // FPushFuncD doesn't support class-method pair strings yet.
     if (isNSNormalized(name) && notClassMethodPair(name)) {
@@ -2317,7 +2354,7 @@ void in(ISS& env, const bc::FPushObjMethodD& op) {
 void in(ISS& env, const bc::FPushObjMethod& op) {
   auto const t1 = topC(env);
   auto const v1 = tv(t1);
-  if (v1 && v1->m_type == KindOfPersistentString) {
+  if (v1 && v1->m_type == KindOfPersistentString && op.argv.size() == 0) {
     return reduce(
       env,
       bc::PopC {},
@@ -2355,7 +2392,7 @@ void pushClsHelper(ISS& env, const PushOp& op) {
     exactCls = dcls.type == DCls::Exact;
   }
   folly::Optional<res::Func> rfunc;
-  if (v2 && v2->m_type == KindOfPersistentString) {
+  if (v2 && v2->m_type == KindOfPersistentString && op.argv.size() == 0) {
     if (std::is_same<PushOp, bc::FPushClsMethod>::value &&
         exactCls && rcls) {
       return reduce(
@@ -2522,7 +2559,7 @@ void in(ISS& env, const bc::FPassS& op) {
         }
       }
       if (auto c = env.collect.publicStatics) {
-        c->merge(env.ctx, std::move(tcls), tname, TInitGen);
+        c->merge(env.ctx, tcls, tname, TInitGen);
       }
     }
     return push(env, TInitGen);
@@ -3348,6 +3385,7 @@ void in(ISS& env, const bc::VerifyParamType& op) {
 }
 
 void in(ISS& /*env*/, const bc::VerifyRetTypeV& /*op*/) {}
+void in(ISS& /*env*/, const bc::VerifyOutType& /*op*/) {}
 
 void in(ISS& env, const bc::VerifyRetTypeC& /*op*/) {
   auto const constraint = env.ctx.func->retTypeConstraint;
@@ -3516,6 +3554,22 @@ void in(ISS& env, const bc::Await&) {
   pushTypeFromWH(env, popC(env));
 }
 
+void in(ISS& env, const bc::AwaitAll& op) {
+  auto const equiv = equivLocalRange(env, op.locrange);
+  if (equiv != op.locrange.first) {
+    return reduce(
+      env,
+      bc::AwaitAll {LocalRange {equiv, op.locrange.restCount}}
+    );
+  }
+
+  for (uint32_t i = 0; i < op.locrange.restCount + 1; ++i) {
+    mayReadLocal(env, op.locrange.first + i);
+  }
+
+  push(env, TInitNull);
+}
+
 void in(ISS& /*env*/, const bc::IncStat&) {}
 
 void in(ISS& env, const bc::Idx&) {
@@ -3542,9 +3596,7 @@ void in(ISS& env, const bc::InitProp& op) {
     case InitPropOp::Static:
       mergeSelfProp(env, op.str1, t);
       if (auto c = env.collect.publicStatics) {
-        auto const cls = selfClsExact(env);
-        always_assert(!!cls);
-        c->merge(env.ctx, *cls, sval(op.str1), t);
+        c->merge(env.ctx, *env.ctx.cls, sval(op.str1), t);
       }
       break;
     case InitPropOp::NonStatic:

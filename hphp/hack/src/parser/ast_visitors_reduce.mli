@@ -52,6 +52,9 @@ class virtual ['b] reduce :
                   Ast_visitors_ancestors.hint list ->
                   Ast_visitors_ancestors.expr list ->
                   Ast_visitors_ancestors.expr list -> 'd;
+        on_Callconv : 'c ->
+                      Ast_visitors_ancestors.param_kind ->
+                      Ast_visitors_ancestors.expr -> 'd;
         on_Case : 'c ->
                   Ast_visitors_ancestors.expr ->
                   Ast_visitors_ancestors.block -> 'd;
@@ -81,10 +84,10 @@ class virtual ['b] reduce :
                        Ast_visitors_ancestors.class_var list ->
                        string option -> 'd;
         on_Class_const : 'c ->
-                         Ast_visitors_ancestors.id ->
+                         Ast_visitors_ancestors.expr ->
                          Ast_visitors_ancestors.pstring -> 'd;
         on_Class_get : 'c ->
-                       Ast_visitors_ancestors.id ->
+                       Ast_visitors_ancestors.expr ->
                        Ast_visitors_ancestors.expr -> 'd;
         on_Clone : 'c -> Ast_visitors_ancestors.expr -> 'd;
         on_Cnormal : 'c -> 'd;
@@ -176,6 +179,9 @@ class virtual ['b] reduce :
         on_InstanceOf : 'c ->
                         Ast_visitors_ancestors.expr ->
                         Ast_visitors_ancestors.expr -> 'd;
+        on_Is : 'c ->
+                Ast_visitors_ancestors.expr ->
+                Ast_visitors_ancestors.hint -> 'd;
         on_Int : 'c -> Ast_visitors_ancestors.pstring -> 'd;
         on_Invariant : 'c -> 'd;
         on_Lfun : 'c -> Ast_visitors_ancestors.fun_ -> 'd;
@@ -214,6 +220,7 @@ class virtual ['b] reduce :
                      Ast_visitors_ancestors.expr ->
                      Ast_visitors_ancestors.og_null_flavor -> 'd;
         on_Percent : 'c -> 'd;
+        on_Pinout : 'c -> 'd;
         on_Pipe : 'c ->
                   Ast_visitors_ancestors.expr ->
                   Ast_visitors_ancestors.expr -> 'd;
@@ -257,6 +264,10 @@ class virtual ['b] reduce :
         on_Unsafeexpr : 'c -> Ast_visitors_ancestors.expr -> 'd;
         on_Updecr : 'c -> 'd; on_Upincr : 'c -> 'd; on_Uplus : 'c -> 'd;
         on_Uref : 'c -> 'd; on_Utild : 'c -> 'd; on_Usilence : 'c -> 'd;
+        on_Using : 'c ->
+                   bool ->
+                   Ast_visitors_ancestors.expr ->
+                   Ast_visitors_ancestors.block -> 'd;
         on_While : 'c ->
                    Ast_visitors_ancestors.expr ->
                    Ast_visitors_ancestors.block -> 'd;
@@ -334,6 +345,7 @@ class virtual ['b] reduce :
         on_method_ : 'c -> Ast_visitors_ancestors.method_ -> 'd;
         on_ns_kind : 'c -> Ast_visitors_ancestors.ns_kind -> 'd;
         on_og_null_flavor : 'c -> Ast_visitors_ancestors.og_null_flavor -> 'd;
+        on_param_kind : 'c -> Ast_visitors_ancestors.param_kind -> 'd;
         on_program : 'c -> Ast_visitors_ancestors.program -> 'd;
         on_pstring : 'c -> Ast_visitors_ancestors.pstring -> 'd;
         on_shape_field : 'c -> Ast_visitors_ancestors.shape_field -> 'd;
@@ -402,6 +414,10 @@ class virtual ['b] reduce :
       Ast_visitors_ancestors.hint list ->
       Ast_visitors_ancestors.expr list ->
       Ast_visitors_ancestors.expr list -> 'd
+    method on_Callconv :
+      'c ->
+      Ast_visitors_ancestors.param_kind ->
+      Ast_visitors_ancestors.expr -> 'd
     method on_Case :
       'c -> Ast_visitors_ancestors.expr -> Ast_visitors_ancestors.block -> 'd
     method on_Cast :
@@ -434,9 +450,9 @@ class virtual ['b] reduce :
       Ast_visitors_ancestors.class_var list ->
       string option -> 'd
     method on_Class_const :
-      'c -> Ast_visitors_ancestors.id -> Ast_visitors_ancestors.pstring -> 'd
+      'c -> Ast_visitors_ancestors.expr -> Ast_visitors_ancestors.pstring -> 'd
     method on_Class_get :
-      'c -> Ast_visitors_ancestors.id -> Ast_visitors_ancestors.expr -> 'd
+      'c -> Ast_visitors_ancestors.expr -> Ast_visitors_ancestors.expr -> 'd
     method on_Clone : 'c -> Ast_visitors_ancestors.expr -> 'd
     method on_Cmp : 'c -> 'd
     method on_Cnormal : 'c -> 'd
@@ -540,6 +556,8 @@ class virtual ['b] reduce :
     method on_IncludeOnce : 'c -> 'd
     method on_InstanceOf :
       'c -> Ast_visitors_ancestors.expr -> Ast_visitors_ancestors.expr -> 'd
+    method on_Is :
+      'c -> Ast_visitors_ancestors.expr -> Ast_visitors_ancestors.hint -> 'd
     method on_Int : 'c -> Ast_visitors_ancestors.pstring -> 'd
     method on_Invariant : 'c -> 'd
     method on_Lfun : 'c -> Ast_visitors_ancestors.fun_ -> 'd
@@ -588,6 +606,7 @@ class virtual ['b] reduce :
       Ast_visitors_ancestors.expr ->
       Ast_visitors_ancestors.og_null_flavor -> 'd
     method on_Percent : 'c -> 'd
+    method on_Pinout : 'c -> 'd
     method on_Pipe :
       'c -> Ast_visitors_ancestors.expr -> Ast_visitors_ancestors.expr -> 'd
     method on_Plus : 'c -> 'd
@@ -642,6 +661,8 @@ class virtual ['b] reduce :
     method on_Uref : 'c -> 'd
     method on_Usilence : 'c -> 'd
     method on_Utild : 'c -> 'd
+    method on_Using :
+      'c -> bool -> Ast_visitors_ancestors.expr -> Ast_visitors_ancestors.block -> 'd
     method on_While :
       'c -> Ast_visitors_ancestors.expr -> Ast_visitors_ancestors.block -> 'd
     method on_XhpAttr :
@@ -722,6 +743,7 @@ class virtual ['b] reduce :
       'c -> Ast_visitors_ancestors.og_null_flavor -> 'd
     method private on_option :
       'env 'a. ('env -> 'a -> 'd) -> 'env -> 'a option -> 'd
+    method on_param_kind : 'c -> Ast_visitors_ancestors.param_kind -> 'd
     method on_program : 'c -> Ast_visitors_ancestors.program -> 'd
     method on_pstring : 'c -> Ast_visitors_ancestors.pstring -> 'd
     method on_shape_field : 'c -> Ast_visitors_ancestors.shape_field -> 'd

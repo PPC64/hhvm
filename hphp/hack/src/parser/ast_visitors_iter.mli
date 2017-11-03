@@ -52,6 +52,9 @@ class virtual ['b] iter :
                   Ast_visitors_ancestors.hint list ->
                   Ast_visitors_ancestors.expr list ->
                   Ast_visitors_ancestors.expr list -> unit;
+        on_Callconv : 'c ->
+                      Ast_visitors_ancestors.param_kind ->
+                      Ast_visitors_ancestors.expr -> unit;
         on_Case : 'c ->
                   Ast_visitors_ancestors.expr ->
                   Ast_visitors_ancestors.block -> unit;
@@ -81,10 +84,10 @@ class virtual ['b] iter :
                        Ast_visitors_ancestors.class_var list ->
                        string option -> unit;
         on_Class_const : 'c ->
-                         Ast_visitors_ancestors.id ->
+                         Ast_visitors_ancestors.expr ->
                          Ast_visitors_ancestors.pstring -> unit;
         on_Class_get : 'c ->
-                       Ast_visitors_ancestors.id ->
+                       Ast_visitors_ancestors.expr ->
                        Ast_visitors_ancestors.expr -> unit;
         on_Clone : 'c -> Ast_visitors_ancestors.expr -> unit;
         on_Cnormal : 'c -> unit;
@@ -180,6 +183,9 @@ class virtual ['b] iter :
         on_InstanceOf : 'c ->
                         Ast_visitors_ancestors.expr ->
                         Ast_visitors_ancestors.expr -> unit;
+        on_Is : 'c ->
+                Ast_visitors_ancestors.expr ->
+                Ast_visitors_ancestors.hint -> unit;
         on_Int : 'c -> Ast_visitors_ancestors.pstring -> unit;
         on_Invariant : 'c -> unit;
         on_Lfun : 'c -> Ast_visitors_ancestors.fun_ -> unit;
@@ -218,6 +224,7 @@ class virtual ['b] iter :
                      Ast_visitors_ancestors.expr ->
                      Ast_visitors_ancestors.og_null_flavor -> unit;
         on_Percent : 'c -> unit;
+        on_Pinout : 'c -> unit;
         on_Pipe : 'c ->
                   Ast_visitors_ancestors.expr ->
                   Ast_visitors_ancestors.expr -> unit;
@@ -262,6 +269,10 @@ class virtual ['b] iter :
         on_Updecr : 'c -> unit; on_Upincr : 'c -> unit;
         on_Uplus : 'c -> unit; on_Uref : 'c -> unit;
         on_Usilence : 'c -> unit;
+        on_Using : 'c ->
+                    bool ->
+                    Ast_visitors_ancestors.expr ->
+                    Ast_visitors_ancestors.block -> unit;
         on_Utild : 'c -> unit;
         on_While : 'c ->
                    Ast_visitors_ancestors.expr ->
@@ -339,6 +350,7 @@ class virtual ['b] iter :
         on_ns_kind : 'c -> Ast_visitors_ancestors.ns_kind -> unit;
         on_og_null_flavor : 'c ->
                             Ast_visitors_ancestors.og_null_flavor -> unit;
+        on_param_kind : 'c -> Ast_visitors_ancestors.param_kind -> unit;
         on_program : 'c -> Ast_visitors_ancestors.program -> unit;
         on_pstring : 'c -> Ast_visitors_ancestors.pstring -> unit;
         on_shape_field : 'c -> Ast_visitors_ancestors.shape_field -> unit;
@@ -411,6 +423,10 @@ class virtual ['b] iter :
       Ast_visitors_ancestors.hint list ->
       Ast_visitors_ancestors.expr list ->
       Ast_visitors_ancestors.expr list -> unit
+    method on_Callconv :
+      'c ->
+      Ast_visitors_ancestors.param_kind ->
+      Ast_visitors_ancestors.expr -> unit
     method on_Case :
       'c ->
       Ast_visitors_ancestors.expr -> Ast_visitors_ancestors.block -> unit
@@ -444,10 +460,10 @@ class virtual ['b] iter :
       string option -> unit
     method on_Class_const :
       'c ->
-      Ast_visitors_ancestors.id -> Ast_visitors_ancestors.pstring -> unit
+      Ast_visitors_ancestors.expr -> Ast_visitors_ancestors.pstring -> unit
     method on_Class_get :
       'c ->
-      Ast_visitors_ancestors.id -> Ast_visitors_ancestors.expr -> unit
+      Ast_visitors_ancestors.expr -> Ast_visitors_ancestors.expr -> unit
     method on_Clone : 'c -> Ast_visitors_ancestors.expr -> unit
     method on_Cmp : 'c -> unit
     method on_Cnormal : 'c -> unit
@@ -562,6 +578,9 @@ class virtual ['b] iter :
     method on_InstanceOf :
       'c ->
       Ast_visitors_ancestors.expr -> Ast_visitors_ancestors.expr -> unit
+    method on_Is :
+      'c ->
+      Ast_visitors_ancestors.expr -> Ast_visitors_ancestors.hint -> unit
     method on_Int : 'c -> Ast_visitors_ancestors.pstring -> unit
     method on_Invariant : 'c -> unit
     method on_Lfun : 'c -> Ast_visitors_ancestors.fun_ -> unit
@@ -612,6 +631,7 @@ class virtual ['b] iter :
       Ast_visitors_ancestors.expr ->
       Ast_visitors_ancestors.og_null_flavor -> unit
     method on_Percent : 'c -> unit
+    method on_Pinout : 'c -> unit
     method on_Pipe :
       'c ->
       Ast_visitors_ancestors.expr -> Ast_visitors_ancestors.expr -> unit
@@ -668,6 +688,10 @@ class virtual ['b] iter :
     method on_Uplus : 'c -> unit
     method on_Uref : 'c -> unit
     method on_Usilence : 'c -> unit
+    method on_Using : 'c ->
+                bool ->
+                Ast_visitors_ancestors.expr ->
+                Ast_visitors_ancestors.block -> unit
     method on_Utild : 'c -> unit
     method on_While :
       'c ->
@@ -753,6 +777,7 @@ class virtual ['b] iter :
       'c -> Ast_visitors_ancestors.og_null_flavor -> unit
     method private on_option :
       'env 'a. ('env -> 'a -> unit) -> 'env -> 'a option -> unit
+    method on_param_kind : 'c -> Ast_visitors_ancestors.param_kind -> unit
     method on_program : 'c -> Ast_visitors_ancestors.program -> unit
     method on_pstring : 'c -> Ast_visitors_ancestors.pstring -> unit
     method on_shape_field : 'c -> Ast_visitors_ancestors.shape_field -> unit

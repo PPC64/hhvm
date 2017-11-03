@@ -10,7 +10,7 @@
 
 
 (* module checking that all the class members are properly initialized *)
-open Core
+open Hh_core
 open Nast
 open Utils
 
@@ -208,6 +208,8 @@ and stmt env acc st =
       expr acc e
     | While (e, _) ->
       expr acc e
+    | Using (_, e, _) ->
+      expr acc e
     | For (e1, _, _, _) ->
       expr acc e1
     | Switch (e, cl) ->
@@ -376,6 +378,7 @@ and expr_ env acc p e =
       let acc = expr acc e1 in
       expr acc e2
   | InstanceOf (e, _) -> expr acc e
+  | Is (e, _) -> expr acc e
   | Efun (f, _) ->
       let acc = fun_paraml acc f.f_params in
       (* We don't need to analyze the body of closures *)
@@ -384,6 +387,7 @@ and expr_ env acc p e =
       let l = List.map l snd in
       let acc = exprl acc l in
       exprl acc el
+  | Callconv (_, e) -> expr acc e
   | Shape fdm ->
       ShapeMap.fold begin fun _ v acc ->
         expr acc v

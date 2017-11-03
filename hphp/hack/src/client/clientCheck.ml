@@ -8,7 +8,7 @@
  *
  *)
 
-open Core
+open Hh_core
 open ClientEnv
 open Utils
 open ClientRefactor
@@ -321,6 +321,18 @@ let main args =
       let results = rpc args @@ Rpc.LINT fnl in
       ClientLint.go results args.output_json;
       Exit_status.No_error
+    | MODE_LINT_STDIN filename ->
+      begin match Sys_utils.realpath filename with
+      | None ->
+        prerr_endlinef "Could not find file '%s'" filename;
+        Exit_status.Input_error
+      | Some filename ->
+        let contents = Sys_utils.read_stdin_to_string () in
+        let results = rpc args @@ Rpc.LINT_STDIN
+          { ServerCommandTypes.filename; contents } in
+        ClientLint.go results args.output_json;
+        Exit_status.No_error
+      end
     | MODE_LINT_ALL code ->
       let results = rpc args @@ Rpc.LINT_ALL code in
       ClientLint.go results args.output_json;
@@ -422,10 +434,10 @@ let main args =
       in
       let result = rpc args @@ Rpc.INFER_RETURN_TYPE action in
       match result with
-      | Result.Error error_str ->
+      | Error error_str ->
         Printf.eprintf "%s\n" error_str;
         raise Exit_status.(Exit_with Input_error)
-      | Result.Ok ty ->
+      | Ok ty ->
         if args.output_json then
           print_endline Hh_json.(json_to_string (JSON_String ty))
         else

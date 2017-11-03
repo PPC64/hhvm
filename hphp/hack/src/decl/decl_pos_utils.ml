@@ -8,7 +8,7 @@
 *
 *)
 
-open Core
+open Hh_core
 open Decl_defs
 open Typing_defs
 
@@ -70,6 +70,7 @@ let rec reason = function
   | Rmap_append p          -> Rmap_append (pos p)
   | Rvar_param p           -> Rvar_param (pos p)
   | Runpack_param p        -> Runpack_param (pos p)
+  | Rinout_param p         -> Rinout_param (pos p)
   | Rinstantiate (r1,x,r2) -> Rinstantiate (reason r1, x, reason r2)
   | Rarray_filter (p, r)   -> Rarray_filter (pos p, reason r)
   | Rtype_access (r1, x, r2) -> Rtype_access (reason r1, x, reason r2)
@@ -82,6 +83,7 @@ let rec reason = function
   | Rinstanceof (p, f)       -> Rinstanceof (pos p, f)
   | Rfinal_property p        -> Rfinal_property (pos p)
   | Rvarray_or_darray_key p -> Rvarray_or_darray_key (pos p)
+  | Rusing p                 -> Rusing (pos p)
 let string_id (p, x) = pos p, x
 
 let rec ty (p, x) =

@@ -200,6 +200,7 @@ void throwInvalidClassName() {
 }
 
 const StaticString
+  s_serialized("serialized"),
   s_unserialize("unserialize"),
   s_PHP_Incomplete_Class("__PHP_Incomplete_Class"),
   s_PHP_Incomplete_Class_Name("__PHP_Incomplete_Class_Name"),
@@ -555,27 +556,24 @@ void VariableUnserializer::unserializeProp(ObjectData* obj,
                                            Class* ctx,
                                            const String& realKey,
                                            int nProp) {
-  // Do a two-step look up
-  auto const lookup = obj->getProp(ctx, key.get());
+
+  auto const cls = obj->getVMClass();
+  auto const lookup = cls->getDeclPropIndex(ctx, key.get());
+  auto const slot = lookup.prop;
   Variant* t;
 
-  if (!lookup.prop || !lookup.accessible) {
-    // Dynamic property. If this is the first, and we're using MixedArray,
-    // we need to pre-allocate space in the array to ensure the elements
-    // dont move during unserialization.
+  if (slot == kInvalidSlot || !lookup.accessible) {
+    // Unserialize as a dynamic property. If this is the first, we need to
+    // pre-allocate space in the array to ensure the elements don't move during
+    // unserialization.
     SuppressHackArrCompatNotices shacn;
     t = &obj->reserveProperties(nProp).lvalAt(realKey, AccessFlags::Key);
-  } else {
+  } else if (UNLIKELY(cls->declProperties()[slot].attrs & AttrNoSerialize)) {
     // Ignore fields which are marked as NoSerialize
-    auto const cls = obj->getVMClass();
-    auto const propIdx = cls->getDeclPropIndex(ctx, key.get()).prop;
-    assertx(propIdx != kInvalidSlot);
-    if (UNLIKELY(cls->declProperties()[propIdx].attrs & AttrNoSerialize)) {
-      Variant temp;
-      return unserializePropertyValue(temp, nProp);
-    }
-
-    t = &tvAsVariant(lookup.prop);
+    Variant temp;
+    return unserializePropertyValue(temp, nProp);
+  } else {
+    t = &tvAsVariant(obj->propLvalAtOffset(slot).tv_ptr());
   }
 
   if (UNLIKELY(isRefcountedType(t->getRawType()))) {
@@ -594,13 +592,9 @@ void VariableUnserializer::unserializeProp(ObjectData* obj,
    * violate what we've seen, which we handle by throwing if the repo
    * was built with this option.
    */
-  auto const cls  = obj->getVMClass();
-  auto const slot = cls->lookupDeclProp(key.get());
   if (UNLIKELY(slot == kInvalidSlot)) return;
-  auto const repoTy = obj->getVMClass()->declPropRepoAuthType(slot);
-  if (LIKELY(tvMatchesRepoAuthType(*t->asTypedValue(), repoTy))) {
-    return;
-  }
+  auto const repoTy = cls->declPropRepoAuthType(slot);
+  if (LIKELY(tvMatchesRepoAuthType(*t->asTypedValue(), repoTy))) return;
   throwUnexpectedType(key, obj, *t);
 }
 
@@ -1005,7 +999,8 @@ void VariableUnserializer::unserializeVariant(
         }
       } else {
         obj = Object{SystemLib::s___PHP_Incomplete_ClassClass};
-        obj->o_set(s_PHP_Incomplete_Class_Name, clsName);
+        obj->setProp(nullptr, s_PHP_Incomplete_Class_Name.get(),
+                     make_tv<KindOfString>(clsName.get()));
       }
       assert(!obj.isNull());
       tvSet(make_tv<KindOfObject>(obj.get()), *self.asTypedValue());
@@ -1030,7 +1025,7 @@ void VariableUnserializer::unserializeVariant(
           // Try fast case.
           if (size >= objCls->numDeclProperties()) {
             bool mismatch = false;
-            auto objProps = obj->propVec();
+            auto objProps = obj->propVecForWrite();
 
             for (auto prop : objCls->declProperties()) {
               if (!matchString(prop.mangledName->slice())) {
@@ -1154,8 +1149,10 @@ void VariableUnserializer::unserializeVariant(
           raise_error("unknown class %s", clsName.data());
         }
         Object ret = create_object_only(s_PHP_Incomplete_Class);
-        ret->o_set(s_PHP_Incomplete_Class_Name, clsName);
-        ret->o_set("serialized", serialized);
+        ret->setProp(nullptr, s_PHP_Incomplete_Class_Name.get(),
+                     make_tv<KindOfString>(clsName.get()));
+        ret->setProp(nullptr, s_serialized.get(),
+                     make_tv<KindOfString>(serialized.get()));
         return ret;
       }();
 

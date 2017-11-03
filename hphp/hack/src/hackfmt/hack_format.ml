@@ -16,7 +16,7 @@ module Token = Full_fidelity_editable_token
 module Rewriter = Full_fidelity_rewriter.WithSyntax(Syntax)
 module Env = Format_env
 
-open Core
+open Hh_core
 open Syntax
 open Doc
 
@@ -534,15 +534,17 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
         Newline;
       ]
     | ParameterDeclaration x ->
-      let (attr, visibility, param_type, name, default) =
+      let (attr, visibility, callconv, param_type, name, default) =
         get_parameter_declaration_children x
       in
       Concat [
         t attr;
         t visibility;
         when_present visibility space;
+        t callconv;
+        when_present callconv space;
         t param_type;
-        if is_missing visibility && is_missing param_type
+        if is_missing visibility && is_missing callconv && is_missing param_type
         then t name
         else Concat [
           Space;
@@ -552,8 +554,12 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
         t default;
       ]
     | VariadicParameter x ->
-      let ellipsis = get_variadic_parameter_children x in
-      t ellipsis;
+      let type_var, ellipsis = get_variadic_parameter_children x in
+      Concat [
+        t type_var;
+        Space;
+        t ellipsis;
+      ]
     | AttributeSpecification x ->
       let (left_da, attrs, right_da) = get_attribute_specification_children x in
       transform_argish ~allow_trailing:false left_da attrs right_da
@@ -1027,6 +1033,16 @@ let transform (env: Env.t) (node: Syntax.t) : Doc.t =
       transform_binary_expression ~is_nested:false x
     | InstanceofExpression x ->
       let (left, kw, right) = get_instanceof_expression_children x in
+      Concat [
+        t left;
+        Space;
+        t kw;
+        Space;
+        SplitWith Cost.Base;
+        Nest [t right];
+      ]
+    | IsExpression x ->
+      let (left, kw, right) = get_is_expression_children x in
       Concat [
         t left;
         Space;

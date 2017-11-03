@@ -10,15 +10,21 @@
 
 (* TODO: Integrate these with the rest of the Hack error messages. *)
 
+type error_type = ParseError | RuntimeError
+
 type t = {
-  child : t option;
+  child        : t option;
   start_offset : int;
-  end_offset : int;
-  message : string
+  end_offset   : int;
+  error_type   : error_type;
+  message      : string;
 }
 
-let make ?(child = None) start_offset end_offset message =
-  { child; start_offset; end_offset; message }
+exception ParserFatal of t
+
+let make
+  ?(child = None) ?(error_type = ParseError) start_offset end_offset message =
+  { child; error_type; start_offset; end_offset; message }
 
 let rec to_positioned_string error offset_to_position =
   let child =
@@ -41,6 +47,8 @@ let exactly_equal err1 err2 =
   err1.start_offset = err2.start_offset &&
     err1.end_offset = err2.end_offset &&
     err1.message = err2.message
+
+let error_type err = err.error_type
 
 let message err = err.message
 
@@ -161,8 +169,8 @@ let error2030 = "Only traits may use 'require implements'."
 let error2031 =
   "A class, interface, or trait declaration cannot have duplicate modifiers."
 let error2032 = "The array type is not allowed in strict mode."
-let error2033 = "A variadic argument ('...') may only appear at the end of " ^
-  "an argument list."
+let error2033 = "The splat operator ('...') for unpacking variadic arguments " ^
+  "may only appear at the end of an argument list."
 let error2034 = "A type alias declaration cannot both use 'type' and have a " ^
   "constraint. Did you mean 'newtype'?"
 let error2035 = "Only classes may implement interfaces."
@@ -211,10 +219,76 @@ let error2061 = "Non-static instance variables are not allowed in abstract final
 let error2062 = "Non-static methods are not allowed in abstract final classes."
 let error2063 = "Expected integer or string literal."
 let error2064 = "Reference methods are not allowed in strict mode."
-let error2065 = "A variadic argument ('...') must not have a default value."
+let error2065 = "A variadic parameter ('...') must not have a default value."
 (* This was typing error 4077. *)
 let error2066 = "A previous parameter has a default value. Remove all the " ^
   "default values for the preceding parameters, or add a default value to " ^
   "this one."
 let error2067 = "A hack source file cannot contain '?>'."
 let error2068 = "hh blocks and php blocks cannot be mixed."
+let error2069 = "Operator '?->' is only allowed in Hack."
+let error2070 ~open_tag ~close_tag =
+  Printf.sprintf "XHP: mismatched tag: '%s' not the same as '%s'"
+    open_tag close_tag
+let error2071 s = "Decimal number is too big: " ^ s
+let error2072 s = "Hexadecimal number is too big: " ^ s
+let error2073 = "A variadic parameter ('...') cannot have a modifier " ^
+  "that changes the calling convention, like 'inout'."
+let error2074 call_modifier = "An '" ^ call_modifier ^ "' parameter must not " ^
+  "have a default value."
+let error2075 call_modifier = "An '" ^ call_modifier ^ "' parameter cannot " ^
+  "be passed by reference ('&')."
+let error2076 = "Cannot use both 'inout' and '&' on the same argument."
+
+(* Start giving names rather than numbers *)
+let hsl_in_php = "Hack standard library is only allowed in Hack files"
+let vdarray_in_php = "varray and darray are only allowed in Hack files"
+let using_st_function_scoped_top_level =
+  "Using statement in function scoped form may only be used at the top " ^
+  "level of a function or a method"
+let const_in_trait = "Traits cannot have constants"
+let strict_namespace_hh =
+  "To use strict hack, place // strict after the open tag. " ^
+  "If it's already there, remove this line. " ^
+  "Hack is strict already."
+let strict_namespace_not_hh =
+  "You seem to be trying to use a different language. " ^
+  "May I recommend Hack? http://hacklang.org"
+
+let original_definition = "Original definition"
+
+let name_is_already_in_use ~name ~short_name =
+  "Cannot use " ^ name ^ " as " ^ short_name ^
+  " because the name is already in use"
+
+let function_name_is_already_in_use ~name ~short_name =
+  "Cannot use function " ^ name ^ " as " ^ short_name ^
+  " because the name is already in use"
+
+let const_name_is_already_in_use ~name ~short_name =
+  "Cannot use const " ^ name ^ " as " ^ short_name ^
+  " because the name is already in use"
+
+let type_name_is_already_in_use ~name ~short_name =
+  "Cannot use type " ^ name ^ " as " ^ short_name ^
+  " because the name is already in use"
+
+let variadic_reference = "Found '...&'. Did you mean '&...'?"
+let double_variadic = "Parameter redundantly marked as variadic ('...')."
+let double_reference = "Parameter redundantly marked as reference ('&')."
+let global_in_const_decl = "Cannot have globals in constant declaration"
+
+let conflicting_trait_require_clauses ~name =
+  "Conflicting requirements for '" ^ name ^ "'"
+
+let yield_in_magic_methods =
+  "'yield' is not allowed in constructor, destructor, or magic methods"
+
+let reference_not_allowed_on_key = "Key of collection element cannot " ^
+  "be marked as reference"
+let reference_not_allowed_on_value = "Value of collection element cannot " ^
+  "be marked as reference"
+let reference_not_allowed_on_element = "Collection element cannot " ^
+  "be marked as reference"
+let yield_in_finally_block =
+  "Yield expression inside a finally block is not supported"

@@ -291,11 +291,15 @@ const StaticString
 
 Array HHVM_METHOD(DateTime, __sleep) {
   DateTimeData* data = Native::data<DateTimeData>(this_);
-  int zoneType = data->m_dt->zoneType();
 
-  this_->o_set(s_date, data->format(s_ISOformat));
-  this_->o_set(s_timezone_type, zoneType);
-  this_->o_set(s_timezone, zone_type_to_string(zoneType, data->m_dt));
+  auto const formatted = data->format(s_ISOformat);
+  this_->setProp(nullptr, s_date.get(), make_tv<KindOfString>(formatted.get()));
+  int zoneType = data->m_dt->zoneType();
+  this_->setProp(nullptr, s_timezone_type.get(),
+                 make_tv<KindOfInt64>(zoneType));
+  auto const timezone = zone_type_to_string(zoneType, data->m_dt);
+  this_->setProp(nullptr, s_timezone.get(),
+                 make_tv<KindOfString>(timezone.get()));
   return make_packed_array(s_date, s_timezone_type, s_timezone);
 }
 
@@ -378,13 +382,12 @@ req::ptr<DateTime> DateTimeData::unwrap(const Object& datetime) {
     return data->m_dt;
   }
   if (datetime->instanceof(SystemLib::s_DateTimeImmutableClass)) {
-    auto lookup = datetime->getProp(
+    auto rval = datetime->getProp(
       SystemLib::s_DateTimeImmutableClass,
       s_data.get()
     );
-    auto tv = lookup.prop;
-    assert(tv->m_type == KindOfObject);
-    Object impl(tv->m_data.pobj);
+    assert(rval.has_val() && rval.type() == KindOfObject);
+    Object impl(rval.val().pobj);
     return unwrap(impl);
   }
   return req::ptr<DateTime>();

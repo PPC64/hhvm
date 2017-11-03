@@ -8,23 +8,28 @@
  *
  *)
 
-module SyntaxError = Full_fidelity_syntax_error
-module Context = Full_fidelity_parser_context
+module WithSyntax(Syntax : Syntax_sig.Syntax_S) = struct
+module type Lexer_S = Full_fidelity_lexer_sig.WithToken(Syntax.Token).Lexer_S
+module Context = Full_fidelity_parser_context.WithToken(Syntax.Token)
 
-module WithLexer(Lexer : Full_fidelity_lexer_sig.Lexer_S) = struct
+module WithLexer(Lexer : Lexer_S) = struct
   module Lexer = Lexer
 
   type t = {
     lexer : Lexer.t;
-    errors : SyntaxError.t list;
-    context : Context.t
+    errors : Full_fidelity_syntax_error.t list;
+    context : Context.t;
+    env : Full_fidelity_parser_env.t;
   }
 
-  let make lexer errors context =
-    { lexer; errors; context }
+  let make env lexer errors context =
+    { lexer; errors; context; env }
 
   let errors parser =
     parser.errors @ (Lexer.errors parser.lexer)
+
+  let env parser =
+    parser.env
 
   let with_errors parser errors =
     { parser with errors }
@@ -76,4 +81,5 @@ module WithLexer(Lexer : Full_fidelity_lexer_sig.Lexer_S) = struct
   let print_expected parser =
     Context.print_expected parser.context
 
-end
+end (* WithLexer *)
+end (* WithSyntax *)

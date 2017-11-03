@@ -1196,14 +1196,10 @@ static bool get_zval_property(Variant &object, const char* name,
   String sname(name);
   if (object.isObject()) {
     Object obj = object.toObject();
-    auto t = obj->o_realProp(sname,
-      ObjectData::RealPropUnchecked|ObjectData::RealPropBind);
-    if (t && t->isInitialized()) {
-      assert(t->asTypedValue()->m_type == KindOfRef); // assignRef won't box
-      if (ret) ret->assignRef(*t);
-      return true;
-    }
-    return false;
+    auto const prop = obj->vGetPropIgnoreAccessibility(sname.get());
+    if (!prop) return false;
+    if (ret) ret->assignRef(tvAsVariant(prop.tv_ptr()));
+    return true;
   }
   if (object.isArray()) {
     Array arr = object.toArray();
@@ -1215,6 +1211,10 @@ static bool get_zval_property(Variant &object, const char* name,
   }
   return false;
 }
+
+const StaticString
+  s_any("any"),
+  s__("_");
 
 static void model_to_zval_any(Variant &ret, xmlNodePtr node) {
   const char* name = nullptr;
@@ -1282,7 +1282,11 @@ static void model_to_zval_any(Variant &ret, xmlNodePtr node) {
     node = node->next;
   }
   if (any.toBoolean()) {
-    ret.toObject()->o_set(name ? String(name, CopyString) : "any", any);
+    if (name) {
+      ret.toObject()->o_set(String(name), any);
+    } else {
+      ret.toObject()->setProp(nullptr, s_any.get(), *any.asCell());
+    }
   }
 }
 
@@ -1429,7 +1433,8 @@ static Variant to_zval_object_ex(encodeType* type, xmlNodePtr data,
           return ret;
         }
         ret = create_object(ce, Array());
-        ret.toObject()->o_set("_", master_to_zval_int(enc, data));
+        ret.toObject()->setProp(nullptr, s__.get(),
+                                *master_to_zval_int(enc, data).asCell());
       } else {
         FIND_XML_NULL(data, ret);
         if (soap_check_xml_ref(ret, data)) {
@@ -1472,7 +1477,11 @@ static Variant to_zval_object_ex(encodeType* type, xmlNodePtr data,
           return ret;
         }
         ret = create_object(ce, Array());
-        ret.toObject()->o_set("_", master_to_zval_int(sdlType->encode, data));
+        ret.toObject()->setProp(
+          nullptr,
+          s__.get(),
+          *master_to_zval_int(sdlType->encode, data).asCell()
+        );
       }
     } else {
       FIND_XML_NULL(data, ret);
@@ -1483,7 +1492,7 @@ static Variant to_zval_object_ex(encodeType* type, xmlNodePtr data,
     }
     if (sdlType->model) {
       if (redo_any) {
-        ret.toObject()->o_set("any", uninit_null());
+        ret.toObject()->setProp(nullptr, s_any.get(), make_tv<KindOfUninit>());
       }
       model_to_zval_object(ret, sdlType->model, data, sdl);
       if (redo_any) {

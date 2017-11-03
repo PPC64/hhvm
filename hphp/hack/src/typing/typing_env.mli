@@ -47,9 +47,12 @@ val get_member : bool -> env -> class_type -> string -> class_elt option
 val suggest_member : bool -> class_type -> string -> (Pos.t * string) option
 val get_construct : env -> class_type -> class_elt option * bool
 val check_todo : env -> env
-val get_return : env -> locl ty
-val set_return : env -> locl ty -> env
-val with_return : env -> (env -> env * 'a) -> env * 'a
+val get_return : env -> locl ty * bool (* Use as contextual type *)
+val set_return : env -> locl ty * bool -> env
+val get_params : env -> (locl ty * param_mode) Local_id.Map.t
+val set_param : env -> Local_id.t -> locl ty * param_mode -> env
+val clear_params : env -> env
+val with_env : env -> (env -> env * 'a) -> env * 'a
 val is_static : env -> bool
 val get_self : env -> locl ty
 val get_self_id : env -> string
@@ -91,7 +94,10 @@ module FakeMembers :
   end
 val unbind : env -> locl ty -> env * locl ty
 val set_local : env -> Local_id.t -> locl ty -> env
-val get_local : env -> Local_id.t -> env * locl ty
+val is_using_var : env -> Local_id.t -> bool
+val set_using_var : env -> Local_id.t -> env
+val unset_local : env -> Local_id.t -> env
+val get_local : env -> Local_id.t -> locl ty
 val set_local_expr_id : env -> Local_id.t -> expression_id -> env
 val get_local_expr_id : env -> Local_id.t -> expression_id option
 val get_lower_bounds : env -> string -> tparam_bounds
@@ -103,7 +109,7 @@ val union_global_tpenv : tpenv -> tpenv -> tpenv
 val add_upper_bound_global : env -> string -> locl ty -> env
 val add_lower_bound_global : env -> string -> locl ty -> env
 val env_with_tpenv : env -> tpenv -> env
-val env_with_global_tpenv : env -> tpenv -> env 
+val env_with_global_tpenv : env -> tpenv -> env
 val add_generic_parameters : env -> Nast.tparam list -> env
 val is_generic_parameter : env -> string -> bool
 val get_generic_parameters : env -> string list

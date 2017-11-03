@@ -74,6 +74,7 @@ module type S = sig
   val shadowed_type_param : Pos.t -> Pos.t -> string -> unit
   val missing_typehint : Pos.t -> unit
   val expected_variable : Pos.t -> unit
+  val clone_too_many_arguments : Pos.t -> unit
   val naming_too_few_arguments : Pos.t -> unit
   val naming_too_many_arguments : Pos.t -> unit
   val expected_collection : Pos.t -> string -> unit
@@ -140,6 +141,7 @@ module type S = sig
   val parent_abstract_call : string -> Pos.t -> Pos.t -> unit
   val self_abstract_call : string -> Pos.t -> Pos.t -> unit
   val classname_abstract_call : string -> string -> Pos.t -> Pos.t -> unit
+  val static_synthetic_method : string -> string -> Pos.t -> Pos.t -> unit
   val empty_in_strict : Pos.t -> unit
   val isset_in_strict : Pos.t -> unit
   val unset_nonidx_in_strict : Pos.t -> (Pos.t * string) list -> unit
@@ -248,6 +250,7 @@ module type S = sig
   val suspend_outside_of_coroutine : Pos.t -> unit
   val suspend_in_finally : Pos.t -> unit
   val break_continue_n_not_supported : Pos.t -> unit
+  val static_memoized_function : Pos.t -> unit
   val magic : Pos.t * string -> unit
   val non_interface : Pos.t -> string -> string -> unit
   val toString_returns_string : Pos.t -> unit
@@ -335,9 +338,9 @@ module type S = sig
   val instanceof_always_true : Pos.t -> unit
   val instanceof_generic_classname : Pos.t -> string -> unit
   val final_property : Pos.t -> unit
-  val pass_by_ref_annotation :
-    should_add:bool -> Pos.t -> (Pos.t * string) list -> unit
-
+  val pass_by_ref_annotation_missing : Pos.t -> Pos.t -> unit
+  val reffiness_invariant : Pos.t -> Pos.t -> [< `normal | `inout ] -> unit
+  val pass_by_ref_annotation_unexpected : Pos.t -> Pos.t -> unit
 
   val to_json : Pos.absolute error_ -> Hh_json.json
   val to_string : ?indent:bool -> Pos.absolute error_ -> string
@@ -366,18 +369,17 @@ module type S = sig
   val from_error_list : error list -> t
   val iter_error_list : (error -> unit) -> t -> unit
   val get_applied_fixmes : t -> applied_fixme list
-  val optional_shape_fields_not_supported : Pos.t -> unit
   val darray_not_supported : Pos.t -> unit
   val varray_not_supported : Pos.t -> unit
   val too_few_type_arguments : Pos.t -> unit
   val required_field_is_optional : Pos.t -> Pos.t -> string -> unit
   val array_get_with_optional_field : Pos.t -> Pos.t -> string -> unit
-  val unknown_fields_not_supported : Pos.t -> unit
   val goto_label_already_defined : string -> Pos.t -> Pos.t -> unit
   val goto_label_undefined : Pos.t -> string -> unit
   val goto_label_defined_in_finally : Pos.t -> string -> unit
   val goto_invoked_in_finally : Pos.t -> string -> unit
   val dynamic_class_property_name_in_strict_mode : Pos.t -> unit
+  val dynamic_class_name_in_strict_mode : Pos.t -> unit
   val varray_or_darray_not_supported : Pos.t -> unit
   val unknown_field_disallowed_in_shape : Pos.t -> Pos.t -> string -> unit
   val nullable_cast : Pos.t -> string -> Pos.t -> unit
@@ -387,4 +389,16 @@ module type S = sig
   val function_is_not_coroutine : Pos.t -> string -> unit
   val coroutinness_mismatch : bool -> Pos.t -> Pos.t -> unit
   val this_as_lexical_variable : Pos.t -> unit
+  val dollardollar_lvalue : Pos.t -> unit
+  val duplicate_using_var : Pos.t -> unit
+  val illegal_disposable : Pos.t -> string -> unit
+  val escaping_disposable : Pos.t -> unit
+  val inout_params_outside_of_sync : Pos.t -> unit
+  val inout_params_special : Pos.t -> unit
+  val inout_params_mix_byref : Pos.t -> Pos.t -> unit
+  val inout_params_memoize : Pos.t -> Pos.t -> unit
+  val inout_annotation_missing : Pos.t -> Pos.t -> unit
+  val inout_annotation_unexpected : Pos.t -> Pos.t -> unit
+  val inoutness_mismatch : Pos.t -> Pos.t -> unit
+  val inout_params_ret_by_ref : Pos.t -> Pos.t -> unit
 end

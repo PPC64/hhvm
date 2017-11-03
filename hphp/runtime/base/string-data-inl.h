@@ -109,6 +109,11 @@ inline size_t StringData::heapSize() const {
     : sizeof(StringData) + sizeof(Proxy);
 }
 
+inline size_t StringData::estimateCap(size_t size) {
+  assert(size <= MaxSize);
+  return MemoryManager::sizeClass(size + kStringOverhead);
+}
+
 inline bool StringData::isStrictlyInteger(int64_t& res) const {
   // Exploit the NUL terminator and unsigned comparison. This single comparison
   // checks whether the string is empty or if the first byte is greater than '9'

@@ -22,6 +22,7 @@
 #include "hphp/runtime/base/classname-is.h"
 #include "hphp/runtime/base/req-ptr.h"
 #include "hphp/runtime/base/weakref-data.h"
+#include "hphp/runtime/base/member-val.h"
 
 #include "hphp/runtime/vm/class.h"
 #include "hphp/runtime/vm/hhbc.h"
@@ -59,6 +60,11 @@ struct TypedValue;
 void deepInitHelper(TypedValue* propVec, const TypedValueAux* propData,
                     size_t nProps);
 
+namespace Native {
+  ObjectData* nativeDataInstanceCopyCtor(ObjectData *src, Class* cls,
+                                         size_t nProps);
+}
+
 struct InvokeResult {
   TypedValue val;
   InvokeResult() {}
@@ -83,8 +89,8 @@ struct ObjectData : Countable, type_scan::MarkCollectable<ObjectData> {
     UseUnset      = 0x0020, // __unset()
     IsWaitHandle  = 0x0040, // This is a c_WaitHandle or derived
     IsWeakRefed   = 0x0080, // Is pointed to by at least one WeakRef
-    HasClone      = 0x0100, // if isCppBuiltin(), has custom clone logic
-                            // if !isCppBuiltin(), defines __clone PHP method
+    HasClone      = 0x0100, // defines __clone PHP method
+                            // only valid when !isCppBuiltin()
     CallToImpl    = 0x0200, // call o_to{Boolean,Int64,Double}Impl
     HasNativeData = 0x0400, // HNI Class with <<__NativeData("T")>>
     HasDynPropArr = 0x0800, // has a dynamic properties array
@@ -93,13 +99,6 @@ struct ObjectData : Countable, type_scan::MarkCollectable<ObjectData> {
     HasPropEmpty  = 0x4000, // has custom propEmpty logic
     HasNativePropHandler    // class has native magic props handler
                   = 0x8000
-  };
-
-  enum {
-    RealPropCreate = 1,    // Property should be created if it doesn't exist
-    RealPropBind = 2,      // Property should be boxed
-    RealPropUnchecked = 8, // Don't check property accessibility
-    RealPropExist = 16,    // For property_exists
   };
 
  private:
@@ -261,8 +260,7 @@ struct ObjectData : Countable, type_scan::MarkCollectable<ObjectData> {
  private:
   void instanceInit(Class*);
   bool destructImpl();
-  Variant* realPropImpl(const String& s, int flags, const String& context,
-                        bool copyDynArray);
+
  public:
 
   enum IterMode { EraseRefs, CreateRefs, PreserveRefs };
@@ -276,16 +274,11 @@ struct ObjectData : Countable, type_scan::MarkCollectable<ObjectData> {
    */
   Array o_toIterArray(const String& context, IterMode mode);
 
-  Variant* o_realProp(const String& s, int flags,
-                      const String& context = null_string);
-  const Variant* o_realProp(const String& s, int flags,
-                            const String& context = null_string) const;
-
   Variant o_get(const String& s, bool error = true,
                 const String& context = null_string);
 
-  Variant o_set(const String& s, const Variant& v);
-  Variant o_set(const String& s, const Variant& v, const String& context);
+  void o_set(const String& s, const Variant& v,
+             const String& context = null_string);
 
   void o_setArray(const Array& properties);
   void o_getArray(Array& props, bool pubOnly = false) const;
@@ -344,8 +337,12 @@ struct ObjectData : Countable, type_scan::MarkCollectable<ObjectData> {
   Array& setDynPropArray(const Array&);
 
   // accessors for the declared properties area
-  TypedValue* propVec();
+  TypedValue* propVecForWrite();
   const TypedValue* propVec() const;
+
+  // accessors for declared properties at known offsets
+  member_lval propLvalAtOffset(Slot);
+  member_rval propRvalAtOffset(Slot) const;
 
  public:
   const Func* methodNamed(const StringData*) const;
@@ -356,25 +353,24 @@ struct ObjectData : Countable, type_scan::MarkCollectable<ObjectData> {
  private:
   Slot declPropInd(const TypedValue* prop) const;
 
-  inline Variant o_getImpl(const String& propName, bool error = true,
-                           const String& context = null_string);
-  inline Variant o_setImpl(const String& propName, const Variant& v,
-                           const String& context);
  public:
+  // never box the lval returned from getPropLval; use propB or vGetProp instead
+  member_lval getPropLval(const Class*, const StringData*);
+  member_rval getProp(const Class*, const StringData*) const;
+  member_lval vGetProp(const Class*, const StringData*);
+  // don't use vGetPropIgnoreAccessibility in new code
+  member_lval vGetPropIgnoreAccessibility(const StringData*);
 
+ private:
   template <class T>
   struct PropLookup {
     T prop;
     bool accessible;
   };
 
-  PropLookup<TypedValue*> getProp(const Class*, const StringData*);
-  PropLookup<const TypedValue*> getProp(const Class*, const StringData*) const;
-
   PropLookup<TypedValue*> getPropImpl(const Class*, const StringData*,
                                       bool copyDynArray);
 
- private:
   enum class PropMode : int {
     ReadNoWarn,
     ReadWarn,
@@ -439,6 +435,8 @@ struct ObjectData : Countable, type_scan::MarkCollectable<ObjectData> {
 
 private:
   friend struct MemoryProfile;
+  friend ObjectData* Native::nativeDataInstanceCopyCtor(
+    ObjectData* src, Class* cls, size_t nProps);
 
   bool toBooleanImpl() const noexcept;
   int64_t toInt64Impl() const noexcept;

@@ -11,22 +11,8 @@
 (* This lexer is exactly the same as a regular lexer, except that it tokenizes
    C<D<E>> as C < D < E > >, and not C < D < E >> *)
 
-type t = Full_fidelity_lexer.t
-
-let source = Full_fidelity_lexer.source
-let start_offset = Full_fidelity_lexer.start_offset
-let end_offset = Full_fidelity_lexer.end_offset
-let next_token = Full_fidelity_lexer.next_token_in_type
-let next_token_no_trailing = Full_fidelity_lexer.next_token_no_trailing
-let next_token_in_string = Full_fidelity_lexer.next_token_in_string
-let next_token_as_name = Full_fidelity_lexer.next_token_as_name
-let next_docstring_header = Full_fidelity_lexer.next_docstring_header
-let next_xhp_class_name = Full_fidelity_lexer.next_xhp_class_name
-let is_next_xhp_class_name = Full_fidelity_lexer.is_next_xhp_class_name
-let is_next_name = Full_fidelity_lexer.is_next_name
-let next_xhp_name = Full_fidelity_lexer.next_xhp_name
-let scan_markup = Full_fidelity_lexer.scan_markup
-let is_next_xhp_category_name = Full_fidelity_lexer.is_next_xhp_category_name
-let next_xhp_category_name = Full_fidelity_lexer.next_xhp_category_name
-let errors = Full_fidelity_lexer.errors
-let current_text_at = Full_fidelity_lexer.current_text_at
+module WithToken(Token: Lexable_token_sig.LexableToken_S) = struct
+  module Lexer = Full_fidelity_lexer.WithToken(Token)
+  include Lexer
+  let next_token = Lexer.next_token_in_type
+end (* WithToken *)

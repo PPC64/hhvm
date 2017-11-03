@@ -20,11 +20,9 @@
  *    either redeclared or checked again.
  *)
 (*****************************************************************************)
-open Core
+open Hh_core
 open Decl_defs
 open Typing_deps
-
-module ShapeMap = Nast.ShapeMap
 
 (*****************************************************************************)
 (* Given two classes give back the set of functions or classes that need

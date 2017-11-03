@@ -2,7 +2,7 @@
  * transform one annotated AST to another, applying a given function to
  * every annotation
  *)
-open Core
+open Hh_core
 open Nast
 module MapAnnotatedAST
   (Source : AnnotationType)
@@ -80,11 +80,13 @@ struct
       T.Eif(map_expr f e1, Option.map e2 (map_expr f), map_expr f e3)
     | S.NullCoalesce (e1, e2) -> T.NullCoalesce (map_expr f e1, map_expr f e2)
     | S.InstanceOf (e, ci) -> T.InstanceOf (map_expr f e, map_class_id ci)
+    | S.Is (e, h) -> T.Is (map_expr f e, h)
     | S.New (ci, el1, el2) ->
       T.New (map_class_id ci, map_exprl f el1, map_exprl f el2)
     | S.Efun (ef, ids) -> T.Efun(map_fun f ef, ids)
     | S.Xml (id, pl, el) ->
       T.Xml (id, List.map pl (fun (p,e) -> (p,map_expr f e)), map_exprl f el)
+    | S.Callconv (k, e) -> T.Callconv (k, map_expr f e)
     | S.Assert (S.AE_assert e) -> T.Assert (T.AE_assert (map_expr f e))
     | S.Clone e -> T.Clone (map_expr f e)
   in
@@ -105,6 +107,7 @@ struct
     T.f_fun_kind = fd.S.f_fun_kind;
     T.f_user_attributes =
     List.map fd.S.f_user_attributes (map_user_attribute f);
+    T.f_ret_by_ref = fd.S.f_ret_by_ref;
   }
 
   and map_user_attribute f ua =
@@ -153,6 +156,7 @@ struct
     | S.If(e, b1, b2) -> T.If (map_expr f e, map_block f b1, map_block f b2)
     | S.Do(b, e) -> T.Do(map_block f b, map_expr f e)
     | S.While(e, b) -> T.While(map_expr f e, map_block f b)
+    | S.Using(has_await, e, b) -> T.Using(has_await, map_expr f e, map_block f b)
     | S.For(e1, e2, e3, b) ->
       T.For(map_expr f e1, map_expr f e2, map_expr f e3, map_block f b)
     | S.Switch(e, cl) -> T.Switch(map_expr f e, List.map cl map_case)
@@ -173,6 +177,7 @@ struct
     T.param_pos = fp.S.param_pos;
     T.param_name = fp.S.param_name;
     T.param_expr = Option.map fp.S.param_expr (map_expr f);
+    T.param_callconv = fp.S.param_callconv;
   }
 
   and map_fun_variadicity f v =
@@ -240,6 +245,7 @@ struct
     T.m_fun_kind = m.S.m_fun_kind;
     T.m_user_attributes = List.map m.S.m_user_attributes (map_user_attribute f);
     T.m_ret = m.S.m_ret;
+    T.m_ret_by_ref = m.S.m_ret_by_ref;
   }
 
   and map_typedef f td = {

@@ -20,6 +20,7 @@
 #include <limits>
 #include <utility>
 
+#include "hphp/util/bitops.h"
 #include "hphp/util/compilation-flags.h"
 
 namespace HPHP {
@@ -32,10 +33,6 @@ static_assert(
 );
 
 ///////////////////////////////////////////////////////////////////////////////
-
-inline SparseHeap::~SparseHeap() {
-  reset();
-}
 
 inline bool SparseHeap::empty() const {
   return m_slabs.empty() && m_bigs.empty();
@@ -144,39 +141,6 @@ inline void MemoryManager::FreeList::push(void* val) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-inline size_t MemoryManager::estimateCap(size_t requested) {
-  return requested <= kMaxSmallSize ? smallSizeClass(requested)
-                                    : requested;
-}
-
-inline size_t MemoryManager::bsrq(size_t x) {
-#if defined(__x86_64__)
-  size_t ret;
-  __asm__ ("bsrq %1, %0"
-           : "=r"(ret) // Outputs.
-           : "r"(x)    // Inputs.
-           );
-  return ret;
-#elif defined(__powerpc64__)
-  size_t ret;
-  __asm__ ("cntlzd %0, %1"
-           : "=r"(ret) // Outputs.
-           : "r"(x)    // Inputs.
-           );
-  return 63 - ret;
-#elif defined(__aarch64__)
-  size_t ret;
-  __asm__ ("clz %x0, %x1"
-           : "=r"(ret) // Outputs.
-           : "r"(x)    // Inputs.
-           );
-  return 63 - ret;
-#else
-  // Equivalent (but incompletely strength-reduced by gcc):
-  return 63 - __builtin_clzl(x);
-#endif
-}
-
 inline size_t MemoryManager::computeSize2Index(size_t size) {
   assert(size > 1);
   assert(size <= kMaxSizeClass);
@@ -196,7 +160,7 @@ inline size_t MemoryManager::computeSize2Index(size_t size) {
   //   (1 << kLgSizeClassesPerDoubling + mantissa - 1)
   // This lets us skip taking the leading 1 off of the mantissa, and skip
   // adding 1 to the exponent.
-  size_t nBits = bsrq(--size);
+  size_t nBits = fls64(--size);
   if (UNLIKELY(nBits < kLgSizeClassesPerDoubling + kLgSmallSizeQuantum)) {
     // denormal sizes
     // UNLIKELY because these normally go through lookupSmallSize2Index
@@ -216,15 +180,6 @@ inline size_t MemoryManager::lookupSmallSize2Index(size_t size) {
   return index;
 }
 
-inline size_t MemoryManager::smallSize2Index(size_t size) {
-  assert(size > 0);
-  assert(size <= kMaxSmallSize);
-  if (LIKELY(size <= kMaxSmallSizeLookup)) {
-    return lookupSmallSize2Index(size);
-  }
-  return computeSize2Index(size);
-}
-
 inline size_t MemoryManager::size2Index(size_t size) {
   assert(size > 0);
   assert(size <= kMaxSizeClass);
@@ -238,17 +193,17 @@ inline size_t MemoryManager::sizeIndex2Size(size_t index) {
   return kSizeIndex2Size[index];
 }
 
-inline size_t MemoryManager::smallSizeClass(size_t size) {
+inline size_t MemoryManager::sizeClass(size_t size) {
   assert(size > 1);
-  assert(size <= kMaxSmallSize);
+  assert(size <= kMaxSizeClass);
   // Round up to the nearest kLgSizeClassesPerDoubling + 1 significant bits,
   // or to the nearest kLgSmallSizeQuantum, whichever is greater.
-  ssize_t nInsignificantBits = bsrq(--size) - kLgSizeClassesPerDoubling;
+  ssize_t nInsignificantBits = fls64(--size) - kLgSizeClassesPerDoubling;
   size_t roundTo = (nInsignificantBits < ssize_t(kLgSmallSizeQuantum))
     ? kLgSmallSizeQuantum : nInsignificantBits;
   size_t ret = ((size >> roundTo) + 1) << roundTo;
   assert(ret >= kSmallSizeAlign);
-  assert(ret <= kMaxSmallSize);
+  assert(ret <= kMaxSizeClass);
   return ret;
 }
 
@@ -271,7 +226,7 @@ inline void* MemoryManager::mallocSmallIndex(size_t index) {
 inline void* MemoryManager::mallocSmallSize(size_t bytes) {
   assert(bytes > 0);
   assert(bytes <= kMaxSmallSize);
-  return mallocSmallIndex(smallSize2Index(bytes));
+  return mallocSmallIndex(size2Index(bytes));
 }
 
 inline void MemoryManager::freeSmallIndex(void* ptr, size_t index) {
@@ -290,7 +245,7 @@ inline void MemoryManager::freeSmallIndex(void* ptr, size_t index) {
 }
 
 inline void MemoryManager::freeSmallSize(void* ptr, size_t bytes) {
-  freeSmallIndex(ptr, smallSize2Index(bytes));
+  freeSmallIndex(ptr, size2Index(bytes));
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -360,7 +315,7 @@ inline bool MemoryManager::startStatsInterval() {
   // For the reasons stated below in refreshStatsImpl, usage can potentially be
   // negative. Make sure that doesn't occur here.
   m_stats.peakIntervalUsage = std::max<int64_t>(0, stats.usage());
-  m_stats.peakIntervalCap = m_stats.capacity;
+  m_stats.peakIntervalCap = m_stats.capacity();
   assert(m_stats.peakIntervalCap >= 0);
   m_statsIntervalActive = true;
   return ret;

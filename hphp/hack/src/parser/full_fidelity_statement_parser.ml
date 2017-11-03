@@ -7,25 +7,52 @@
  * of patent rights can be found in the PATENTS file in the same directory.
  *
  *)
-
-module Token = Full_fidelity_minimal_token
+module WithSyntax(Syntax: Syntax_sig.Syntax_S) = struct
+module Token = Syntax.Token
 module SyntaxKind = Full_fidelity_syntax_kind
 module TokenKind = Full_fidelity_token_kind
 module SourceText = Full_fidelity_source_text
 module SyntaxError = Full_fidelity_syntax_error
-module SimpleParser = Full_fidelity_simple_parser.WithLexer(Full_fidelity_lexer)
+module SimpleParserSyntax =
+  Full_fidelity_simple_parser.WithSyntax(Syntax)
+module SimpleParser = SimpleParserSyntax.WithLexer(
+  Full_fidelity_lexer.WithToken(Syntax.Token))
+
+module ParserHelperSyntax = Full_fidelity_parser_helpers.WithSyntax(Syntax)
+module ParserHelper = ParserHelperSyntax
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+
+module type ExpressionParser_S = Full_fidelity_expression_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .ExpressionParser_S
+
+module type DeclarationParser_S = Full_fidelity_declaration_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .DeclarationParser_S
+
+module type TypeParser_S = Full_fidelity_type_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .TypeParser_S
+
+module type StatementParser_S = Full_fidelity_statement_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .StatementParser_S
 
 open TokenKind
-open Full_fidelity_minimal_syntax
+open Syntax
 
 module WithExpressionAndDeclAndTypeParser
-  (ExpressionParser : Full_fidelity_expression_parser_type.ExpressionParserType)
-  (DeclParser : Full_fidelity_declaration_parser_type.DeclarationParserType)
-  (TypeParser : Full_fidelity_type_parser_type.TypeParserType) :
-  Full_fidelity_statement_parser_type.StatementParserType = struct
+  (ExpressionParser : ExpressionParser_S)
+  (DeclParser : DeclarationParser_S)
+  (TypeParser : TypeParser_S) :
+  StatementParser_S = struct
 
   include SimpleParser
-  include Full_fidelity_parser_helpers.WithParser(SimpleParser)
+  include ParserHelper.WithParser(SimpleParser)
 
   let rec parse_statement parser =
     match peek_token_kind parser with
@@ -168,10 +195,10 @@ module WithExpressionAndDeclAndTypeParser
     use_decl_parser f parser
 
   and use_decl_parser
-      (f : DeclParser.t -> DeclParser.t * Full_fidelity_minimal_syntax.t)
+      (f : DeclParser.t -> DeclParser.t * Syntax.t)
       parser =
-    let decl_parser = DeclParser.make parser.lexer
-      parser.errors parser.context in
+    let decl_parser = DeclParser.make
+      parser.env parser.lexer parser.errors parser.context in
     let decl_parser, node = f decl_parser in
     let lexer = DeclParser.lexer decl_parser in
     let errors = DeclParser.errors decl_parser in
@@ -545,7 +572,8 @@ module WithExpressionAndDeclAndTypeParser
           parser, make_missing ()
         | _ ->
           let type_parser =
-            TypeParser.make parser.lexer parser.errors parser.context
+            TypeParser.make
+            parser.env parser.lexer parser.errors parser.context
           in
           let (type_parser, node) =
             TypeParser.parse_type_specifier type_parser
@@ -832,8 +860,8 @@ module WithExpressionAndDeclAndTypeParser
     with_expression_parser parser ExpressionParser.parse_simple_variable
 
   and with_expression_parser parser f =
-    let expression_parser = ExpressionParser.make parser.lexer
-      parser.errors parser.context in
+    let expression_parser = ExpressionParser.make
+      parser.env parser.lexer parser.errors parser.context in
     let (expression_parser, node) = f expression_parser in
     let lexer = ExpressionParser.lexer expression_parser in
     let errors = ExpressionParser.errors expression_parser in
@@ -841,3 +869,4 @@ module WithExpressionAndDeclAndTypeParser
     (parser, node)
 
 end
+end (* WithSyntax *)

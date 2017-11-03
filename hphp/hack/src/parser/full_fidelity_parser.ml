@@ -8,48 +8,95 @@
  *
  *)
 
-module Token = Full_fidelity_minimal_token
-module Syntax = Full_fidelity_minimal_syntax
-module SyntaxKind = Full_fidelity_syntax_kind
-module TokenKind = Full_fidelity_token_kind
-module SourceText = Full_fidelity_source_text
+module Env = Full_fidelity_parser_env
+
+
+[@@@ocaml.warning "-60"] (* https://caml.inria.fr/mantis/view.php?id=7522 *)
+module WithSyntax(Syntax : Syntax_sig.Syntax_S)
+: sig
+  type t
+  val make : Env.t -> Full_fidelity_source_text.t -> t
+  val errors : t -> Full_fidelity_syntax_error.t list
+  val env : t -> Env.t
+  val parse_script : t -> t * Syntax.t
+end
+ = struct
+
+module Lexer = Full_fidelity_lexer.WithToken(Syntax.Token)
 module SyntaxError = Full_fidelity_syntax_error
-module Lexer = Full_fidelity_lexer
-module Operator = Full_fidelity_operator
-module Context = Full_fidelity_parser_context
-module rec ExpressionParser :
-  Full_fidelity_expression_parser_type.ExpressionParserType =
-  Full_fidelity_expression_parser.WithStatementAndDeclAndTypeParser
+module Context =
+  Full_fidelity_parser_context.WithToken(Syntax.Token)
+
+module type ExpressionParser_S = Full_fidelity_expression_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .ExpressionParser_S
+
+module ExpressionParserSyntax =
+  Full_fidelity_expression_parser.WithSyntax(Syntax)
+
+module type StatementParser_S = Full_fidelity_statement_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .StatementParser_S
+
+module StatementParserSyntax =
+  Full_fidelity_statement_parser.WithSyntax(Syntax)
+
+module type DeclarationParser_S = Full_fidelity_declaration_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .DeclarationParser_S
+
+module DeclarationParserSyntax =
+  Full_fidelity_declaration_parser.WithSyntax(Syntax)
+
+module type TypeParser_S = Full_fidelity_type_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .TypeParser_S
+
+module TypeParserSyntax =
+  Full_fidelity_type_parser.WithSyntax(Syntax)
+
+module rec ExpressionParser : ExpressionParser_S =
+  ExpressionParserSyntax.WithStatementAndDeclAndTypeParser
     (StatementParser) (DeclParser) (TypeParser)
-and StatementParser :
-  Full_fidelity_statement_parser_type.StatementParserType =
-  Full_fidelity_statement_parser.WithExpressionAndDeclAndTypeParser
+and StatementParser : StatementParser_S =
+  StatementParserSyntax.WithExpressionAndDeclAndTypeParser
     (ExpressionParser) (DeclParser) (TypeParser)
-and DeclParser :
-  Full_fidelity_declaration_parser_type.DeclarationParserType =
-  Full_fidelity_declaration_parser.WithExpressionAndStatementAndTypeParser
+and DeclParser : DeclarationParser_S =
+  DeclarationParserSyntax.WithExpressionAndStatementAndTypeParser
     (ExpressionParser) (StatementParser) (TypeParser)
-and TypeParser :
-  Full_fidelity_type_parser_type.TypeParserType =
-  Full_fidelity_type_parser.WithExpressionParser(ExpressionParser)
+and TypeParser : TypeParser_S =
+  TypeParserSyntax.WithExpressionParser(ExpressionParser)
 
 type t = {
   lexer : Lexer.t;
   errors : SyntaxError.t list;
-  context: Context.t
+  context: Context.t;
+  env: Env.t;
 }
 
-let make text =
-  { lexer = Lexer.make text; errors = []; context = Context.empty }
+let make env text =
+  { lexer = Lexer.make text
+  ; errors = []
+  ; context = Context.empty
+  ; env
+  }
 
 let errors parser =
   parser.errors @ (Lexer.errors parser.lexer)
 
+let env parser = parser.env
+
 let parse_script parser =
-  let decl_parser = DeclParser.make parser.lexer
-    parser.errors parser.context in
+  let decl_parser = DeclParser.make parser.env
+    parser.lexer parser.errors parser.context in
   let (decl_parser, node) = DeclParser.parse_script decl_parser in
   let lexer = DeclParser.lexer decl_parser in
   let errors = DeclParser.errors decl_parser in
   let parser = { parser with lexer; errors } in
   (parser, node)
+
+end (* WithSyntax *)

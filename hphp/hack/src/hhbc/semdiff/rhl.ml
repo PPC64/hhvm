@@ -15,7 +15,7 @@ equalities between local variables on the two sides, and there's no proper
 fixed point iteration at all. Still, it should cope with different labels,
 different uses of locals and some simple variations in control-flow
 *)
-open Core
+open Hh_core
 open Hhbc_ast
 open Local
 open Hhbc_destruct
@@ -42,6 +42,9 @@ let adata_checked = ref StringStringSet.empty
 
 let typedefs_to_check = ref IntIntSet.empty
 let typedefs_checked = ref IntIntSet.empty
+
+(* If `false`, then `UnsetL` instructions cannot be reordered. *)
+let lax_unset = ref false
 
 (* An individual prop is an equation between local variables. To start with,
   this means that they are both defined and equal or that they are both
@@ -234,16 +237,11 @@ let labasnlisttostring l = String.concat "" (List.map ~f:labasntostring l)
 let labasnsmaptostring asnmap =
   String.concat "" (List.map ~f:labasnstostring (PcpMap.bindings asnmap))
 
-(* Mark v1 and v2 as being possibly set. *)
-let addunseteq_asn v1 v2 (props,vs,vs') =
-  let stripped = PropSet.filter (fun (x1,x2) -> x1 <> v1 && x2 <> v2) props in
-    (stripped, VarSet.add v1 vs, VarSet.add v2 vs')
-
 (* Add equality between v1 and v2 to an assertion, removing any existing
-  relation between them. Mark v1 and v2 as being possibly set. *)
-let addeq_asn v1 v2 asn =
-  let (props, vs, vs') = addunseteq_asn v1 v2 asn in
-  (PropSet.add (v1,v2) props, vs, vs')
+  relation involving them. Mark v1 and v2 as being possibly set. *)
+let addeq_asn v1 v2 (props, vs, vs') =
+  let stripped = PropSet.filter (fun (x1,x2) -> x1 <> v1 && x2 <> v2) props in
+  (PropSet.add (v1,v2) stripped, VarSet.add v1 vs, VarSet.add v2 vs')
 
 (* Simple-minded entailment between assertions.
   In general, asn2 entails asn1 iff (s,s') \in asn2 implies (s,s') \in asn1 for
@@ -337,11 +335,12 @@ let writes asn l l' =
 (* We could be a bit more refined in tracking set/unset status of named locals
    but it might not make much difference, so leaving it out for now
 *)
-let writesunset asn l l' =
+let writesunset ((props,vs,vs') as asn) l l' =
   match l, l' with
   | Named s, Named s' -> if s=s' then Some asn else None
   | Unnamed _, Unnamed _ ->
-    Some (addunseteq_asn l l' asn)
+    let stripped = PropSet.filter (fun (x,x') -> x <> l && x' <> l') props in
+      Some (stripped, VarSet.remove l vs, VarSet.remove l' vs')
   | Named _, _ | Unnamed _, _ -> None
 
 let readswrites asn l l' =
@@ -739,275 +738,296 @@ let equiv prog prog' startlabelpairs =
   let rec check pc pc' ((props,vs,vs') as asn) assumed todo =
     let try_specials () = specials pc pc' asn assumed todo in
 
-    (* This could be more one-sided, but can't allow one side to leave the
-      frame and the other to go to a handler. Still, seems no real reason to
-      require the same kind of handler on both sides.
-    *)
+    let exceptional_pc pc exnmap =
+      match IMap.get (ip_of_pc pc) exnmap with
+      | None
+      | Some [] -> None
+      | Some (Fault_handler h :: rest) ->
+          Some (Fault_handler h :: (rest @ hs_of_pc pc), h)
+      | Some (Catch_handler h :: _rest) ->
+          Some ([Catch_handler h], h) in
+
     let exceptional_todo () =
-      match IMap.get (ip_of_pc pc) exnmap, IMap.get (ip_of_pc pc') exnmap' with
-      | None, None -> Some todo (* should the imap be total? *)
-      | Some [], Some [] -> Some todo (* no local handlers, so nothing to do *)
-      | Some (Fault_handler h :: rest), Some (Fault_handler h' :: rest') ->
-        let epc = (Fault_handler h :: (rest @ hs_of_pc pc), h) in
-        let epc' = (Fault_handler h' :: (rest' @ hs_of_pc pc'), h') in
-        Some (add_todo (epc,epc') asn todo)
-      | Some (Catch_handler h :: _rest), Some (Catch_handler h' :: _rest') ->
-        (* TODO: I *think* dropping everything except the catch handler
-          at this point is right but am not entirely sure - hs_of_pc pc is just
-          gone.
-        *)
-        let epc = ([Catch_handler h], h) in
-        let epc' = ([Catch_handler h'], h') in
-        Some (add_todo (epc,epc') asn todo)
-      | _,_ ->
-        (* Here we've got a mismatch between the handlers on the two sides so we
-          return None so that our caller can decide what to do. *)
-        None
-      in
+      match exceptional_pc pc exnmap, exceptional_pc pc' exnmap' with
+      | None, None -> todo
+      | Some epc, Some epc' -> add_todo (epc,epc') asn todo
+      | Some epc, None -> add_todo (epc,([],-1)) asn todo
+      | None, Some epc' -> add_todo (([],-1), epc') asn todo in
 
     (* Check the next instruction; no change to the assertion. *)
     let nextins () =
-      match exceptional_todo () with
-      | Some newtodo ->
+      let newtodo = exceptional_todo () in
         check (succ pc) (succ pc') asn
           (add_assumption (pc,pc') asn assumed) newtodo
-      | None -> try_specials ()
-      in
+    in
 
     (* Check the next instruction; the assertion has changed. *)
     let nextinsnewasn newasn =
-      match exceptional_todo () with
-      | Some newtodo ->
+      let newtodo = exceptional_todo () in
         check (succ pc) (succ pc') newasn
           (add_assumption (pc,pc') asn assumed) newtodo
-      | None -> try_specials ()
     in
+
+    let rec one_side_left () =
+    if ip_of_pc pc <> -1
+    then begin match prog_array.(ip_of_pc pc) with
+    | IContFlow (Jmp lab)
+    | IContFlow (JmpNS lab) ->
+      check (hs_of_pc pc, LabelMap.find lab labelmap) pc' asn
+        (add_assumption (pc,pc') asn assumed) todo
+    | ITry _
+    | ILabel _
+    | IComment _ ->
+      check (succ pc) pc' asn (add_assumption (pc,pc') asn assumed) todo
+    | IContFlow Unwind ->
+      begin match hs_of_pc pc with
+        | [] -> begin
+          (* unwind not in handler! should be hard failure? *)
+          Log.debug (Tty.Normal Tty.Red) "left unwind not in handler";
+          try_specials ()
+          end
+        | (Fault_handler _h :: Fault_handler next :: hs) ->
+          check (Fault_handler next :: hs, next) pc' asn
+                (add_assumption (pc,pc') asn assumed) todo
+        | (Fault_handler _h :: Catch_handler next :: _hs) ->
+          check ([Catch_handler next] , next) pc' asn
+                (add_assumption (pc,pc') asn assumed) todo
+        | [Fault_handler _h] ->
+          check ([], -1) pc' asn
+                (add_assumption (pc,pc') asn assumed) todo
+        | _ -> try_specials ()
+      end
+    | IMutator (UnsetL l)
+      when (!lax_unset) || (not (VarSet.mem l vs)) ->
+      let newprops = PropSet.filter (fun (x1,_x2) -> x1 <> l) props in
+      let newasn = (newprops, VarSet.remove l vs, vs') in
+        check (succ pc) pc' newasn (add_assumption (pc,pc') asn assumed) todo
+    | _ -> one_side_right ()
+    end
+    else one_side_right ()
+
+    and one_side_right () =
+    if ip_of_pc pc' <> -1
+    then begin match prog_array'.(ip_of_pc pc') with
+    | IContFlow(Jmp lab')
+    | IContFlow(JmpNS lab') ->
+      check pc (hs_of_pc pc', LabelMap.find lab' labelmap') asn
+        (add_assumption (pc,pc') asn assumed) todo
+    | ITry _
+    | ILabel _
+    | IComment _ ->
+      check pc (succ pc') asn (add_assumption (pc,pc') asn assumed) todo
+    | IContFlow Unwind ->
+      begin match hs_of_pc pc' with
+        | [] -> begin
+          Log.debug (Tty.Normal Tty.Red) "right unwind not in handler";
+          try_specials ()
+          end
+        | (Fault_handler _h' :: Fault_handler next' :: hs') ->
+          check pc (Fault_handler next' :: hs', next') asn
+                (add_assumption (pc,pc') asn assumed) todo
+        | (Fault_handler _h' :: Catch_handler next' :: _hs') ->
+          check pc ([Catch_handler next'] , next') asn
+                (add_assumption (pc,pc') asn assumed) todo
+        | [Fault_handler _h'] ->
+          check pc ([],-1) asn
+                (add_assumption (pc,pc') asn assumed) todo
+        | _ -> try_specials ()
+      end
+    | IMutator (UnsetL l')
+      when (!lax_unset) || (not (VarSet.mem l' vs')) ->
+      let newprops = PropSet.filter (fun (_x1,x2) -> x2 <> l') props in
+      let newasn = (newprops, vs, VarSet.remove l' vs') in
+        check pc (succ pc') newasn (add_assumption (pc,pc') asn assumed) todo
+    | _ -> both_sides_now ()
+    end
+    else both_sides_now ()
+
+    and both_sides_now () =
+    if ip_of_pc pc = -1 && ip_of_pc pc' = -1
+    then donext assumed todo
+    else
+    if ip_of_pc pc = -1 || ip_of_pc pc' = -1
+    then Some (pc, pc', asn, assumed, todo)
+    else begin match prog_array.(ip_of_pc pc), prog_array'.(ip_of_pc pc') with
+    | IIterator (IterBreak (lab, it_list)),
+      IIterator (IterBreak (lab', it_list')) ->
+      if it_list = it_list'
+      then check (hs_of_pc pc, LabelMap.find lab labelmap)
+        (hs_of_pc pc', LabelMap.find lab' labelmap') asn
+        (add_assumption (pc,pc') asn assumed) todo
+      else try_specials ()
+    | IContFlow (SSwitch _), _
+    | _, IContFlow (SSwitch _) ->
+      failwith "SSwitch not implemented"
+
+    | IContFlow ins, IContFlow ins' ->
+      begin match ins, ins' with
+      | JmpZ lab, JmpZ lab'
+      | JmpNZ lab, JmpNZ lab' ->
+        check (succ pc) (succ pc') asn
+          (add_assumption (pc,pc') asn assumed)
+          (add_todo ((hs_of_pc pc, LabelMap.find lab labelmap),
+            (hs_of_pc pc', LabelMap.find lab' labelmap')) asn todo)
+      | RetC, RetC
+      | RetV, RetV ->
+        donext assumed todo
+
+      (* One-sided treatment of throw. Note that we need the instructions to be the
+         same, but we allow the handler stacks to vary now *)
+      | Throw, Throw ->
+        let exceptional_pc pc exnmap =
+        begin match IMap.get (ip_of_pc pc) exnmap with
+          | None
+          | Some [] -> None
+          | Some (Fault_handler h as handler :: rest) ->
+             let newstack = handler :: (rest @ hs_of_pc pc) in
+             Some (newstack, h)
+          | Some (Catch_handler h as handler :: _rest) ->
+             Some ([handler], h)
+        end in
+        begin match exceptional_pc pc exnmap, exceptional_pc pc' exnmap' with
+        | None, None ->  donext assumed todo (* both leave *)
+        | Some epc, Some epc' ->
+           check epc epc' asn (add_assumption (pc,pc') asn assumed) todo
+        | None, Some epc' ->
+           check ([], -1) epc' asn (add_assumption (pc,pc') asn assumed) todo
+        | Some epc, None ->
+           check epc ([], -1) asn (add_assumption (pc,pc') asn assumed) todo
+        end
+
+      | Switch (kind, offset, labs), Switch (kind', offset', labs')
+        when kind=kind' && offset=offset' ->
+        begin match List.zip labs labs' with
+        | None -> try_specials () (* feebly, give up if different lengths *)
+        | Some lab_pairs ->
+          let hs = hs_of_pc pc in
+          let hs' = hs_of_pc pc' in
+          let newtodo = List.fold_right
+            ~f:(fun (lab,lab') accum ->
+              add_todo (
+                (hs, LabelMap.find lab labelmap),
+                (hs', LabelMap.find lab' labelmap')
+              ) asn accum)
+            ~init:todo lab_pairs in
+          donext (add_assumption (pc,pc') asn assumed) newtodo
+        end
+      | _, _ -> try_specials ()
+      end
+
+    (* The next block has no interesting control flow or local variable
+      effects. *)
+    | IBasic ins, IBasic ins' ->
+      begin match check_instruct_basic ins ins' with
+      | None -> try_specials ()
+      | Some () -> nextins ()
+      end
+    | ILitConst ins, ILitConst ins' ->
+      begin match check_instruct_lit_const asn ins ins' with
+      | None -> try_specials ()
+      | Some newasn -> nextinsnewasn newasn
+      end
+    (* special cases for exiting the whole program *)
+    | IOp ins, IOp ins' ->
+      begin match check_instruct_operator ins ins' with
+      | None -> try_specials ()
+      | Some true -> donext assumed todo (* termination *)
+      | Some false -> nextins ()
+      end
+    | ISpecialFlow ins, ISpecialFlow ins' ->
+      begin match check_instruct_special_flow ins ins' with
+      | None -> try_specials ()
+      | Some () -> nextins ()
+      end
+    | IAsync ins, IAsync ins' ->
+      begin match check_instruct_async_functions ins ins' with
+      | None -> try_specials ()
+      | Some () -> nextins ()
+      end
+    | IGenerator ins, IGenerator ins' ->
+      begin match check_instruct_gen_creation_execution ins ins' with
+      | None -> try_specials ()
+      | Some () -> nextins ()
+      end
+    | IIncludeEvalDefine ins, IIncludeEvalDefine ins' ->
+      begin match check_instruct_eval_defined ins ins' with
+      | None -> try_specials ()
+      | Some () -> nextins ()
+      end
+    | ICall ins, ICall ins' ->
+      begin match check_instruct_call asn ins ins' with
+      | None -> try_specials()
+      | Some newasn -> nextinsnewasn newasn
+      end
+    | IGet ins, IGet ins' ->
+      begin match check_instruct_get asn ins ins' with
+      | None -> try_specials ()
+      | Some newasn -> nextinsnewasn newasn
+      end
+    | IIsset ins, IIsset ins' ->
+      begin match check_instruct_isset asn ins ins' with
+      | None -> try_specials ()
+      | Some newasn -> nextinsnewasn newasn
+      end
+    | IMutator ins, IMutator ins' ->
+      begin match check_instruct_mutator asn ins ins' with
+      | None -> try_specials ()
+      | Some newasn -> nextinsnewasn newasn
+      end
+    | IBase ins, IBase ins' ->
+      begin match check_instruct_base asn ins ins' with
+      | None -> try_specials ()
+      | Some newasn -> nextinsnewasn newasn
+      end
+    | IFinal ins, IFinal ins' ->
+      begin match check_instruct_final asn ins ins' with
+      | None -> try_specials ()
+      | Some newasn -> nextinsnewasn newasn
+      end
+    | IMisc ins, IMisc ins' ->
+      begin match check_instruct_misc asn ins ins' with
+      | None -> try_specials ()
+      | Some newasn -> nextinsnewasn newasn
+      end
+    (* Iterator instructions have multiple exit points, so have to add to
+      todos as well as looking at next instruction.
+      TODO: exceptional exits from here *)
+    | IIterator ins, IIterator ins' ->
+      begin match check_instruct_iterator asn ins ins' with
+      | (None, _) -> try_specials ()
+      | (Some newasn, newtodos) ->
+        let getExHandlers pc l lm = (hs_of_pc pc, LabelMap.find l lm) in
+        let striptodos = List.map newtodos (fun ((l,l'),asn) ->
+          let ex = getExHandlers pc l labelmap in
+          let ex' = getExHandlers pc' l' labelmap' in
+          ((ex, ex'), asn)
+        ) in
+        (* Add the corresponding exception handler for each todo
+          generated: *)
+        let check_todos = List.fold_left striptodos ~init:todo
+          ~f:(fun td ((pc,pc'),asn) -> add_todo (pc,pc') asn td) in
+        check (succ pc) (succ pc') newasn
+          (add_assumption (pc,pc') asn assumed)
+          check_todos
+      end
+    | _, _ -> try_specials ()
+    end in
 
     if List.length (hs_of_pc pc) > 10 (* arbitrary limit *)
     then begin
       Log.error ~level:0 (Tty.Normal Tty.Red) ("runaway: " ^ string_of_pc pc);
       (* COMPLETENESS: fail, dump state *)
       Some (pc, pc', asn, assumed, todo)
-    end else
+    end
+    else
       let previous_assumptions = lookup_assumption (pc,pc') assumed in
       if AsnSet.exists (fun assasn -> entails_asns asn assasn)
         previous_assumptions
       (* that's a clumsy attempt at entailment asn => \bigcup prev_asses *)
       then donext assumed todo
       else if AsnSet.cardinal previous_assumptions > 3 (* arbitrary bound *)
-      then try_specials ()
-      else
-        let i = prog_array.(ip_of_pc pc) in
-        let i' = prog_array'.(ip_of_pc pc') in
-        match i, i' with
-        (* one-sided stuff for jumps, labels, comments *)
-        | IContFlow(Jmp lab), _
-        | IContFlow(JmpNS lab), _ ->
-          check (hs_of_pc pc, LabelMap.find lab labelmap) pc' asn
-            (add_assumption (pc,pc') asn assumed) todo
-        | ITry _, _
-        | ILabel _, _
-        | IComment _, _ ->
-          check (succ pc) pc' asn (add_assumption (pc,pc') asn assumed) todo
-
-        | _, IContFlow(Jmp lab')
-        | _, IContFlow(JmpNS lab') ->
-          check pc (hs_of_pc pc', LabelMap.find lab' labelmap') asn
-            (add_assumption (pc,pc') asn assumed) todo
-        | _, ITry _
-        | _, ILabel _
-        | _, IComment _ ->
-          check pc (succ pc') asn (add_assumption (pc,pc') asn assumed) todo
-        (* For IterBreak, the lists have to be the same as we're not tracking
-          correspondences between iterators at the moment, and need the same
-          freeing behaviour so exceptions match up if we try to use them later.
-        *)
-        | IIterator (IterBreak (lab, it_list)),
-          IIterator (IterBreak (lab', it_list')) ->
-          if it_list = it_list'
-          then check (hs_of_pc pc, LabelMap.find lab labelmap)
-            (hs_of_pc pc', LabelMap.find lab' labelmap') asn
-            (add_assumption (pc,pc') asn assumed) todo
-          else try_specials ()
-        | IContFlow (SSwitch _), _
-        | _, IContFlow (SSwitch _) ->
-          failwith "SSwitch not implemented"
-        | IContFlow ins, IContFlow ins' ->
-          begin match ins, ins' with
-          | JmpZ lab, JmpZ lab'
-          | JmpNZ lab, JmpNZ lab' ->
-            check (succ pc) (succ pc') asn
-              (add_assumption (pc,pc') asn assumed)
-              (add_todo ((hs_of_pc pc, LabelMap.find lab labelmap),
-                (hs_of_pc pc', LabelMap.find lab' labelmap')) asn todo)
-          | RetC, RetC
-          | RetV, RetV ->
-            donext assumed todo
-          | Unwind, Unwind ->
-            (* COMPLETENESS: this should be one side at a time, except it's a
-              bit messy to deal with the case where we leave this frame
-              altogether, in which case the two should agree, so I'm only
-              dealing with the matching case. *)
-            begin match hs_of_pc pc, hs_of_pc pc' with
-            | [],[] -> begin
-              (* unwind not in handler! should be hard failure? *)
-              Log.debug (Tty.Normal Tty.Red) "unwind not in handler";
-              try_specials ()
-              end
-            | [Fault_handler _h], [Fault_handler _h'] ->
-              donext assumed todo (* both jump out *)
-            | (Fault_handler _h :: Fault_handler next :: hs),
-              (Fault_handler _h' :: Fault_handler next' :: hs') ->
-              check (Fault_handler next :: hs, next)
-                (Fault_handler next' :: hs', next') asn
-                (add_assumption (pc,pc') asn assumed) todo
-            | (Fault_handler _h :: Catch_handler next :: _hs),
-              (Fault_handler _h' :: Catch_handler next' :: _hs') ->
-              check ([Catch_handler next] , next) ([Catch_handler next'], next')
-                asn (add_assumption (pc,pc') asn assumed) todo
-            | _, _ -> try_specials ()
-            end
-          | Throw, Throw ->
-            let exHandler pc exnmap = IMap.get (ip_of_pc pc) exnmap in
-            begin match exHandler pc exnmap, exHandler pc' exnmap' with
-            | None, None ->  donext assumed todo (* both leave *)
-            | Some [], Some [] -> donext assumed todo
-            | Some (Fault_handler h as handler :: rest),
-              Some (Fault_handler h' as handler' :: rest') ->
-              let newstack = handler :: (rest @ hs_of_pc pc) in
-              let newstack' = handler' :: (rest' @ hs_of_pc pc') in
-              check (newstack, h) (newstack', h') asn
-                (add_assumption (pc,pc') asn assumed) todo
-            | Some (Catch_handler h as handler :: _rest),
-              Some (Catch_handler h' as handler' :: _rest') ->
-              check ([handler],h) ([handler'], h') asn
-                (add_assumption (pc,pc') asn assumed) todo
-            | _,_ -> try_specials ()
-            end
-          | Switch (kind, offset, labs), Switch (kind', offset', labs')
-            when kind=kind' && offset=offset' ->
-            begin match List.zip labs labs' with
-            | None -> try_specials () (* feebly, give up if different lengths *)
-            | Some lab_pairs ->
-              let hs = hs_of_pc pc in
-              let hs' = hs_of_pc pc' in
-              let newtodo = List.fold_right
-                ~f:(fun (lab,lab') accum ->
-                  add_todo (
-                    (hs, LabelMap.find lab labelmap),
-                    (hs', LabelMap.find lab' labelmap')
-                  ) asn accum)
-                ~init:todo lab_pairs in
-              donext (add_assumption (pc,pc') asn assumed) newtodo
-            end
-          | _, _ -> try_specials ()
-          end
-
-        (* Special treatment for Unset instructions *)
-        | IMutator (UnsetL l), _ ->
-          let newprops = PropSet.filter (fun (x1,_x2) -> x1 <> l) props in
-          let newasn = (newprops, VarSet.remove l vs, vs') in
-          check (succ pc) pc' newasn (add_assumption (pc,pc') asn assumed) todo
-        | _, IMutator (UnsetL l') ->
-          let newprops = PropSet.filter (fun (_x1,x2) -> x2 <> l') props in
-          let newasn = (newprops, vs, VarSet.remove l' vs') in
-          check pc (succ pc') newasn (add_assumption (pc,pc') asn assumed) todo
-        (* The next block has no interesting control flow or local variable
-          effects. *)
-        | IBasic ins, IBasic ins' ->
-          begin match check_instruct_basic ins ins' with
-          | None -> try_specials ()
-          | Some () -> nextins ()
-          end
-        | ILitConst ins, ILitConst ins' ->
-          begin match check_instruct_lit_const asn ins ins' with
-          | None -> try_specials ()
-          | Some newasn -> nextinsnewasn newasn
-          end
-        (* special cases for exiting the whole program *)
-        | IOp ins, IOp ins' ->
-          begin match check_instruct_operator ins ins' with
-          | None -> try_specials ()
-          | Some true -> donext assumed todo (* termination *)
-          | Some false -> nextins ()
-          end
-        | ISpecialFlow ins, ISpecialFlow ins' ->
-          begin match check_instruct_special_flow ins ins' with
-          | None -> try_specials ()
-          | Some () -> nextins ()
-          end
-        | IAsync ins, IAsync ins' ->
-          begin match check_instruct_async_functions ins ins' with
-          | None -> try_specials ()
-          | Some () -> nextins ()
-          end
-        | IGenerator ins, IGenerator ins' ->
-          begin match check_instruct_gen_creation_execution ins ins' with
-          | None -> try_specials ()
-          | Some () -> nextins ()
-          end
-        | IIncludeEvalDefine ins, IIncludeEvalDefine ins' ->
-          begin match check_instruct_eval_defined ins ins' with
-          | None -> try_specials ()
-          | Some () -> nextins ()
-          end
-        | ICall ins, ICall ins' ->
-          begin match check_instruct_call asn ins ins' with
-          | None -> try_specials()
-          | Some newasn -> nextinsnewasn newasn
-          end
-        | IGet ins, IGet ins' ->
-          begin match check_instruct_get asn ins ins' with
-          | None -> try_specials ()
-          | Some newasn -> nextinsnewasn newasn
-          end
-        | IIsset ins, IIsset ins' ->
-          begin match check_instruct_isset asn ins ins' with
-          | None -> try_specials ()
-          | Some newasn -> nextinsnewasn newasn
-          end
-        | IMutator ins, IMutator ins' ->
-          begin match check_instruct_mutator asn ins ins' with
-          | None -> try_specials ()
-          | Some newasn -> nextinsnewasn newasn
-          end
-        | IBase ins, IBase ins' ->
-          begin match check_instruct_base asn ins ins' with
-          | None -> try_specials ()
-          | Some newasn -> nextinsnewasn newasn
-          end
-        | IFinal ins, IFinal ins' ->
-          begin match check_instruct_final asn ins ins' with
-          | None -> try_specials ()
-          | Some newasn -> nextinsnewasn newasn
-          end
-        | IMisc ins, IMisc ins' ->
-          begin match check_instruct_misc asn ins ins' with
-          | None -> try_specials ()
-          | Some newasn -> nextinsnewasn newasn
-          end
-        (* Iterator instructions have multiple exit points, so have to add to
-          todos as well as looking at next instruction.
-          TODO: exceptional exits from here *)
-        | IIterator ins, IIterator ins' ->
-          begin match check_instruct_iterator asn ins ins' with
-          | (None, _) -> try_specials ()
-          | (Some newasn, newtodos) ->
-            let getExHandlers pc l lm = (hs_of_pc pc, LabelMap.find l lm) in
-            let striptodos = List.map newtodos (fun ((l,l'),asn) ->
-              let ex = getExHandlers pc l labelmap in
-              let ex' = getExHandlers pc' l' labelmap' in
-              ((ex, ex'), asn)
-            ) in
-            (* Add the corresponding exception handler for each todo
-              generated: *)
-            let check_todos = List.fold_left striptodos ~init:todo
-              ~f:(fun td ((pc,pc'),asn) -> add_todo (pc,pc') asn td) in
-            check (succ pc) (succ pc') newasn
-              (add_assumption (pc,pc') asn assumed)
-              check_todos
-          end
-        | _, _ -> try_specials ()
+           then try_specials ()
+           else one_side_left ()
 
   and donext assumed todo =
     match todo with

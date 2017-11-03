@@ -342,6 +342,10 @@ class virtual ['self] map =
       | Private -> self#on_Private env
       | Public -> self#on_Public env
       | Protected -> self#on_Protected env
+    method on_Pinout env = Pinout
+    method on_param_kind env this =
+      match this with
+      | Pinout -> self#on_Pinout env
     method on_OG_nullthrows env = OG_nullthrows
     method on_OG_nullsafe env = OG_nullsafe
     method on_og_null_flavor env this =
@@ -412,7 +416,8 @@ class virtual ['self] map =
       let r4 = self#on_option self#on_expr env this.param_expr in
       let r5 = self#on_option self#on_kind env this.param_modifier in
 
-      let r6 =
+      let r6 = self#on_option self#on_param_kind env this.param_callconv in
+      let r7 =
         self#on_list self#on_user_attribute env
           this.param_user_attributes
       in
@@ -423,7 +428,8 @@ class virtual ['self] map =
         param_id = r3;
         param_expr = r4;
         param_modifier = r5;
-        param_user_attributes = r6
+        param_callconv = r6;
+        param_user_attributes = r7
       }
     method on_fun_ env this =
       let r0 = self#on_FileInfo_mode env this.f_mode in
@@ -614,6 +620,7 @@ class virtual ['self] map =
       | Def_inline c0 ->
         self#on_Def_inline env c0
       | Noop -> self#on_Noop env
+      | Using (c0, c1, c2) -> self#on_Using env c0 c1 c2
     method on_As_v env c0 =
       let r0 = self#on_expr env c0 in As_v r0
     method on_As_kv env c0 c1 =
@@ -675,10 +682,10 @@ class virtual ['self] map =
       let r1 = self#on_option self#on_expr env c1 in
       Array_get (r0, r1)
     method on_Class_get env c0 c1 =
-      let r0 = self#on_id env c0 in
+      let r0 = self#on_expr env c0 in
       let r1 = self#on_expr env c1 in Class_get (r0, r1)
     method on_Class_const env c0 c1 =
-      let r0 = self#on_id env c0 in
+      let r0 = self#on_expr env c0 in
       let r1 = self#on_pstring env c1 in Class_const (r0, r1)
     method on_Call env c0 c1 c2 c3 =
       let r0 = self#on_expr env c0 in
@@ -730,6 +737,9 @@ class virtual ['self] map =
     method on_InstanceOf env c0 c1 =
       let r0 = self#on_expr env c0 in
       let r1 = self#on_expr env c1 in InstanceOf (r0, r1)
+    method on_Is env c0 c1 =
+      let r0 = self#on_expr env c0 in
+      let r1 = self#on_hint env c1 in Is (r0, r1)
     method on_BracedExpr env c0 =
       let r0 = self#on_expr env c0 in BracedExpr r0
     method on_New env c0 c1 c2 =
@@ -773,6 +783,10 @@ class virtual ['self] map =
       let r0 = self#on_pstring env c0 in
       let r1 = self#on_option self#on_expr env c1 in
       Markup (r0, r1)
+    method on_Callconv env c0 c1 =
+      let r0 = self#on_param_kind env c0 in
+      let r1 = self#on_expr env c1 in
+      Callconv (r0, r1)
     method on_expr_ env this =
       match this with
       | Array c0 -> self#on_Array env c0
@@ -812,6 +826,7 @@ class virtual ['self] map =
       | NullCoalesce (c0, c1) -> self#on_NullCoalesce env c0 c1
       | BracedExpr c0 -> self#on_BracedExpr env c0
       | InstanceOf (c0, c1) -> self#on_InstanceOf env c0 c1
+      | Is (c0, c1) -> self#on_Is env c0 c1
       | New (c0, c1, c2) -> self#on_New env c0 c1 c2
       | Efun (c0, c1) -> self#on_Efun env c0 c1
       | Lfun c0 -> self#on_Lfun env c0
@@ -819,6 +834,7 @@ class virtual ['self] map =
       | Unsafeexpr c0 -> self#on_Unsafeexpr env c0
       | Import (c0, c1) -> self#on_Import env c0 c1
       | Omitted         -> self#on_Omitted env
+      | Callconv (c0, c1) -> self#on_Callconv env c0 c1
     method on_Include env = Include
     method on_Require env = Require
     method on_IncludeOnce env = IncludeOnce
@@ -901,6 +917,10 @@ class virtual ['self] map =
     method on_Updecr env = Updecr
     method on_Uref env = Uref
     method on_Usilence env = Usilence
+    method on_Using env c0 c1 c2 =
+      let r0 = self#on_expr env c1 in
+      let r1 = self#on_block env c2 in
+      Using (c0, r0, r1)
     method on_uop env this =
       match this with
       | Utild -> self#on_Utild env

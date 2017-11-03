@@ -8,7 +8,7 @@
  *
 *)
 
-open Core
+open Hh_core
 open Emit_expression
 
 module SU = Hhbc_string_utils
@@ -42,17 +42,34 @@ let xhp_attribute_declaration_method name kind body =
 
 let emit_xhp_attribute_array ~ns xal =
   (* Taken from hphp/parser/hphp.y *)
-  let hint_to_num = function
-    | "HH\\string" -> 1
-    | "HH\\bool" -> 2
-    | "HH\\int" -> 3
-    | "array" -> 4
-    | "var" | "HH\\mixed" -> 6
-    | "enum" -> 7
-    | "HH\\float" -> 8
-    | "callable" -> 9
-    (* Regular class names is type 5 *)
-    | _ -> 5
+  let hint_to_num id =
+    if Emit_env.is_hh_syntax_enabled ()
+    then
+      begin match id with
+      | "HH\\string" -> 1
+      | "HH\\bool" -> 2
+      | "HH\\int" -> 3
+      | "array" -> 4
+      | "var" | "HH\\mixed" -> 6
+      | "enum" -> 7
+      | "HH\\float" -> 8
+      | "callable" -> 9
+      (* Regular class names is type 5 *)
+      | _ -> 5
+      end
+    else
+      begin match id with
+      | "string" -> 1
+      | "bool" | "boolean" -> 2
+      | "int" | "integer" -> 3
+      | "array" -> 4
+      | "var" | "mixed" -> 6
+      | "enum" -> 7
+      | "float" | "real" | "double" -> 8
+      | "callable" -> 9
+      (* Regular class names is type 5 *)
+      | _ -> 5
+      end
   in
   let get_enum_attributes = function
     | None ->
@@ -110,7 +127,7 @@ let emit_xhp_use_attributes xual =
     | _, A.Happly ((_, s), []) ->
       let s = SU.Xhp.mangle @@ Utils.strip_ns s in
       let e =
-        p, A.Class_const ((p, s), (p, "__xhpAttributeDeclaration"))
+        p, A.Class_const ((p, A.Id (p, s)), (p, "__xhpAttributeDeclaration"))
       in
       p, A.Call (e, [], [], [])
     | _ -> failwith "Xhp use attribute - unexpected attribute"
@@ -132,7 +149,7 @@ let from_attribute_declaration ~ns ast_class xal xual =
   let cond = p, A.Binop (A.EQeqeq, var_dollar_, neg_one) in
   let arg1 =
     p, A.Call (
-      (p, A.Class_const ((p, "parent"), (p, "__xhpAttributeDeclaration"))),
+      (p, A.Class_const ((p, A.Id (p, "parent")), (p, "__xhpAttributeDeclaration"))),
       [],
       [],
       [])

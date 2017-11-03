@@ -8,32 +8,63 @@
  *
  *)
 
-module Token = Full_fidelity_minimal_token
+module WithSyntax(Syntax : Syntax_sig.Syntax_S) = struct
+
+module Token = Syntax.Token
 module SyntaxKind = Full_fidelity_syntax_kind
 module TokenKind = Full_fidelity_token_kind
 module SourceText = Full_fidelity_source_text
 module SyntaxError = Full_fidelity_syntax_error
 module Operator = Full_fidelity_operator
-module PrecedenceParser = Full_fidelity_precedence_parser
+module Lexer = Full_fidelity_lexer.WithToken(Syntax.Token)
+module Env = Full_fidelity_parser_env
+module PrecedenceSyntax = Full_fidelity_precedence_parser
+  .WithSyntax(Syntax)
+module PrecedenceParser = PrecedenceSyntax
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
 
-open TokenKind
-open Full_fidelity_minimal_syntax
+module type StatementParser_S = Full_fidelity_statement_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .StatementParser_S
+
+module type DeclarationParser_S = Full_fidelity_declaration_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .DeclarationParser_S
+
+module type TypeParser_S = Full_fidelity_type_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .TypeParser_S
+
+module type ExpressionParser_S = Full_fidelity_expression_parser_type
+  .WithSyntax(Syntax)
+  .WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
+  .ExpressionParser_S
+
+module ParserHelperSyntax = Full_fidelity_parser_helpers.WithSyntax(Syntax)
+module ParserHelper =
+  ParserHelperSyntax.WithLexer(Full_fidelity_lexer.WithToken(Syntax.Token))
 
 module WithStatementAndDeclAndTypeParser
-  (StatementParser : Full_fidelity_statement_parser_type.StatementParserType)
-  (DeclParser : Full_fidelity_declaration_parser_type.DeclarationParserType)
-  (TypeParser : Full_fidelity_type_parser_type.TypeParserType) :
-  Full_fidelity_expression_parser_type.ExpressionParserType = struct
+  (StatementParser : StatementParser_S)
+  (DeclParser : DeclarationParser_S)
+  (TypeParser : TypeParser_S) :
+  ExpressionParser_S = struct
+
+  open TokenKind
+  open Syntax
 
   include PrecedenceParser
-  include Full_fidelity_parser_helpers.WithParser(PrecedenceParser)
+  include ParserHelper.WithParser(PrecedenceParser)
 
   type binary_expression_prefix_kind =
     | Prefix_byref_assignment | Prefix_assignment | Prefix_none
 
   let parse_type_specifier parser =
-    let type_parser = TypeParser.make parser.lexer
-      parser.errors parser.context in
+    let type_parser = TypeParser.make
+      parser.env parser.lexer parser.errors parser.context in
     let (type_parser, node) = TypeParser.parse_type_specifier type_parser in
     let lexer = TypeParser.lexer type_parser in
     let errors = TypeParser.errors type_parser in
@@ -41,8 +72,8 @@ module WithStatementAndDeclAndTypeParser
     (parser, node)
 
   let parse_generic_type_arguments_opt parser =
-    let type_parser = TypeParser.make parser.lexer
-      parser.errors parser.context in
+    let type_parser = TypeParser.make
+      parser.env parser.lexer parser.errors parser.context in
     let (type_parser, node) =
       TypeParser.parse_generic_type_argument_list_opt type_parser
     in
@@ -51,9 +82,14 @@ module WithStatementAndDeclAndTypeParser
     let parser = { parser with lexer; errors } in
     (parser, node)
 
+  let is_valid_type_argument_list type_arguments parser0 parser1 =
+    kind type_arguments = SyntaxKind.TypeArguments
+    && List.for_all (fun c -> not (is_missing c)) (children type_arguments)
+    && parser0.errors = parser1.errors
+
   let parse_return_type parser =
-    let type_parser = TypeParser.make parser.lexer
-      parser.errors parser.context in
+    let type_parser = TypeParser.make
+      parser.env parser.lexer parser.errors parser.context in
     let (type_parser, node) = TypeParser.parse_return_type type_parser in
     let lexer = TypeParser.lexer type_parser in
     let errors = TypeParser.errors type_parser in
@@ -61,8 +97,8 @@ module WithStatementAndDeclAndTypeParser
     (parser, node)
 
   let parse_parameter_list_opt parser =
-    let decl_parser = DeclParser.make parser.lexer parser.errors
-      parser.context in
+    let decl_parser = DeclParser.make
+      parser.env parser.lexer parser.errors parser.context in
     let (decl_parser, right, params, left ) =
       DeclParser.parse_parameter_list_opt decl_parser in
     let lexer = DeclParser.lexer decl_parser in
@@ -71,8 +107,8 @@ module WithStatementAndDeclAndTypeParser
     (parser, right, params, left)
 
   let parse_compound_statement parser =
-    let statement_parser = StatementParser.make parser.lexer
-      parser.errors parser.context in
+    let statement_parser = StatementParser.make
+      parser.env parser.lexer parser.errors parser.context in
     let (statement_parser, node) =
       StatementParser.parse_compound_statement statement_parser in
     let lexer = StatementParser.lexer statement_parser in
@@ -89,17 +125,6 @@ module WithStatementAndDeclAndTypeParser
 
   and parse_expression_with_operator_precedence parser operator =
     with_operator_precedence parser operator parse_expression
-
-  (* try to parse an expression. If parser cannot make progress, return None *)
-  (* TODO: Not currently used; can we delete this? *)
-  and _parse_expression_optional parser ~reset_prec =
-    let module Lexer = PrecedenceParser.Lexer in
-    let offset = Lexer.start_offset (lexer parser) in
-    let (parser, expr) =
-      if reset_prec then with_reset_precedence parser parse_expression
-      else parse_expression parser in
-    let offset1 = Lexer.start_offset (lexer parser) in
-    if offset1 = offset then None else Some (parser, expr)
 
   and parses_without_error parser f =
     let old_errors = List.length (errors parser) in
@@ -433,17 +458,21 @@ module WithStatementAndDeclAndTypeParser
       | (_, DoubleQuotedStringLiteralTail) -> DoubleQuotedStringLiteralTail
       | (_, HeredocStringLiteralTail) -> HeredocStringLiteralTail
       | _ -> StringLiteralBody in
+      let s = SourceText.empty in
+      let o = 0 in
       let w = (Token.width head) + (Token.width token) in
       let l = Token.leading head in
       let t = Token.trailing token in
-      let result = Token.make k w l t in
+      (* TODO: Make a "position" type that is a tuple of source and offset. *)
+      (* TODO: Get the source and offset from the leading token *)
+      let result = Token.make k s o w l t in
       make_token result in
 
     let merge_head token acc =
       match acc with
       | h :: t ->
         begin
-        match MinimalSyntax.get_token h with
+        match Syntax.get_token h with
         | None ->
           let k = Token.kind token in
           let token = match k with
@@ -623,28 +652,30 @@ module WithStatementAndDeclAndTypeParser
   and parse_remaining_expression_or_specified_function_call parser term
       prefix_kind =
     let parser1, type_arguments = parse_generic_type_arguments_opt parser in
-    if kind type_arguments <> SyntaxKind.TypeArguments
-    || List.exists is_missing @@ children type_arguments
-    || parser1.errors <> parser.errors
-    then parse_remaining_binary_expression parser term prefix_kind
-    else
+    if is_valid_type_argument_list type_arguments parser parser1
+    then
       let (parser, left, args, right) = parse_expression_list_opt parser1 in
       let result = make_function_call_with_type_arguments_expression
         term type_arguments left args right
       in
       parse_remaining_expression parser result
+    else
+      parse_remaining_binary_expression parser term prefix_kind
 
   (* checks if t is a prefix unary expression where operator has expected kind
      and and operand matched predicate *)
   and check_prefix_unary_expression t expected_kind operand_predicate =
     match syntax t with
     | PrefixUnaryExpression {
-        prefix_unary_operator = {
-          syntax = Token t
-        ; _ };
+        prefix_unary_operator;
         prefix_unary_operand
-      } when Token.kind t = expected_kind ->
+      } ->
+      begin
+      match syntax prefix_unary_operator with
+      | Token t when Token.kind t = expected_kind ->
         operand_predicate prefix_unary_operand
+      | _ -> false
+      end
     | _ -> false
 
   (* Checks if given expression is a PHP variable.
@@ -652,11 +683,23 @@ module WithStatementAndDeclAndTypeParser
   https://github.com/php/php-langspec/blob/master/spec/10-expressions.md#grammar-variable
    A variable is an expression that can in principle be used as an lvalue *)
   and can_be_used_as_lvalue t =
-    is_variable_expression t ||
-    is_subscript_expression t ||
-    is_member_selection_expression t ||
-    is_scope_resolution_expression t ||
-    check_prefix_unary_expression t Dollar can_be_used_as_lvalue
+    match syntax t with
+    | VariableExpression _ | SubscriptExpression _
+    | MemberSelectionExpression _ | ScopeResolutionExpression _ -> true
+    | BracedExpression {
+        braced_expression_left_brace = lb;
+        braced_expression_right_brace = rb;
+        braced_expression_expression = e
+      } when is_missing lb && is_missing rb -> can_be_used_as_lvalue e
+    | PrefixUnaryExpression {
+        prefix_unary_operator = op;
+        prefix_unary_operand = e
+      } ->
+      begin match syntax op with
+      | Token t -> Token.kind t = Dollar && can_be_used_as_lvalue e
+      | _ -> false
+      end
+    | _ -> false
 
   (* checks if expression is a valid right hand side in by-ref assignment
    which is '&'PHP variable *)
@@ -758,6 +801,8 @@ module WithStatementAndDeclAndTypeParser
       parse_remaining_binary_expression parser term assignment_prefix_kind
     | Instanceof ->
       parse_instanceof_expression parser term
+    | Is ->
+      parse_is_expression parser term
     | QuestionMinusGreaterThan
     | MinusGreaterThan ->
       let (parser, result) = parse_member_selection_expression parser term in
@@ -798,15 +843,44 @@ module WithStatementAndDeclAndTypeParser
     let op = make_token token in
     (* TODO: We are putting the name / variable into the tree as a token
     leaf, rather than as a name or variable expression. Is that right? *)
-    let (parser, name) = if peek_token_kind parser = LeftBrace then
-      parse_braced_expression parser
-    else
-      require_xhp_class_name_or_name_or_variable parser in
+    let (parser, name) =
+      match peek_token_kind parser with
+      | LeftBrace ->
+        parse_braced_expression parser
+      | Variable when Env.php5_compat_mode (env parser) ->
+        parse_variable_in_php5_compat_mode parser
+      | _ ->
+        require_xhp_class_name_or_name_or_variable parser in
     let result = if (Token.kind token) = MinusGreaterThan then
       make_member_selection_expression term op name
     else
       make_safe_member_selection_expression term op name in
     (parser, result)
+
+  and parse_variable_in_php5_compat_mode parser =
+    (* PHP7 had a breaking change in parsing variables:
+       (https://wiki.php.net/rfc/uniform_variable_syntax).
+       Hack parser by default uses PHP7 compatible more which interprets
+       variables accesses left-to-right. It usually matches PHP5 behavior
+       except for cases with '$' operator, member accesses and scope resolution
+       operators:
+       $$a[1][2] -> ($$a)[1][2]
+       $a->$b[c] -> ($a->$b)[c]
+       X::$a[b]() -> (X::$a)[b]()
+
+       In order to preserve backward compatibility we can parse
+       variable/subscript expressions and wrap them in
+       synthetic braced expressions to enfore PHP5 semantics
+       $$a[1][2] -> ${$a[1][2]}
+       $a->$b[c] -> $a->{$b[c]}
+       X::$a[b]() -> X::{$a[b]}()
+       *)
+    let parser1, e =
+      let precedence = Operator.precedence Operator.IndexingOperator in
+      parse_expression (with_precedence parser precedence) in
+    let parser1 = with_precedence parser1 parser.precedence in
+    let brace = make_missing () in
+    parser1, make_braced_expression brace e brace
 
   and parse_subscript parser term =
     (* SPEC
@@ -841,6 +915,9 @@ module WithStatementAndDeclAndTypeParser
 
       TODO: This business of allowing ... does not appear in the spec. Add it.
 
+      TODO: Update grammar for inout params (call-convention-opt).
+      (This work is tracked by task T22582715.)
+
       ERROR RECOVERY: A ... expression can only appear at the end of a
       formal parameter list. However, we parse it everywhere without error,
       and detect the error in a later pass.
@@ -855,6 +932,7 @@ module WithStatementAndDeclAndTypeParser
       argument-expressions:
         expression
         ... expression
+        call-convention-opt  expression
         argument-expressions  ,  expression
     *)
     (* This function parses the parens as well. *)
@@ -864,11 +942,12 @@ module WithStatementAndDeclAndTypeParser
 
   and parse_decorated_expression_opt parser =
     match peek_token_kind parser with
-    | DotDotDot ->
-      let (parser, dots) = next_token parser in
+    | DotDotDot
+    | Inout ->
+      let (parser, decorator) = next_token parser in
       let (parser, expr) = parse_expression parser in
-      let dots = make_token dots in
-      parser, make_decorated_expression dots expr
+      let decorator = make_token decorator in
+      parser, make_decorated_expression decorator expr
     | _ -> parse_expression parser
 
   and parse_designator parser =
@@ -1033,6 +1112,7 @@ TODO: This will need to be fixed to allow situations where the qualified name
     | Implements
     | Include
     | Include_once
+    | Inout
     | Insteadof
     | Int
     | Interface
@@ -1117,6 +1197,7 @@ TODO: This will need to be fixed to allow situations where the qualified name
     | And
     | As
     | Instanceof
+    | Is
     | Or
     | Xor -> false
     (* Symbols that imply parenthesized expression *)
@@ -1280,6 +1361,16 @@ TODO: This will need to be fixed to allow situations where the qualified name
     let (parser, async) = optional_token parser Async in
     let (parser, coroutine) = optional_token parser Coroutine in
     let (parser, signature) = parse_lambda_signature parser in
+
+    (* TODO(T21285960): Remove this bug-port, stemming from T22184312 *)
+    if not (is_missing async) &&
+      trailing_width async = 0 &&
+      full_width coroutine = 0 &&
+      leading_width signature = 0
+    then
+      failwith "syntax error, unexpected T_LAMBDA_ARROW";
+    (* End of bug-port *)
+
     let (parser, arrow) = require_lambda_arrow parser in
     let (parser, body) = parse_lambda_body parser in
     let result = make_lambda_expression async coroutine signature arrow body in
@@ -1346,12 +1437,14 @@ TODO: This will need to be fixed to allow situations where the qualified name
   and parse_dollar_expression parser =
     let (parser, dollar) = assert_token parser Dollar in
     let (parser, operand) =
-      if peek_token_kind parser = TokenKind.LeftBrace
-      then parse_braced_expression parser
-      else
+      match peek_token_kind parser with
+      | LeftBrace ->
+        parse_braced_expression parser
+      | Variable when Env.php5_compat_mode (env parser) ->
+        parse_variable_in_php5_compat_mode parser
+      | _ ->
         parse_expression_with_operator_precedence parser
-          (Operator.prefix_unary_from_token TokenKind.Dollar)
-    in
+          (Operator.prefix_unary_from_token TokenKind.Dollar) in
     let result = make_prefix_unary_expression dollar operand in
     (parser, result)
 
@@ -1451,6 +1544,19 @@ TODO: This will need to be fixed to allow situations where the qualified name
     let (parser, right) = parse_remaining_binary_expression_helper
       parser right_term precedence in
     let result = make_instanceof_expression left op right in
+    parse_remaining_expression parser result
+
+  and parse_is_expression parser left =
+    (* SPEC:
+    is-expression:
+      is-subject  is  type-specifier
+
+    is-subject:
+      expression
+    *)
+    let (parser, op) = assert_token parser Is in
+    let (parser, right) = parse_type_specifier parser in
+    let result = make_is_expression left op right in
     parse_remaining_expression parser result
 
   and parse_remaining_binary_expression
@@ -1649,7 +1755,18 @@ TODO: This will need to be fixed to allow situations where the qualified name
     let name = make_token token in
     match peek_token_kind parser with
     | LeftBrace ->
+      let name = make_simple_type_specifier name in
       parse_collection_literal_expression parser name
+    | LessThan ->
+      let parser1, type_arguments =
+        parse_generic_type_arguments_opt parser in
+      if is_valid_type_argument_list type_arguments parser parser1
+         && peek_token_kind parser1 = LeftBrace
+      then
+        let name = make_generic_type_specifier name type_arguments in
+        parse_collection_literal_expression parser1 name
+      else
+        (parser, make_qualified_name_expression name)
     | _ ->
       (parser, make_qualified_name_expression name)
 
@@ -2061,9 +2178,12 @@ TODO: This will need to be fixed to allow situations where the qualified name
       let (parser, token, _) = next_xhp_element_token parser1 in
       if (Token.kind token) != Equal then
         let value =
-          if colon_bug
-          then make_token (Token.make TokenKind.XHPStringLiteral 0 [] [])
-          else make_missing ()
+          if colon_bug then
+            let s = Lexer.source (lexer parser) in
+            let o = 0 in (* TODO: Get the offset from the leading token *)
+            make_token (Token.make TokenKind.XHPStringLiteral s o 0 [] [])
+          else
+            make_missing ()
         in
         let node = make_xhp_attribute name (make_missing()) value in
         let parser = if colon_bug then parser1 else
@@ -2225,8 +2345,19 @@ TODO: This will need to be fixed to allow situations where the qualified name
       match Token.kind token with
       | Class -> parser1, make_token token
       | Dollar -> parse_dollar_expression parser
-      | _ -> require_name_or_variable_or_error parser SyntaxError.error1048
+      | LeftBrace -> parse_braced_expression parser
+      | Variable when Env.php5_compat_mode (env parser) ->
+        let parser1, e = parse_variable_in_php5_compat_mode parser in
+        (* for :: only do PHP5 transform for call expressions
+           in other cases fall back to the regular parsing logic *)
+        (* TODO: handle calls to generic methods *)
+        if peek_token_kind parser1 = LeftParen
+        then parser1, e
+        else require_name_or_variable_or_error parser SyntaxError.error1048
+      | _ ->
+        require_name_or_variable_or_error parser SyntaxError.error1048
     in
     let result = make_scope_resolution_expression qualifier op name in
     (parser, result)
 end
+end (* WithSyntax *)
